@@ -12,7 +12,7 @@ test: frontend
 fmt:
 	$(GOLANGCI_LINT) fmt -c .golangci.yml
 
-lint: frontend
+lint:
 	$(GOLANGCI_LINT) run -c .golangci.yml ./...
 	npm --prefix web run lint
 
