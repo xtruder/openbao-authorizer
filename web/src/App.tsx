@@ -368,17 +368,19 @@ function RequestDetail({ request, onBack, onApprove, approving }: {
           </div>
         )}
 
-        <div className="detail-section">
-          <div className="mb-3 flex items-center justify-between gap-3">
-            <h3 className="detail-label">Request payload</h3>
-            <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-400">JSON</span>
+        {!request.githubToken && (
+          <div className="detail-section">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <h3 className="detail-label">Request payload</h3>
+              <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-400">JSON</span>
+            </div>
+            {request.data === undefined ? (
+              <p className="rounded-sm border border-zinc-200 bg-zinc-50 px-3 py-3 text-sm text-zinc-500">Redacted by the server. Enable path-specific payload exposure only when the submitted fields are safe to display.</p>
+            ) : (
+              <pre className="json-block"><code>{JSON.stringify(request.data, null, 2) ?? 'null'}</code></pre>
+            )}
           </div>
-          {request.data === undefined ? (
-            <p className="rounded-sm border border-zinc-200 bg-zinc-50 px-3 py-3 text-sm text-zinc-500">Redacted by the server. Enable path-specific payload exposure only when the submitted fields are safe to display.</p>
-          ) : (
-            <pre className="json-block"><code>{JSON.stringify(request.data, null, 2) ?? 'null'}</code></pre>
-          )}
-        </div>
+        )}
 
         <div className="detail-section">
           <h3 className="detail-label">Required authorizations</h3>

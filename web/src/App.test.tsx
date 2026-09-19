@@ -182,6 +182,7 @@ describe('OpenBao Authorizer user workflows', () => {
     expect(screen.getByText(/"account": "xtruder"/)).toBeInTheDocument()
     expect(screen.getByText(/"openbao-authorizer"/)).toBeInTheDocument()
     expect(screen.getByText(/"administration": "write"/)).toBeInTheDocument()
+    expect(screen.queryByText(/Redacted by the server/)).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Approve request' }))
     const dialog = screen.getByRole('dialog', { name: 'Confirm approval' })
