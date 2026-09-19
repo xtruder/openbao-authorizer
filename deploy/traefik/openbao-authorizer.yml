@@ -1,0 +1,31 @@
+http:
+  routers:
+    openbao-authorizer:
+      rule: Host(`openbao-authorizer.x-truder.dev`)
+      entryPoints:
+        - websecure
+      service: openbao-authorizer-svc
+      tls:
+        certResolver: cloudflare
+      middlewares:
+        - openbao-authorizer-security
+        - openbao-authorizer-rate-limit
+
+  services:
+    openbao-authorizer-svc:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:18202"
+
+  middlewares:
+    openbao-authorizer-security:
+      headers:
+        stsSeconds: 31536000
+        forceSTSHeader: true
+        contentTypeNosniff: true
+        frameDeny: true
+        referrerPolicy: no-referrer
+    openbao-authorizer-rate-limit:
+      rateLimit:
+        average: 30
+        burst: 60

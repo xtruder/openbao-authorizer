@@ -1,0 +1,35 @@
+[Unit]
+Description=OpenBao Authorizer PWA
+After=network-online.target openbao-authorizer-openbao.service
+Wants=network-online.target
+Requires=openbao-authorizer-openbao.service
+BindsTo=openbao-authorizer-openbao.service
+PartOf=openbao-authorizer-openbao.service
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/openbao-authorizer/app.env
+Environment=DATABASE_PATH=%h/.local/state/openbao-authorizer/app.db
+ExecStart=%h/.local/lib/openbao-authorizer/openbao-authorizer
+Restart=on-failure
+RestartSec=3s
+UMask=0077
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state/openbao-authorizer
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+usage() {
+  printf 'usage: %s <project-name> -- <gh command and arguments>\n' "${0##*/}" >&2
+  printf 'example: %s control-group -- gh repo view offlinehq/openbao-authorizer\n' "${0##*/}" >&2
+  exit 2
+}
+
+[[ $# -ge 3 && "$2" == "--" ]] || usage
+project="$1"
+shift 2
+[[ "${project}" =~ ^[a-z0-9][a-z0-9._-]*$ ]] || {
+  printf 'project name must match [a-z0-9][a-z0-9._-]*\n' >&2
+  exit 2
+}
+
+config_dir="${OPENBAO_CONTROL_GROUP_CONFIG_DIR:-${HOME}/.config/openbao-authorizer}"
+token_file="${config_dir}/agent-token"
+[[ -r "${token_file}" ]] || {
+  printf 'agent token file is not readable: %s\n' "${token_file}" >&2
+  exit 1
+}
+bao="${OPENBAO_BIN:-${HOME}/.local/lib/openbao-authorizer/bao}"
+export BAO_ADDR="${BAO_ADDR:-http://127.0.0.1:18200}"
+
+request="$(BAO_TOKEN="$(<"${token_file}")" "${bao}" read -format=json "github/token/project-${project}")"
+wrapping_token="$(jq -er '.wrap_info.token' <<<"${request}")"
+unset request
+printf 'approval requested for project %s; waiting up to 15 minutes\n' "${project}" >&2
+
+error_file="$(mktemp)"
+trap 'rm -f "${error_file}"' EXIT
+for ((attempt = 1; attempt <= 180; attempt++)); do
+  if unwrapped="$("${bao}" unwrap -format=json "${wrapping_token}" 2>"${error_file}")"; then
+    github_token="$(jq -er '.data.token' <<<"${unwrapped}")"
+    unset unwrapped wrapping_token
+    printf 'approved; running command with an in-memory GitHub token\n' >&2
+    GH_TOKEN="${github_token}" "$@"
+    status=$?
+    unset github_token
+    exit "${status}"
+  fi
+  if (( attempt % 12 == 0 )); then
+    printf 'still waiting for approval...\n' >&2
+  fi
+  sleep 5
+done
+
+printf 'approval did not arrive within 15 minutes\n' >&2
+exit 1

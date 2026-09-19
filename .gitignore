@@ -1,0 +1,22 @@
+# Binaries and generated output
+/bin/
+/dist/
+web/dist/
+web/node_modules/
+
+# Runtime state
+*.db
+*.db-shm
+*.db-wal
+.env
+/local-approver-credentials.env
+/github-app-setup/
+
+# E2E downloads and logs
+.e2e/
+*.log
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
