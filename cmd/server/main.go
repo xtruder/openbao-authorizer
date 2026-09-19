@@ -39,11 +39,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
+
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	httpClient, err := openBaoHTTPClient(cfg.OpenBaoCAFile)
 	if err != nil {
 		return err
 	}
+
 	bao, err := openbao.New(openbao.Config{
 		Address:      cfg.OpenBaoAddress,
 		ScannerToken: cfg.OpenBaoScannerToken,
@@ -53,10 +55,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
+
 	database, err := store.Open(cfg.DatabasePath, cfg.EncryptionKey)
 	if err != nil {
 		return err
 	}
+
 	defer func() {
 		if closeErr := database.Close(); closeErr != nil {
 			logger.Error("close database", "error", closeErr)
@@ -68,10 +72,12 @@ func run() error {
 	if deleteExpiredErr := database.DeleteExpiredSessions(context.Background(), time.Now()); deleteExpiredErr != nil {
 		return deleteExpiredErr
 	}
+
 	storedSessions, err := database.Sessions(context.Background(), time.Now())
 	if err != nil {
 		return err
 	}
+
 	sessions.Restore(storedSessions)
 	pushService, err := push.New(database, push.Config{
 		PublicKey: cfg.VAPIDPublicKey, PrivateKey: cfg.VAPIDPrivateKey, Subject: cfg.VAPIDSubject,
@@ -81,6 +87,7 @@ func run() error {
 			if len(tokens) == 0 {
 				return false
 			}
+
 			// Deliver only when at least one active session still presents a
 			// valid, eligible OpenBao token. Transient lookup failures must not
 			// delete sessions or subscriptions.
@@ -90,27 +97,33 @@ func run() error {
 					if isAuthoritativeTokenError(lookupErr) {
 						continue
 					}
+
 					return true
 				}
+
 				if identity.EntityID == entityID && identity.HasPolicy(cfg.ApproverPolicy) {
 					return true
 				}
 			}
+
 			sessions.DeleteEntity(entityID)
 			for _, token := range tokens {
 				if deleteErr := database.DeleteSessionsByToken(ctx, token); deleteErr != nil {
 					logger.Error("delete ineligible durable sessions", "error", deleteErr)
 				}
 			}
+
 			if deleteErr := database.DeleteSubscriptionsByEntity(ctx, entityID); deleteErr != nil {
 				logger.Error("delete ineligible push subscriptions", "error", deleteErr)
 			}
+
 			return false
 		},
 	}, nil)
 	if err != nil {
 		return err
 	}
+
 	notifier := &notificationFanout{events: events, push: pushService}
 	accessorScanner := scanner.New(bao, database, notifier, cfg.ScanConcurrency)
 
@@ -166,6 +179,7 @@ func run() error {
 			return fmt.Errorf("shutdown server: %w", err)
 		}
 	}
+
 	return nil
 }
 
@@ -190,6 +204,7 @@ func scanLoop(ctx context.Context, logger *slog.Logger, accessorScanner *scanner
 		if err != nil && !errors.Is(err, context.Canceled) {
 			logger.Error("accessor scan failed", "error", err)
 		}
+
 		select {
 		case <-ticker.C:
 		case <-ctx.Done():
@@ -211,9 +226,11 @@ func renewSessionTokens(ctx context.Context, renewer tokenRenewer, tokens []stri
 				invalid = append(invalid, token)
 				continue
 			}
+
 			renewErrors = append(renewErrors, fmt.Errorf("renew OpenBao session token: %w", err))
 		}
 	}
+
 	return invalid, renewErrors
 }
 
@@ -235,6 +252,7 @@ func sessionRenewalLoop(ctx context.Context, logger *slog.Logger, sessions *http
 					logger.Error("delete invalid durable sessions", "error", err)
 				}
 			}
+
 			for _, err := range renewErrors {
 				logger.Warn("session token renewal failed; will retry", "error", err)
 			}
@@ -269,6 +287,7 @@ func isAuthoritativeTokenError(err error) bool {
 	if !errors.As(err, &httpErr) {
 		return false
 	}
+
 	return httpErr.StatusCode == http.StatusForbidden || httpErr.StatusCode == http.StatusBadRequest || httpErr.StatusCode == http.StatusNotFound
 }
 
@@ -277,16 +296,19 @@ func openBaoHTTPClient(caFile string) (*http.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load system CA pool: %w", err)
 	}
+
 	if caFile != "" {
 		// #nosec G304 -- the CA path is trusted operator configuration.
 		certificate, err := os.ReadFile(caFile)
 		if err != nil {
 			return nil, fmt.Errorf("read OpenBao CA: %w", err)
 		}
+
 		if !roots.AppendCertsFromPEM(certificate) {
 			return nil, errors.New("OPENBAO_CA_FILE did not contain a valid certificate")
 		}
 	}
+
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
 	return &http.Client{Transport: transport, Timeout: 10 * time.Second}, nil
@@ -296,6 +318,7 @@ func staticFileSystem(directory string) fs.FS {
 	if directory != "" {
 		return os.DirFS(directory)
 	}
+
 	return frontend.Dist
 }
 
@@ -311,29 +334,35 @@ func staticHandler(staticFiles fs.FS) http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+
 		requestedPath := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
 		if requestedPath == "" {
 			requestedPath = "index.html"
 		}
+
 		servedPath := requestedPath
 		if info, err := fs.Stat(staticFiles, servedPath); err != nil || info.IsDir() {
 			if err != nil && path.Ext(requestedPath) != "" {
 				http.NotFound(w, r)
 				return
 			}
+
 			servedPath = "index.html"
 		}
+
 		if extension := path.Ext(servedPath); extension != "" {
 			if mediaType := mime.TypeByExtension(extension); mediaType != "" {
 				w.Header().Set("Content-Type", mediaType)
 			}
 		}
+
 		request := r.Clone(r.Context())
 		if servedPath == "index.html" {
 			request.URL.Path = "/"
 		} else {
 			request.URL.Path = "/" + servedPath
 		}
+
 		files.ServeHTTP(w, request)
 	})
 }

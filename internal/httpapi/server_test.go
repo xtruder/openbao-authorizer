@@ -30,6 +30,7 @@ func (f *fakeBao) LoginUserpass(_ context.Context, username, password string) (o
 	if username != "bob" || password != "correct horse" {
 		return openbao.AuthToken{}, &openbao.HTTPError{StatusCode: http.StatusBadRequest}
 	}
+
 	return openbao.AuthToken{Token: "human-token", Renewable: true, TTL: 24 * time.Hour}, nil
 }
 
@@ -47,6 +48,7 @@ func (f *fakeBao) GitHubPermissionSet(_ context.Context, name string) (openbao.G
 	if name != "project-authorizer" {
 		return openbao.GitHubPermissionSet{}, &openbao.HTTPError{StatusCode: http.StatusNotFound}
 	}
+
 	return openbao.GitHubPermissionSet{
 		InstallationID: 87654321,
 		Account:        "example-org",
@@ -59,9 +61,11 @@ func (f *fakeBao) LookupSelf(_ context.Context, token string) (openbao.Identity,
 	if token != "human-token" {
 		return openbao.Identity{}, &openbao.HTTPError{StatusCode: http.StatusForbidden}
 	}
+
 	if f.identity.EntityID == "" {
 		return openbao.Identity{EntityID: "bob-id", DisplayName: "Bob", IdentityPolicies: []string{"approver"}, TTL: 300}, nil
 	}
+
 	return f.identity, nil
 }
 func (f *fakeBao) Authorize(_ context.Context, token, _ string) (bool, error) {
@@ -81,6 +85,7 @@ func TestEnrichesGitHubTokenRequestWithOriginalPermissionSet(t *testing.T) {
 	if request.GitHubToken == nil || !request.GitHubToken.Available {
 		t.Fatalf("GitHub context = %#v", request.GitHubToken)
 	}
+
 	if request.GitHubToken.PermissionSet != "project-authorizer" || request.GitHubToken.Account != "example-org" || request.GitHubToken.InstallationID != 87654321 || request.GitHubToken.AllRepositories || len(request.GitHubToken.Repositories) != 1 || request.GitHubToken.Repositories[0] != "example-repo" || request.GitHubToken.Permissions["administration"] != "write" {
 		t.Fatalf("GitHub context = %#v", request.GitHubToken)
 	}
@@ -117,6 +122,7 @@ func TestSessionsExposeActiveTokensAndDeleteOneToken(t *testing.T) {
 	if tokens := sessions.AllActiveTokens(now); len(tokens) != 1 || tokens[0] != "renew-me" {
 		t.Fatalf("active tokens = %#v", tokens)
 	}
+
 	sessions.DeleteToken("renew-me")
 	if tokens := sessions.AllActiveTokens(now); len(tokens) != 0 {
 		t.Fatalf("tokens after delete = %#v", tokens)
@@ -130,6 +136,7 @@ func TestSessionListAndApproveWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	t.Cleanup(func() {
 		if closeErr := database.Close(); closeErr != nil {
 			t.Error(closeErr)
@@ -151,6 +158,7 @@ func TestSessionListAndApproveWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	client := server.Client()
 	client.Jar = jar
 
@@ -158,15 +166,18 @@ func TestSessionListAndApproveWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	request.Header.Set("Content-Type", "application/json")
 	response, err := client.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("login status = %d", response.StatusCode)
 	}
+
 	loginCookies := response.Cookies()
 	var login struct {
 		CSRFToken string `json:"csrfToken"`
@@ -175,15 +186,19 @@ func TestSessionListAndApproveWorkflow(t *testing.T) {
 	if decodeErr != nil {
 		t.Fatal(decodeErr)
 	}
+
 	if login.CSRFToken == "" {
 		t.Fatal("missing CSRF token")
 	}
+
 	if bao.loginUsername != "bob" || bao.loginPassword != "correct horse" {
 		t.Fatalf("credentials = %q/%q", bao.loginUsername, bao.loginPassword)
 	}
+
 	if len(loginCookies) != 1 || loginCookies[0].MaxAge < int((29*24*time.Hour).Seconds()) {
 		t.Fatalf("persistent cookies = %#v", loginCookies)
 	}
+
 	storedSessions, err := database.Sessions(t.Context(), time.Now())
 	if err != nil || len(storedSessions) != 1 || storedSessions[0].Token != "human-token" {
 		t.Fatalf("stored sessions = %#v, %v", storedSessions, err)
@@ -193,16 +208,19 @@ func TestSessionListAndApproveWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	response, err = client.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() { _ = response.Body.Close() }()
 	var requests []store.Request
 	decodeErr = json.NewDecoder(response.Body).Decode(&requests)
 	if decodeErr != nil {
 		t.Fatal(decodeErr)
 	}
+
 	if len(requests) != 1 {
 		t.Fatalf("requests = %#v", requests)
 	}
@@ -212,11 +230,13 @@ func TestSessionListAndApproveWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	request.Header.Set("Content-Type", "application/json")
 	response, err = client.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusForbidden {
 		t.Fatalf("missing CSRF status = %d", response.StatusCode)
@@ -226,16 +246,19 @@ func TestSessionListAndApproveWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-CSRF-Token", login.CSRFToken)
 	response, err = client.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("approve status = %d", response.StatusCode)
 	}
+
 	if bao.approvedToken != "human-token" {
 		t.Fatalf("approved with token %q", bao.approvedToken)
 	}
@@ -244,16 +267,19 @@ func TestSessionListAndApproveWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-CSRF-Token", login.CSRFToken)
 	response, err = client.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusNoContent || bao.revokedToken != "human-token" {
 		t.Fatalf("logout status/token = %d/%q", response.StatusCode, bao.revokedToken)
 	}
+
 	storedSessions, err = database.Sessions(t.Context(), time.Now())
 	if err != nil || len(storedSessions) != 0 {
 		t.Fatalf("stored sessions after logout = %#v, %v", storedSessions, err)
@@ -267,6 +293,7 @@ func TestRequestsRequireAuthentication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	t.Cleanup(func() {
 		if closeErr := database.Close(); closeErr != nil {
 			t.Error(closeErr)
@@ -279,10 +306,12 @@ func TestRequestsRequireAuthentication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	response, err := server.Client().Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d", response.StatusCode)
@@ -296,6 +325,7 @@ func TestLoginRequiresJSONAndApproverPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	t.Cleanup(func() { _ = database.Close() })
 	bao := &fakeBao{identity: openbao.Identity{EntityID: "alice-id", IdentityPolicies: []string{"requester"}, TTL: 300}}
 	server := httptest.NewServer(New(Options{OpenBao: bao, Store: database, Events: NewEventBus(), ApproverPolicy: "approver", InsecureCookies: true}))
@@ -305,10 +335,12 @@ func TestLoginRequiresJSONAndApproverPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	response, err := server.Client().Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusUnsupportedMediaType {
 		t.Fatalf("missing JSON content type status = %d", response.StatusCode)
@@ -318,15 +350,18 @@ func TestLoginRequiresJSONAndApproverPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	request.Header.Set("Content-Type", "application/json")
 	response, err = server.Client().Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusForbidden {
 		t.Fatalf("non-approver status = %d", response.StatusCode)
 	}
+
 	if bao.revokedToken != "human-token" {
 		t.Fatalf("rejected login token was not revoked: %q", bao.revokedToken)
 	}
@@ -339,6 +374,7 @@ func TestSessionRevalidatesPolicyAndRedactsPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	t.Cleanup(func() { _ = database.Close() })
 	_, err = database.Upsert(t.Context(), "accessor", openbao.ControlGroupRequest{
 		Operation: "update", Path: "secret/data/payroll", Data: json.RawMessage(`{"password":"must-not-leak"}`),
@@ -347,6 +383,7 @@ func TestSessionRevalidatesPolicyAndRedactsPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	bao := &fakeBao{identity: openbao.Identity{EntityID: "bob-id", IdentityPolicies: []string{"approver"}, TTL: 300}}
 	server := httptest.NewServer(New(Options{OpenBao: bao, Store: database, Events: NewEventBus(), ApproverPolicy: "approver", InsecureCookies: true}))
 	defer server.Close()
@@ -354,6 +391,7 @@ func TestSessionRevalidatesPolicyAndRedactsPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	client := server.Client()
 	client.Jar = jar
 
@@ -361,11 +399,13 @@ func TestSessionRevalidatesPolicyAndRedactsPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	login.Header.Set("Content-Type", "application/json")
 	response, err := client.Do(login)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("login status = %d", response.StatusCode)
@@ -375,15 +415,18 @@ func TestSessionRevalidatesPolicyAndRedactsPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	response, err = client.Do(list)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	var requests []store.Request
 	decodeErr := json.NewDecoder(response.Body).Decode(&requests)
 	if decodeErr != nil {
 		t.Fatal(decodeErr)
 	}
+
 	_ = response.Body.Close()
 	if len(requests) != 1 || len(requests[0].Data) != 0 {
 		t.Fatalf("payload was not redacted: %#v", requests)
@@ -394,10 +437,12 @@ func TestSessionRevalidatesPolicyAndRedactsPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	response, err = client.Do(list)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusForbidden {
 		t.Fatalf("revoked approver policy status = %d", response.StatusCode)

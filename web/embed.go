@@ -19,5 +19,6 @@ func distributionFS() fs.FS {
 	if err != nil {
 		panic("open embedded frontend distribution: " + err.Error())
 	}
+
 	return dist
 }

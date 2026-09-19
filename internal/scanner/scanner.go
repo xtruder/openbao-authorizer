@@ -39,6 +39,7 @@ func New(bao OpenBao, sink Sink, notifier Notifier, concurrency int) *Scanner {
 	if concurrency < 1 {
 		concurrency = 1
 	}
+
 	return &Scanner{bao: bao, sink: sink, notifier: notifier, concurrency: concurrency}
 }
 
@@ -61,12 +62,14 @@ func (s *Scanner) Scan(ctx context.Context) error {
 			if openbao.IsNotControlGroup(requestErr) {
 				continue
 			}
+
 			if requestErr != nil {
 				errorMu.Lock()
 				scanErrors = append(scanErrors, fmt.Errorf("inspect accessor: %w", requestErr))
 				errorMu.Unlock()
 				continue
 			}
+
 			isNew, sinkErr := s.sink.Upsert(ctx, accessor, request)
 			if sinkErr != nil {
 				errorMu.Lock()
@@ -74,6 +77,7 @@ func (s *Scanner) Scan(ctx context.Context) error {
 				errorMu.Unlock()
 				continue
 			}
+
 			if isNew && s.notifier != nil {
 				if notifyErr := s.notifier.NewRequest(ctx, accessor, request); notifyErr != nil {
 					errorMu.Lock()
@@ -88,6 +92,7 @@ func (s *Scanner) Scan(ctx context.Context) error {
 	for range s.concurrency {
 		go worker()
 	}
+
 	for _, accessor := range accessors {
 		select {
 		case jobs <- accessor:
@@ -97,6 +102,7 @@ func (s *Scanner) Scan(ctx context.Context) error {
 			return context.Cause(ctx)
 		}
 	}
+
 	close(jobs)
 	wg.Wait()
 

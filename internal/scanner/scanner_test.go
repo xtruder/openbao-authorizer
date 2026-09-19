@@ -21,6 +21,7 @@ func (f *fakeBao) ControlGroupRequest(_ context.Context, accessor string) (openb
 	if !ok {
 		return openbao.ControlGroupRequest{}, openbao.ErrNotControlGroup
 	}
+
 	return request, nil
 }
 
@@ -35,6 +36,7 @@ func (s *memorySink) Upsert(_ context.Context, accessor string, request openbao.
 	if s.records == nil {
 		s.records = make(map[string]openbao.ControlGroupRequest)
 	}
+
 	_, exists := s.records[accessor]
 	s.records[accessor] = request
 	return !exists, nil
@@ -62,15 +64,18 @@ func TestScanContinuesPastOrdinaryAccessorsAndNotifiesOnce(t *testing.T) {
 	notifier := &collectingNotifier{}
 	scanner := New(bao, sink, notifier, 2)
 
-	if err := scanner.Scan(context.Background()); err != nil {
+	if err := scanner.Scan(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if err := scanner.Scan(context.Background()); err != nil {
+
+	if err := scanner.Scan(t.Context()); err != nil {
 		t.Fatal(err)
 	}
+
 	if got := len(notifier.accessors); got != 1 {
 		t.Fatalf("notifications = %d, want 1", got)
 	}
+
 	if _, ok := sink.records["pending"]; !ok {
 		t.Fatal("pending request was not stored")
 	}
@@ -86,7 +91,7 @@ func TestScanReturnsListFailure(t *testing.T) {
 	t.Parallel()
 
 	scanner := New(&failingBao{}, &memorySink{}, &collectingNotifier{}, 1)
-	if err := scanner.Scan(context.Background()); err == nil {
+	if err := scanner.Scan(t.Context()); err == nil {
 		t.Fatal("expected error")
 	}
 }

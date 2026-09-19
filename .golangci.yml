@@ -1,12 +1,12 @@
+version: "2"
+
 run:
   timeout: 5m
   build-tags:
     - e2e
 
-version: "2"
-
 linters:
-  default: standard
+  default: none
   enable:
     - bodyclose
     - copyloopvar
@@ -23,9 +23,13 @@ linters:
     - prealloc
     - revive
     - staticcheck
+    - thelper
+    - tparallel
     - unconvert
     - unused
+    - usetesting
     - usestdlibvars
+    - wsl_v5
   settings:
     govet:
       enable-all: true
@@ -34,6 +38,16 @@ linters:
     gosec:
       excludes:
         - G404
+    usetesting:
+      context-background: true
+      context-todo: true
+      os-temp-dir: true
+    wsl_v5:
+      default: none
+      enable:
+        - after-block
+        - leading-whitespace
+        - trailing-whitespace
   exclusions:
     generated: lax
     rules:

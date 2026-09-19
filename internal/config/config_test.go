@@ -12,6 +12,7 @@ func TestReadSecretRejectsAmbiguousSources(t *testing.T) {
 	if err := os.WriteFile(path, []byte("file-token"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	t.Setenv("TEST_TOKEN", "env-token")
 	t.Setenv("TEST_TOKEN_FILE", path)
 	if _, err := readSecret("TEST_TOKEN", "TEST_TOKEN_FILE"); err == nil {
@@ -34,6 +35,7 @@ func TestLoadUsesEmbeddedFrontendUnlessOverrideIsExplicit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if configuration.StaticDirectory != "" {
 		t.Fatalf("StaticDirectory = %q, want embedded frontend", configuration.StaticDirectory)
 	}
@@ -43,6 +45,7 @@ func TestLoadUsesEmbeddedFrontendUnlessOverrideIsExplicit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if configuration.StaticDirectory != "/tmp/frontend-dev" {
 		t.Fatalf("StaticDirectory = %q, want explicit override", configuration.StaticDirectory)
 	}

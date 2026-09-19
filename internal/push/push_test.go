@@ -48,12 +48,15 @@ func TestNotificationIsGenericAndRemovesGoneSubscription(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.NewRequest(context.Background(), "must-not-leak", openbao.ControlGroupRequest{Path: "secret/data/payroll", Entity: openbao.Entity{Name: "Alice"}}); err != nil {
+
+	if err := service.NewRequest(t.Context(), "must-not-leak", openbao.ControlGroupRequest{Path: "secret/data/payroll", Entity: openbao.Entity{Name: "Alice"}}); err != nil {
 		t.Fatal(err)
 	}
+
 	if strings.Contains(payload, "must-not-leak") || strings.Contains(payload, "payroll") || strings.Contains(payload, "Alice") {
 		t.Fatalf("sensitive push payload: %s", payload)
 	}
+
 	if len(storage.deleted) != 1 || storage.deleted[0] != "https://push.example/sub" {
 		t.Fatalf("deleted = %#v", storage.deleted)
 	}
@@ -75,9 +78,11 @@ func TestNotificationSkipsInactiveIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.NewRequest(context.Background(), "accessor", openbao.ControlGroupRequest{}); err != nil {
+
+	if err := service.NewRequest(t.Context(), "accessor", openbao.ControlGroupRequest{}); err != nil {
 		t.Fatal(err)
 	}
+
 	if calls != 0 {
 		t.Fatalf("push calls = %d, want 0", calls)
 	}
@@ -97,13 +102,16 @@ func TestEndpointValidationRejectsSSRFAndUnlistedHosts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.ValidateEndpoint(context.Background(), "https://push.example/sub"); err == nil {
+
+	if err := service.ValidateEndpoint(t.Context(), "https://push.example/sub"); err == nil {
 		t.Fatal("expected private endpoint rejection")
 	}
-	if err := service.ValidateEndpoint(context.Background(), "https://other.example/sub"); err == nil {
+
+	if err := service.ValidateEndpoint(t.Context(), "https://other.example/sub"); err == nil {
 		t.Fatal("expected allowlist rejection")
 	}
-	if err := service.ValidateEndpoint(context.Background(), "https://127.0.0.1/sub"); err == nil {
+
+	if err := service.ValidateEndpoint(t.Context(), "https://127.0.0.1/sub"); err == nil {
 		t.Fatal("expected literal loopback rejection")
 	}
 }

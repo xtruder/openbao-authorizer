@@ -1,7 +1,6 @@
 package openbao
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -18,12 +17,14 @@ func TestClientListsAndInspectsControlGroupRequests(t *testing.T) {
 		if got := r.Header.Get("X-Vault-Token"); got != "scanner" {
 			t.Fatalf("token header = %q", got)
 		}
+
 		switch r.URL.Path {
 		case "/v1/auth/token/accessors":
 			sawList = true
 			if r.Method != "LIST" {
 				t.Fatalf("method = %s", r.Method)
 			}
+
 			_, _ = w.Write([]byte(`{"data":{"keys":["ordinary","pending"]}}`))
 		case "/v1/sys/control-group/request":
 			sawRequest = true
@@ -39,21 +40,24 @@ func TestClientListsAndInspectsControlGroupRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	accessors, err := client.ListAccessors(context.Background())
+	accessors, err := client.ListAccessors(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(accessors) != 2 || accessors[1] != "pending" {
 		t.Fatalf("accessors = %#v", accessors)
 	}
 
-	request, err := client.ControlGroupRequest(context.Background(), "pending")
+	request, err := client.ControlGroupRequest(t.Context(), "pending")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if request.Path != "secret/data/payroll" || request.Entity.ID != "entity-1" || request.Entity.Name != "Alice" {
 		t.Fatalf("request = %#v", request)
 	}
+
 	if !sawList || !sawRequest {
 		t.Fatalf("sawList=%v sawRequest=%v", sawList, sawRequest)
 	}
@@ -72,7 +76,8 @@ func TestClientClassifiesNonControlGroupAccessor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = client.ControlGroupRequest(context.Background(), "ordinary")
+
+	_, err = client.ControlGroupRequest(t.Context(), "ordinary")
 	if !IsNotControlGroup(err) {
 		t.Fatalf("error = %v", err)
 	}
@@ -85,16 +90,20 @@ func TestLoginUserpassExchangesPasswordForRenewableToken(t *testing.T) {
 		if r.URL.Path != "/v1/auth/userpass/login/bob" || r.Method != http.MethodPost {
 			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
 		}
+
 		if got := r.Header.Get("X-Vault-Token"); got != "" {
 			t.Fatalf("unexpected token header %q", got)
 		}
+
 		var payload map[string]string
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
 		}
+
 		if payload["password"] != "correct horse" {
 			t.Fatalf("password = %q", payload["password"])
 		}
+
 		_, _ = w.Write([]byte(`{"auth":{"client_token":"human-token","renewable":true,"lease_duration":86400}}`))
 	}))
 	defer server.Close()
@@ -103,10 +112,12 @@ func TestLoginUserpassExchangesPasswordForRenewableToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	auth, err := client.LoginUserpass(t.Context(), "bob", "correct horse")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if auth.Token != "human-token" || !auth.Renewable || auth.TTL != 24*time.Hour {
 		t.Fatalf("auth = %#v", auth)
 	}
@@ -120,6 +131,7 @@ func TestRenewAndRevokeSelfUseHumanToken(t *testing.T) {
 		if got := r.Header.Get("X-Vault-Token"); got != "human-token" {
 			t.Fatalf("token header = %q", got)
 		}
+
 		calls = append(calls, r.URL.Path)
 		switch r.URL.Path {
 		case "/v1/auth/token/renew-self":
@@ -136,12 +148,15 @@ func TestRenewAndRevokeSelfUseHumanToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := client.RenewSelf(t.Context(), "human-token"); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := client.RevokeSelf(t.Context(), "human-token"); err != nil {
 		t.Fatal(err)
 	}
+
 	if !slices.Equal(calls, []string{"/v1/auth/token/renew-self", "/v1/auth/token/revoke-self"}) {
 		t.Fatalf("calls = %#v", calls)
 	}
@@ -154,9 +169,11 @@ func TestGitHubPermissionSetUsesScannerToken(t *testing.T) {
 		if r.URL.Path != "/v1/github/permissionset/project-authorizer" || r.Method != http.MethodGet {
 			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
 		}
+
 		if got := r.Header.Get("X-Vault-Token"); got != "scanner" {
 			t.Fatalf("token header = %q", got)
 		}
+
 		_, _ = w.Write([]byte(`{"data":{"installation_id":87654321,"org_name":"example-org","repositories":["example-repo"],"permissions":{"administration":"write","contents":"write"}}}`))
 	}))
 	defer server.Close()
@@ -165,10 +182,12 @@ func TestGitHubPermissionSetUsesScannerToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	permissionSet, err := client.GitHubPermissionSet(t.Context(), "project-authorizer")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if permissionSet.InstallationID != 87654321 || permissionSet.Account != "example-org" || !slices.Equal(permissionSet.Repositories, []string{"example-repo"}) || permissionSet.Permissions["contents"] != "write" {
 		t.Fatalf("permission set = %#v", permissionSet)
 	}
@@ -181,6 +200,7 @@ func TestAuthorizeUsesHumanToken(t *testing.T) {
 		if got := r.Header.Get("X-Vault-Token"); got != "human-token" {
 			t.Fatalf("token header = %q", got)
 		}
+
 		_, _ = w.Write([]byte(`{"data":{"approved":true}}`))
 	}))
 	defer server.Close()
@@ -189,10 +209,12 @@ func TestAuthorizeUsesHumanToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	approved, err := client.Authorize(context.Background(), "human-token", "pending")
+
+	approved, err := client.Authorize(t.Context(), "human-token", "pending")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !approved {
 		t.Fatal("expected approved")
 	}

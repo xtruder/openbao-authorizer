@@ -1,6 +1,6 @@
 //go:build e2e && linux
 
-package openbao
+package e2e
 
 import (
 	"bytes"
@@ -14,7 +14,6 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -36,46 +35,48 @@ func TestOpenBaoControlGroupWorkflow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("real-process OpenBao E2E is disabled by -short")
 	}
+
 	repositoryRoot := testRepositoryRoot(t)
 	cacheRoot := filepath.Join(repositoryRoot, ".e2e", "openbao")
 	if err := os.MkdirAll(cacheRoot, 0o755); err != nil {
 		t.Fatalf("create E2E cache: %v", err)
 	}
-	runtimeDirectory, err := os.MkdirTemp(cacheRoot, "runtime.")
+
+	runtimeDirectory, err := os.MkdirTemp(cacheRoot, "runtime.") //nolint:usetesting // Failed E2E runs retain artifacts for diagnosis.
 	if err != nil {
 		t.Fatalf("create E2E runtime directory: %v", err)
 	}
+
 	t.Cleanup(func() {
 		if t.Failed() || os.Getenv("OPENBAO_E2E_KEEP_RUNTIME") == "1" {
 			t.Logf("runtime artifacts retained at %s", runtimeDirectory)
 			return
 		}
+
 		if removeErr := os.RemoveAll(runtimeDirectory); removeErr != nil {
 			t.Errorf("remove E2E runtime directory: %v", removeErr)
 		}
 	})
+	isolatedHome := filepath.Join(runtimeDirectory, "home")
+	temporaryDirectory := filepath.Join(runtimeDirectory, "tmp")
+	for _, directory := range []string{isolatedHome, temporaryDirectory, filepath.Join(isolatedHome, ".config")} {
+		if mkdirErr := os.MkdirAll(directory, 0o700); mkdirErr != nil {
+			t.Fatalf("create isolated process directory: %v", mkdirErr)
+		}
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Minute)
 	defer cancel()
-	logStep := func(format string, arguments ...any) { t.Logf(format, arguments...) }
-	baoBinary, err := ensureOpenBao(ctx, cacheRoot, logStep)
-	if err != nil {
-		t.Fatalf("prepare OpenBao: %v", err)
-	}
-	t.Logf("using OpenBao v%s", openBaoVersion)
+	baoBinary := requiredExecutable(t, "OPENBAO_E2E_BAO_BINARY")
 
-	appBinary := filepath.Join(runtimeDirectory, "openbao-authorizer-server")
-	build := exec.CommandContext(ctx, "go", "build", "-o", appBinary, "./cmd/server")
-	build.Dir = repositoryRoot
-	if output, buildErr := build.CombinedOutput(); buildErr != nil {
-		t.Fatalf("build application: %v\n%s", buildErr, output)
-	}
+	appBinary := requiredExecutable(t, "OPENBAO_E2E_APP_BINARY")
+	processPaths := isolatedProcessPaths{home: isolatedHome, temporary: temporaryDirectory}
 
 	baoLog := filepath.Join(runtimeDirectory, "openbao.log")
 	baoProcess, err := startManagedProcess(
 		baoLog,
 		repositoryRoot,
-		os.Environ(),
+		processPaths.environment(),
 		baoBinary,
 		"server",
 		"-dev",
@@ -86,6 +87,7 @@ func TestOpenBaoControlGroupWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start OpenBao: %v", err)
 	}
+
 	registerProcessCleanup(t, "OpenBao", baoProcess)
 	listenerContext, listenerCancel := context.WithTimeout(ctx, 20*time.Second)
 	baoPort, err := waitForOwnedHTTPListener(listenerContext, baoProcess, "/v1/sys/health")
@@ -93,6 +95,7 @@ func TestOpenBaoControlGroupWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wait for OpenBao listener: %v\n%s", err, readProcessLog(baoLog))
 	}
+
 	bao := &liveAPI{
 		baseURL: fmt.Sprintf("http://127.0.0.1:%d/v1", baoPort),
 		client:  &http.Client{Timeout: 15 * time.Second},
@@ -105,6 +108,16 @@ func TestOpenBaoControlGroupWorkflow(t *testing.T) {
 	mustCall(t, ctx, bao, rootToken, http.MethodPost, "sys/mounts/kv", map[string]any{
 		"type": "kv", "options": map[string]string{"version": "2"},
 	}, http.StatusOK, http.StatusNoContent)
+	mountsResponse := mustCall(t, ctx, bao, rootToken, http.MethodGet, "sys/mounts", nil, http.StatusOK)
+	var mountsEnvelope struct {
+		Data map[string]json.RawMessage `json:"data"`
+	}
+	decodeResponse(t, mountsResponse, &mountsEnvelope)
+	if _, exists := mountsEnvelope.Data["github/"]; exists {
+		t.Fatal("E2E OpenBao unexpectedly has the GitHub plugin mounted")
+	}
+
+	t.Log("OpenBao E2E uses built-in mounts only; no GitHub plugin is mounted")
 	mustCall(t, ctx, bao, rootToken, http.MethodPost, "sys/auth/userpass", map[string]string{"type": "userpass"}, http.StatusOK, http.StatusNoContent)
 	writePolicy(ctx, t, bao, repositoryRoot, requesterPolicy, "requester.hcl")
 	writePolicy(ctx, t, bao, repositoryRoot, approverPolicy, "approver.hcl")
@@ -121,6 +134,7 @@ func TestOpenBaoControlGroupWorkflow(t *testing.T) {
 	if userpassAccessor == "" {
 		t.Fatal("userpass mount response omitted its accessor")
 	}
+
 	mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/userpass/users/alice", map[string]string{"password": alicePassword}, http.StatusOK, http.StatusNoContent)
 	mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/userpass/users/bob", map[string]string{"password": bobPassword, "token_period": "24h"}, http.StatusOK, http.StatusNoContent)
 
@@ -145,6 +159,7 @@ func TestOpenBaoControlGroupWorkflow(t *testing.T) {
 	if scannerToken == "" {
 		t.Fatal("scanner token creation returned an empty token")
 	}
+
 	lookup := mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/token/lookup", map[string]string{"token": scannerToken}, http.StatusOK)
 	var lookupEnvelope struct {
 		Data struct {
@@ -170,6 +185,7 @@ func TestOpenBaoControlGroupWorkflow(t *testing.T) {
 	if wrapping.WrapInfo.Token == "" || wrapping.WrapInfo.Accessor == "" {
 		t.Fatal("protected write did not return a wrapping token and accessor")
 	}
+
 	mustCall(t, ctx, bao, rootToken, http.MethodGet, "kv/data/payroll", nil, http.StatusNotFound)
 
 	accessorList := mustCall(t, ctx, bao, scannerToken, "LIST", "auth/token/accessors", nil, http.StatusOK)
@@ -182,19 +198,23 @@ func TestOpenBaoControlGroupWorkflow(t *testing.T) {
 	if !slices.Contains(accessors.Data.Keys, wrapping.WrapInfo.Accessor) {
 		t.Fatal("scanner LIST did not include the control-group wrapping accessor")
 	}
+
 	accessorPayload := map[string]string{"accessor": wrapping.WrapInfo.Accessor}
 	pending := inspectControlGroup(ctx, t, bao, scannerToken, accessorPayload)
 	if pending.Approved || pending.RequestPath != "kv/data/payroll" || pending.RequestOperation != "create" || pending.RequestEntity.Name != "Alice" {
 		t.Fatalf("unexpected pending request: %+v", pending)
 	}
+
 	if pending.RequestData.Data.Marker != marker {
 		t.Fatalf("scanner request marker = %q, want %q", pending.RequestData.Data.Marker, marker)
 	}
+
 	mustCall(t, ctx, bao, scannerToken, http.MethodPost, "sys/control-group/authorize", accessorPayload, http.StatusForbidden)
 	unchanged := inspectControlGroup(ctx, t, bao, scannerToken, accessorPayload)
 	if unchanged.Approved || len(unchanged.Authorizations) != 0 {
 		t.Fatalf("denied scanner authorization changed state: %+v", unchanged)
 	}
+
 	t.Log("least-privilege scanner listed and inspected the request but was denied authorization")
 
 	appLog := filepath.Join(runtimeDirectory, "app.log")
@@ -202,25 +222,28 @@ func TestOpenBaoControlGroupWorkflow(t *testing.T) {
 	if _, randomErr := rand.Read(encryptionKey); randomErr != nil {
 		t.Fatalf("generate application encryption key: %v", randomErr)
 	}
+
 	staticDirectory := filepath.Join(runtimeDirectory, "static")
 	if mkdirErr := os.Mkdir(staticDirectory, 0o755); mkdirErr != nil {
 		t.Fatalf("create static directory: %v", mkdirErr)
 	}
-	appEnvironment := environmentWith(os.Environ(), map[string]string{
-		"APP_ENCRYPTION_KEY":    base64.StdEncoding.EncodeToString(encryptionKey),
-		"APPROVER_POLICY":       approverPolicy,
-		"DATABASE_PATH":         filepath.Join(runtimeDirectory, "app.db"),
-		"INSECURE_COOKIES":      "true",
-		"LISTEN_ADDRESS":        "127.0.0.1:0",
-		"OPENBAO_ADDRESS":       strings.TrimSuffix(bao.baseURL, "/v1"),
-		"OPENBAO_SCANNER_TOKEN": scannerToken,
-		"SCAN_INTERVAL":         "1s",
-		"STATIC_DIRECTORY":      staticDirectory,
-	}, []string{"OPENBAO_SCANNER_TOKEN_FILE", "PUBLIC_ORIGIN"})
+
+	appEnvironment := processPaths.environment(
+		"APP_ENCRYPTION_KEY="+base64.StdEncoding.EncodeToString(encryptionKey),
+		"APPROVER_POLICY="+approverPolicy,
+		"DATABASE_PATH="+filepath.Join(runtimeDirectory, "app.db"),
+		"INSECURE_COOKIES=true",
+		"LISTEN_ADDRESS=127.0.0.1:0",
+		"OPENBAO_ADDRESS="+strings.TrimSuffix(bao.baseURL, "/v1"),
+		"OPENBAO_SCANNER_TOKEN="+scannerToken,
+		"SCAN_INTERVAL=1s",
+		"STATIC_DIRECTORY="+staticDirectory,
+	)
 	appProcess, err := startManagedProcess(appLog, repositoryRoot, appEnvironment, appBinary)
 	if err != nil {
 		t.Fatalf("start application: %v", err)
 	}
+
 	registerProcessCleanup(t, "application", appProcess)
 	appListenerContext, appListenerCancel := context.WithTimeout(ctx, 30*time.Second)
 	appPort, err := waitForOwnedListener(appListenerContext, appProcess, 0)
@@ -228,10 +251,12 @@ func TestOpenBaoControlGroupWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wait for application listener: %v\n%s", err, readProcessLog(appLog))
 	}
+
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		t.Fatalf("create cookie jar: %v", err)
 	}
+
 	application := &liveAPI{
 		baseURL: fmt.Sprintf("http://127.0.0.1:%d", appPort),
 		client:  &http.Client{Timeout: 15 * time.Second, Jar: jar},
@@ -261,12 +286,14 @@ func TestOpenBaoControlGroupWorkflow(t *testing.T) {
 	if !approvedApplicationRequest.Approved {
 		t.Fatal("application approval response was not approved")
 	}
+
 	t.Log("application discovered the request, logged in Bob, and approved through its CSRF-protected API")
 
 	approved := inspectControlGroup(ctx, t, bao, scannerToken, accessorPayload)
 	if !approved.Approved || len(approved.Authorizations) != 1 {
 		t.Fatalf("expected one human authorization, got %+v", approved)
 	}
+
 	mustCall(t, ctx, bao, rootToken, http.MethodGet, "kv/data/payroll", nil, http.StatusNotFound)
 	mustCall(t, ctx, bao, wrapping.WrapInfo.Token, http.MethodPost, "sys/wrapping/unwrap", map[string]any{}, http.StatusOK, http.StatusNoContent)
 
@@ -283,7 +310,23 @@ func TestOpenBaoControlGroupWorkflow(t *testing.T) {
 	if secret.Data.Data.Status != "approved" || secret.Data.Data.Marker != marker {
 		t.Fatalf("resulting secret = %+v, want approved marker %q", secret.Data.Data, marker)
 	}
-	t.Logf("real OpenBao %s control-group workflow passed", openBaoVersion)
+
+	t.Log("real OpenBao control-group workflow passed")
+}
+
+type isolatedProcessPaths struct {
+	home      string
+	temporary string
+}
+
+func (p isolatedProcessPaths) environment(values ...string) []string {
+	environment := make([]string, 0, 3+len(values))
+	environment = append(environment,
+		"HOME="+p.home,
+		"TMPDIR="+p.temporary,
+		"XDG_CONFIG_HOME="+filepath.Join(p.home, ".config"),
+	)
+	return append(environment, values...)
 }
 
 type liveAPI struct {
@@ -324,11 +367,33 @@ func testRepositoryRoot(t *testing.T) string {
 	if !ok {
 		t.Fatal("locate E2E source file")
 	}
-	root, err := filepath.Abs(filepath.Join(filepath.Dir(file), "..", ".."))
+
+	root, err := filepath.Abs(filepath.Join(filepath.Dir(file), ".."))
 	if err != nil {
 		t.Fatalf("resolve repository root: %v", err)
 	}
+
 	return root
+}
+
+func requiredExecutable(t *testing.T, environmentName string) string {
+	t.Helper()
+	binary := os.Getenv(environmentName)
+	if binary == "" {
+		t.Fatalf("%s is required; run make e2e", environmentName)
+	}
+
+	absolute, err := filepath.Abs(binary)
+	if err != nil {
+		t.Fatalf("resolve %s: %v", environmentName, err)
+	}
+
+	info, err := os.Stat(absolute)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("%s is not an executable regular file: %s", environmentName, absolute)
+	}
+
+	return absolute
 }
 
 func registerProcessCleanup(t *testing.T, name string, process *managedProcess) {
@@ -337,6 +402,7 @@ func registerProcessCleanup(t *testing.T, name string, process *managedProcess) 
 		if err := process.stop(5 * time.Second); err != nil {
 			t.Errorf("stop %s process group: %v", name, err)
 		}
+
 		if t.Failed() {
 			t.Logf("%s log (%s):\n%s", name, process.logPath, readProcessLog(process.logPath))
 		}
@@ -345,10 +411,11 @@ func registerProcessCleanup(t *testing.T, name string, process *managedProcess) 
 
 func writePolicy(ctx context.Context, t *testing.T, api *liveAPI, repositoryRoot, name, fixture string) {
 	t.Helper()
-	contents, err := os.ReadFile(filepath.Join(repositoryRoot, "e2e", "openbao", "policies", fixture))
+	contents, err := os.ReadFile(filepath.Join(repositoryRoot, "e2e", "policies", fixture))
 	if err != nil {
 		t.Fatalf("read %s policy: %v", name, err)
 	}
+
 	mustCall(t, ctx, api, rootToken, http.MethodPut, "sys/policies/acl/"+name, map[string]string{"policy": string(contents)}, http.StatusOK, http.StatusNoContent)
 }
 
@@ -364,6 +431,7 @@ func createEntity(ctx context.Context, t *testing.T, api *liveAPI, name string) 
 	if envelope.Data.ID == "" {
 		t.Fatalf("create entity %s returned no ID", name)
 	}
+
 	return envelope.Data.ID
 }
 
@@ -389,6 +457,7 @@ func loginUserpass(ctx context.Context, t *testing.T, api *liveAPI, username, pa
 	if envelope.Auth.ClientToken == "" {
 		t.Fatalf("%s login returned no token", username)
 	}
+
 	return envelope
 }
 
@@ -397,6 +466,7 @@ func assertIdentityLogin(t *testing.T, name string, login loginEnvelope, entityI
 	if login.Auth.EntityID != entityID {
 		t.Fatalf("%s login entity = %q, want %q", name, login.Auth.EntityID, entityID)
 	}
+
 	if !slices.Contains(login.Auth.IdentityPolicies, policy) {
 		t.Fatalf("%s identity policies = %v, want %q", name, login.Auth.IdentityPolicies, policy)
 	}
@@ -443,12 +513,14 @@ func waitForApplicationRequest(t *testing.T, ctx context.Context, application *l
 				}
 			}
 		}
+
 		select {
 		case <-ctx.Done():
 			t.Fatalf("wait for application request: %v", ctx.Err())
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+
 	t.Fatalf("application did not discover %s within 30 seconds", path)
 	return ""
 }
@@ -464,9 +536,11 @@ func mustCallWithHeaders(t *testing.T, ctx context.Context, api *liveAPI, token,
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, path, err)
 	}
+
 	if !slices.Contains(expected, status) {
 		t.Fatalf("%s %s returned HTTP %d, want %v; response: %s", method, path, status, expected, body)
 	}
+
 	return body
 }
 
@@ -474,40 +548,50 @@ func callAPI(ctx context.Context, api *liveAPI, token, method, path string, payl
 	if err := api.process.assertOwnsLoopbackPort(api.port); err != nil {
 		return nil, 0, fmt.Errorf("refuse API call without listener ownership: %w", err)
 	}
+
 	var body io.Reader
 	if payload != nil {
 		encoded, err := json.Marshal(payload)
 		if err != nil {
 			return nil, 0, err
 		}
+
 		body = bytes.NewReader(encoded)
 	}
+
 	request, err := http.NewRequestWithContext(ctx, method, strings.TrimSuffix(api.baseURL, "/")+"/"+strings.TrimPrefix(path, "/"), body)
 	if err != nil {
 		return nil, 0, err
 	}
+
 	request.Header.Set("Accept", "application/json")
 	if payload != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
+
 	if token != "" {
 		request.Header.Set("X-Vault-Token", token)
 	}
+
 	for name, value := range headers {
 		request.Header.Set(name, value)
 	}
+
 	response, err := api.client.Do(request)
 	if err != nil {
 		return nil, 0, err
 	}
+
 	defer func() { _ = response.Body.Close() }()
 	contents, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
 	if err != nil {
 		return nil, 0, err
 	}
+
 	if err := api.process.assertOwnsLoopbackPort(api.port); err != nil {
 		return nil, 0, fmt.Errorf("process lost listener during API call: %w", err)
 	}
+
 	return contents, response.StatusCode, nil
 }
 

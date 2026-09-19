@@ -1,6 +1,6 @@
 # Real-process OpenBao control-group E2E
 
-The tagged Go test in this directory downloads the official OpenBao `v2.7.0-beta20260909` Linux release and runs it as a real dev-mode process. It also builds and runs the repository's real Go application server. No container or shell harness is involved.
+The Makefile prepares the repository's application binary and the official OpenBao `v2.7.0-beta20260909` Linux release. The tagged Go test receives those prebuilt binaries and drives the real-process workflow.
 
 ## Run
 
@@ -8,33 +8,36 @@ From the repository root:
 
 ```sh
 make e2e
-# Equivalent:
-go test -tags=e2e -count=1 -v ./e2e/openbao
 ```
 
-The `e2e` build tag is the explicit opt-in for the network download and real-process workflow. Ordinary helper regression tests remain part of the default Go suite:
+The `e2e` build tag is the explicit opt-in for the real-process workflow. Ordinary helper regression tests remain part of the default Go suite:
 
 ```sh
-go test ./e2e/openbao
+go test ./e2e
 ```
 
-Requirements are Linux on `amd64` or `arm64` and Go 1.26 or newer. The test uses only Go's standard library for download, checksum validation, archive inspection, HTTP calls, and process management.
+Requirements are Linux on `amd64` or `arm64`, Go 1.26 or newer, `curl`, `sha256sum`, and GNU tar.
 
 Downloads and the extracted `bao` binary are cached beneath ignored `.e2e/openbao/`. Set `OPENBAO_E2E_KEEP_RUNTIME=1` to retain successful-run logs and temporary state. Failed runs retain their runtime directory automatically and print both process logs.
 
+`make e2e` builds the application first and passes its binary path to the harness. The harness gives the OpenBao and application processes isolated home, temporary, and configuration directories. Child environments use explicit allowlists, so workstation credentials, OpenBao/Vault settings, application secrets, GitHub credentials, and CLI authentication state are not inherited. The workflow mounts only OpenBao's built-in engines and asserts that no `github/` plugin mount exists.
+
 ## Supply-chain and process checks
 
-The test:
+The Makefile preparation:
 
 - pins the official archive name and SHA-256 separately for `amd64` and `arm64`;
 - requires the matching entry in the release's `checksums.txt` to equal the repository pin;
 - hashes the archive itself before use;
-- rejects duplicate, missing, nested, absolute, non-regular, oversized, or unexpected archive entries;
 - accepts exactly `bao`, `LICENSE`, `README.md`, and `CHANGELOG.md`;
-- verifies the cached executable against the `bao` bytes in the pinned archive and requires an exact `OpenBao v2.7.0-beta20260909` version token;
+- extracts `bao` from the verified archive.
+
+The Go test:
+
 - lets OpenBao and the application bind `127.0.0.1:0`, then discovers their kernel-assigned ports from `/proc` without a bind-and-release race;
 - checks listener ownership before and after every API call; and
 - starts each server in its own process group and performs bounded `TERM` followed by `KILL` cleanup, including child processes.
+- redacts OpenBao dev-mode bootstrap credentials from failure diagnostics.
 
 ## Verified workflow
 

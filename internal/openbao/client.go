@@ -55,10 +55,12 @@ func (e *Entity) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &value); err != nil {
 		return err
 	}
+
 	e.ID = value.LowerID
 	if e.ID == "" {
 		e.ID = value.UpperID
 	}
+
 	e.Name = value.Name
 	return nil
 }
@@ -96,6 +98,7 @@ func (i Identity) HasPolicy(policy string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -109,6 +112,7 @@ func (e *HTTPError) Error() string {
 	if len(e.Errors) == 0 {
 		return fmt.Sprintf("openbao returned HTTP %d", e.StatusCode)
 	}
+
 	return fmt.Sprintf("openbao returned HTTP %d: %s", e.StatusCode, strings.Join(e.Errors, "; "))
 }
 
@@ -118,16 +122,20 @@ func New(config Config) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse OpenBao address: %w", err)
 	}
+
 	if baseURL.Scheme != "http" && baseURL.Scheme != "https" {
 		return nil, errors.New("OpenBao address must use http or https")
 	}
+
 	if baseURL.Host == "" {
 		return nil, errors.New("OpenBao address must include a host")
 	}
+
 	client := config.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
+
 	return &Client{
 		baseURL:      baseURL,
 		scannerToken: config.ScannerToken,
@@ -149,6 +157,7 @@ func (c *Client) LoginUserpass(ctx context.Context, username, password string) (
 	if username == "" || strings.ContainsAny(username, "/\\") {
 		return AuthToken{}, errors.New("invalid OpenBao username")
 	}
+
 	var envelope struct {
 		Auth struct {
 			ClientToken   string `json:"client_token"`
@@ -160,9 +169,11 @@ func (c *Client) LoginUserpass(ctx context.Context, username, password string) (
 	if err := c.call(ctx, http.MethodPost, path, "", map[string]string{"password": password}, &envelope, ""); err != nil {
 		return AuthToken{}, err
 	}
+
 	if envelope.Auth.ClientToken == "" {
 		return AuthToken{}, errors.New("OpenBao userpass login returned no token")
 	}
+
 	return AuthToken{
 		Token: envelope.Auth.ClientToken, Renewable: envelope.Auth.Renewable,
 		TTL: time.Duration(envelope.Auth.LeaseDuration) * time.Second,
@@ -180,9 +191,11 @@ func (c *Client) RenewSelf(ctx context.Context, token string) error {
 	if err := c.call(ctx, http.MethodPost, "/v1/auth/token/renew-self", token, map[string]string{}, &envelope, ""); err != nil {
 		return err
 	}
+
 	if envelope.Auth.ClientToken == "" || !envelope.Auth.Renewable {
 		return errors.New("OpenBao token renewal returned a non-renewable token")
 	}
+
 	return nil
 }
 
@@ -201,6 +214,7 @@ func (c *Client) ListAccessors(ctx context.Context) ([]string, error) {
 	if err := c.call(ctx, http.MethodGet, "/v1/auth/token/accessors", c.scannerToken, nil, &envelope, "LIST"); err != nil {
 		return nil, err
 	}
+
 	return envelope.Data.Keys, nil
 }
 
@@ -215,8 +229,10 @@ func (c *Client) ControlGroupRequest(ctx context.Context, accessor string) (Cont
 		if errors.As(err, &httpErr) && (httpErr.StatusCode == http.StatusBadRequest || httpErr.StatusCode == http.StatusNotFound) {
 			return ControlGroupRequest{}, fmt.Errorf("%w: %w", ErrNotControlGroup, err)
 		}
+
 		return ControlGroupRequest{}, err
 	}
+
 	return envelope.Data, nil
 }
 
@@ -234,6 +250,7 @@ func (c *Client) GitHubPermissionSet(ctx context.Context, name string) (GitHubPe
 	if name == "" || strings.ContainsAny(name, "/\\") {
 		return GitHubPermissionSet{}, errors.New("invalid GitHub permission set name")
 	}
+
 	var envelope struct {
 		Data GitHubPermissionSet `json:"data"`
 	}
@@ -241,6 +258,7 @@ func (c *Client) GitHubPermissionSet(ctx context.Context, name string) (GitHubPe
 	if err := c.call(ctx, http.MethodGet, path, c.scannerToken, nil, &envelope, ""); err != nil {
 		return GitHubPermissionSet{}, err
 	}
+
 	return envelope.Data, nil
 }
 
@@ -254,6 +272,7 @@ func (c *Client) Authorize(ctx context.Context, humanToken, accessor string) (bo
 	if err := c.call(ctx, http.MethodPost, "/v1/sys/control-group/authorize", humanToken, map[string]string{"accessor": accessor}, &envelope, ""); err != nil {
 		return false, err
 	}
+
 	return envelope.Data.Approved, nil
 }
 
@@ -265,6 +284,7 @@ func (c *Client) LookupSelf(ctx context.Context, token string) (Identity, error)
 	if err := c.call(ctx, http.MethodGet, "/v1/auth/token/lookup-self", token, nil, &envelope, ""); err != nil {
 		return Identity{}, err
 	}
+
 	return envelope.Data, nil
 }
 
@@ -275,23 +295,29 @@ func (c *Client) call(ctx context.Context, method, path, token string, payload, 
 		if err != nil {
 			return fmt.Errorf("encode OpenBao request: %w", err)
 		}
+
 		body = bytes.NewReader(encoded)
 	}
+
 	endpoint := c.baseURL.ResolveReference(&url.URL{Path: path})
 	req, err := http.NewRequestWithContext(ctx, method, endpoint.String(), body)
 	if err != nil {
 		return fmt.Errorf("create OpenBao request: %w", err)
 	}
+
 	if methodOverride != "" {
 		req.Method = methodOverride
 	}
+
 	req.Header.Set("Accept", "application/json")
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+
 	if token != "" {
 		req.Header.Set("X-Vault-Token", token)
 	}
+
 	if c.namespace != "" {
 		req.Header.Set("X-Vault-Namespace", c.namespace)
 	}
@@ -300,6 +326,7 @@ func (c *Client) call(ctx context.Context, method, path, token string, payload, 
 	if err != nil {
 		return fmt.Errorf("call OpenBao: %w", err)
 	}
+
 	defer func() { _ = response.Body.Close() }()
 
 	limited := io.LimitReader(response.Body, maxResponseBytes)
@@ -310,11 +337,14 @@ func (c *Client) call(ctx context.Context, method, path, token string, payload, 
 		_ = json.NewDecoder(limited).Decode(&envelope)
 		return &HTTPError{StatusCode: response.StatusCode, Errors: envelope.Errors}
 	}
+
 	if output == nil || response.StatusCode == http.StatusNoContent {
 		return nil
 	}
+
 	if err := json.NewDecoder(limited).Decode(output); err != nil {
 		return fmt.Errorf("decode OpenBao response: %w", err)
 	}
+
 	return nil
 }

@@ -32,6 +32,7 @@ func (b *EventBus) Publish(eventType string, value any) error {
 	if err != nil {
 		return fmt.Errorf("encode event: %w", err)
 	}
+
 	event := Event{ID: b.next.Add(1), Type: eventType, Data: data}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -41,6 +42,7 @@ func (b *EventBus) Publish(eventType string, value any) error {
 		default:
 		}
 	}
+
 	return nil
 }
 
@@ -56,6 +58,7 @@ func (b *EventBus) Subscribe() (<-chan Event, func()) {
 			delete(b.subscribers, channel)
 			close(channel)
 		}
+
 		b.mu.Unlock()
 	}
 }

@@ -43,7 +43,7 @@ make build      # web/dist and bin/openbao-authorizer
 make e2e        # tagged Go test: real OpenBao + real Go app + API approval flow
 ```
 
-The E2E Go test downloads and caches the official Linux release, verifies the repository-pinned per-architecture SHA-256 and exact archive layout, allocates kernel-assigned loopback ports, and cleans up both process groups. See [`e2e/openbao/README.md`](e2e/openbao/README.md).
+The E2E setup downloads and caches the official Linux release, verifies the repository-pinned per-architecture SHA-256 and exact archive layout, allocates kernel-assigned loopback ports, and cleans up both process groups. See [`e2e/README.md`](e2e/README.md).
 
 ## Container image
 

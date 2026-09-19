@@ -58,6 +58,7 @@ func New(storage Store, config Config, sender Sender) (*Service, error) {
 	if resolver == nil {
 		resolver = net.DefaultResolver
 	}
+
 	allowed := make([]string, 0, len(config.AllowedHostSuffixes))
 	for _, suffix := range config.AllowedHostSuffixes {
 		suffix = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(suffix, ".")))
@@ -65,10 +66,12 @@ func New(storage Store, config Config, sender Sender) (*Service, error) {
 			allowed = append(allowed, suffix)
 		}
 	}
+
 	enabled := config.PublicKey != "" || config.PrivateKey != "" || config.Subject != ""
 	if enabled && (config.PublicKey == "" || config.PrivateKey == "" || config.Subject == "") {
 		return nil, errors.New("all VAPID settings are required together")
 	}
+
 	if enabled && len(allowed) == 0 {
 		return nil, errors.New("at least one push endpoint host suffix is required")
 	}
@@ -86,6 +89,7 @@ func New(storage Store, config Config, sender Sender) (*Service, error) {
 	if sender == nil {
 		sender = webpush.SendNotificationWithContext
 	}
+
 	service.send = sender
 	return service, nil
 }
@@ -96,28 +100,35 @@ func (s *Service) ValidateEndpoint(ctx context.Context, rawEndpoint string) erro
 	if err != nil {
 		return fmt.Errorf("parse push endpoint: %w", err)
 	}
+
 	if endpoint.Scheme != "https" || endpoint.Hostname() == "" || endpoint.User != nil || endpoint.Fragment != "" {
 		return errors.New("push endpoint must be a plain HTTPS URL")
 	}
+
 	if port := endpoint.Port(); port != "" && port != "443" {
 		return errors.New("push endpoint must use HTTPS port 443")
 	}
+
 	host := strings.ToLower(strings.TrimSuffix(endpoint.Hostname(), "."))
 	if !s.allowedHost(host) {
 		return errors.New("push endpoint host is not allowlisted")
 	}
+
 	addresses, err := s.resolver.LookupIPAddr(ctx, host)
 	if err != nil {
 		return fmt.Errorf("resolve push endpoint: %w", err)
 	}
+
 	if len(addresses) == 0 {
 		return errors.New("push endpoint did not resolve")
 	}
+
 	for _, address := range addresses {
 		if !isPublicIP(address.IP) {
 			return errors.New("push endpoint resolved to a non-public address")
 		}
 	}
+
 	return nil
 }
 
@@ -127,6 +138,7 @@ func (s *Service) allowedHost(host string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -135,21 +147,26 @@ func (s *Service) dialContext(ctx context.Context, network, address string) (net
 	if err != nil {
 		return nil, fmt.Errorf("parse outbound address: %w", err)
 	}
+
 	if !s.allowedHost(strings.ToLower(strings.TrimSuffix(host, "."))) {
 		return nil, errors.New("outbound push host is not allowlisted")
 	}
+
 	addresses, err := s.resolver.LookupIPAddr(ctx, host)
 	if err != nil {
 		return nil, fmt.Errorf("resolve outbound push host: %w", err)
 	}
+
 	if len(addresses) == 0 {
 		return nil, errors.New("outbound push host did not resolve")
 	}
+
 	for _, address := range addresses {
 		if !isPublicIP(address.IP) {
 			return nil, errors.New("outbound push host resolved to a non-public address")
 		}
 	}
+
 	dialer := net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	return dialer.DialContext(ctx, network, net.JoinHostPort(addresses[0].IP.String(), port))
 }
@@ -159,15 +176,18 @@ func isPublicIP(ip net.IP) bool {
 	if !ok {
 		return false
 	}
+
 	address = address.Unmap()
 	if !address.IsGlobalUnicast() || address.IsPrivate() || address.IsLoopback() || address.IsLinkLocalUnicast() || address.IsLinkLocalMulticast() || address.IsMulticast() || address.IsUnspecified() {
 		return false
 	}
+
 	for _, prefix := range deniedPrefixes {
 		if prefix.Contains(address) {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -187,10 +207,12 @@ func (s *Service) NewRequest(ctx context.Context, _ string, _ openbao.ControlGro
 	if s.config.PublicKey == "" {
 		return nil
 	}
+
 	subscriptions, err := s.store.Subscriptions(ctx)
 	if err != nil {
 		return fmt.Errorf("load push subscriptions: %w", err)
 	}
+
 	payload, err := json.Marshal(map[string]string{
 		"title": "OpenBao approval pending",
 		"body":  "A new control-group request needs review.",
@@ -205,12 +227,15 @@ func (s *Service) NewRequest(ctx context.Context, _ string, _ openbao.ControlGro
 		if s.config.Eligible == nil || !s.config.Eligible(ctx, subscription.EntityID) {
 			continue
 		}
+
 		if validateErr := s.ValidateEndpoint(ctx, subscription.Endpoint); validateErr != nil {
 			if deleteErr := s.store.DeleteSubscription(ctx, subscription.Endpoint); deleteErr != nil {
 				sendErrors = append(sendErrors, deleteErr)
 			}
+
 			continue
 		}
+
 		response, sendErr := s.send(ctx, payload, &webpush.Subscription{
 			Endpoint: subscription.Endpoint,
 			Keys: webpush.Keys{
@@ -228,18 +253,22 @@ func (s *Service) NewRequest(ctx context.Context, _ string, _ openbao.ControlGro
 			sendErrors = append(sendErrors, fmt.Errorf("send push: %w", sendErr))
 			continue
 		}
+
 		if response != nil {
 			_ = response.Body.Close()
 			if response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusGone {
 				if deleteErr := s.store.DeleteSubscription(ctx, subscription.Endpoint); deleteErr != nil {
 					sendErrors = append(sendErrors, deleteErr)
 				}
+
 				continue
 			}
+
 			if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 				sendErrors = append(sendErrors, fmt.Errorf("push service returned HTTP %d", response.StatusCode))
 			}
 		}
 	}
+
 	return errors.Join(sendErrors...)
 }
