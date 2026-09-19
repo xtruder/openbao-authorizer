@@ -1,7 +1,7 @@
 http:
   routers:
     openbao-authorizer:
-      rule: Host(`openbao-authorizer.x-truder.dev`)
+      rule: Host(`authorizer.example.com`)
       entryPoints:
         - websecure
       service: openbao-authorizer-svc

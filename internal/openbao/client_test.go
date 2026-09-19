@@ -157,7 +157,7 @@ func TestGitHubPermissionSetUsesScannerToken(t *testing.T) {
 		if got := r.Header.Get("X-Vault-Token"); got != "scanner" {
 			t.Fatalf("token header = %q", got)
 		}
-		_, _ = w.Write([]byte(`{"data":{"installation_id":162977542,"org_name":"xtruder","repositories":["openbao-authorizer"],"permissions":{"administration":"write","contents":"write"}}}`))
+		_, _ = w.Write([]byte(`{"data":{"installation_id":87654321,"org_name":"example-org","repositories":["example-repo"],"permissions":{"administration":"write","contents":"write"}}}`))
 	}))
 	defer server.Close()
 
@@ -169,7 +169,7 @@ func TestGitHubPermissionSetUsesScannerToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if permissionSet.InstallationID != 162977542 || permissionSet.Account != "xtruder" || !slices.Equal(permissionSet.Repositories, []string{"openbao-authorizer"}) || permissionSet.Permissions["contents"] != "write" {
+	if permissionSet.InstallationID != 87654321 || permissionSet.Account != "example-org" || !slices.Equal(permissionSet.Repositories, []string{"example-repo"}) || permissionSet.Permissions["contents"] != "write" {
 		t.Fatalf("permission set = %#v", permissionSet)
 	}
 }

@@ -9,7 +9,7 @@ this unit as a production OpenBao deployment.
 
 - OpenBao API: `http://127.0.0.1:18200`
 - Approval app: `http://127.0.0.1:18202`
-- Public route: `https://openbao-authorizer.x-truder.dev`
+- Public route: `https://authorizer.example.com`
 - Binaries/scripts: `~/.local/lib/openbao-authorizer/` and `~/.local/bin/openbao-gh`
 - Secret configuration: `~/.config/openbao-authorizer/` (mode `0700`, files `0600`)
 - App state: `~/.local/state/openbao-authorizer/app.db`
@@ -171,7 +171,7 @@ openbao-gh project-name -- gh pr list --repo example-org/example-repo
 Approve the pending request at:
 
 ```text
-https://openbao-authorizer.x-truder.dev
+https://authorizer.example.com
 ```
 
 Sign in there as `approver` with the current value of

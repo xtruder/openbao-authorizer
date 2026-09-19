@@ -48,9 +48,9 @@ func (f *fakeBao) GitHubPermissionSet(_ context.Context, name string) (openbao.G
 		return openbao.GitHubPermissionSet{}, &openbao.HTTPError{StatusCode: http.StatusNotFound}
 	}
 	return openbao.GitHubPermissionSet{
-		InstallationID: 162977542,
-		Account:        "xtruder",
-		Repositories:   []string{"openbao-authorizer"},
+		InstallationID: 87654321,
+		Account:        "example-org",
+		Repositories:   []string{"example-repo"},
 		Permissions:    map[string]string{"administration": "write", "contents": "write"},
 	}, nil
 }
@@ -81,7 +81,7 @@ func TestEnrichesGitHubTokenRequestWithOriginalPermissionSet(t *testing.T) {
 	if request.GitHubToken == nil || !request.GitHubToken.Available {
 		t.Fatalf("GitHub context = %#v", request.GitHubToken)
 	}
-	if request.GitHubToken.PermissionSet != "project-authorizer" || request.GitHubToken.Account != "xtruder" || request.GitHubToken.InstallationID != 162977542 || request.GitHubToken.AllRepositories || len(request.GitHubToken.Repositories) != 1 || request.GitHubToken.Repositories[0] != "openbao-authorizer" || request.GitHubToken.Permissions["administration"] != "write" {
+	if request.GitHubToken.PermissionSet != "project-authorizer" || request.GitHubToken.Account != "example-org" || request.GitHubToken.InstallationID != 87654321 || request.GitHubToken.AllRepositories || len(request.GitHubToken.Repositories) != 1 || request.GitHubToken.Repositories[0] != "example-repo" || request.GitHubToken.Permissions["administration"] != "write" {
 		t.Fatalf("GitHub context = %#v", request.GitHubToken)
 	}
 

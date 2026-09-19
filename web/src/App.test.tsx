@@ -28,10 +28,10 @@ const githubRequest = {
   githubToken: {
     available: true,
     permissionSet: 'project-authorizer',
-    account: 'xtruder',
-    installationId: 162977542,
+    account: 'example-org',
+    installationId: 87654321,
     allRepositories: false,
-    repositories: ['openbao-authorizer'],
+    repositories: ['example-repo'],
     permissions: { administration: 'write', contents: 'write', workflows: 'write' },
   },
 }
@@ -167,7 +167,7 @@ describe('OpenBao Authorizer user workflows', () => {
     expect(dashboardBackground).not.toHaveAttribute('aria-hidden')
   })
 
-  it('shows the original fixed GitHub permission policy before approval', async () => {
+  it('shows the effective fixed GitHub permission policy before approval', async () => {
     const user = userEvent.setup()
     const fetchMock = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse({ identity, csrfToken: 'csrf-policy' }))
@@ -179,8 +179,8 @@ describe('OpenBao Authorizer user workflows', () => {
     await user.click(await screen.findByRole('button', { name: /review request/i }))
     expect(screen.getByRole('heading', { name: 'Effective authorization policy' })).toBeInTheDocument()
     expect(screen.getByText(/"permission_set": "project-authorizer"/)).toBeInTheDocument()
-    expect(screen.getByText(/"account": "xtruder"/)).toBeInTheDocument()
-    expect(screen.getByText(/"openbao-authorizer"/)).toBeInTheDocument()
+    expect(screen.getByText(/"account": "example-org"/)).toBeInTheDocument()
+    expect(screen.getByText(/"example-repo"/)).toBeInTheDocument()
     expect(screen.getByText(/"administration": "write"/)).toBeInTheDocument()
     expect(screen.queryByText(/Redacted by the server/)).not.toBeInTheDocument()
 
