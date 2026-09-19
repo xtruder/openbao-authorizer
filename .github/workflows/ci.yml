@@ -31,6 +31,7 @@ jobs:
         with:
           version: v2.12.2
           install-only: true
+          install-mode: goinstall
 
       - uses: actions/setup-node@v4
         with:
