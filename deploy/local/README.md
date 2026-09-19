@@ -82,26 +82,26 @@ gate around the same long-lived user credential.
 
 ### 1. Create and install the GitHub App
 
-Sign in to GitHub and create a **private** GitHub App under **Settings →
-Developer settings → GitHub Apps**. Use:
+The test deployment uses the public-installable GitHub App
+`xtruder-openbao-authorizer`, owned by `xtruder`, with homepage
+`https://openbao-authorizer.x-truder.dev`. OAuth, device flow, webhooks, event
+subscriptions, organization permissions, account permissions, and enterprise
+permissions are disabled.
 
-- name: any globally unique name, such as `offlinehq-openbao-agent-broker`;
-- homepage URL: `https://openbao-authorizer.x-truder.dev`;
-- webhook: inactive;
-- callback and setup URLs: unset;
-- repository permissions:
-  - Actions: read;
-  - Contents: read and write;
-  - Issues: read and write;
-  - Pull requests: read and write;
-  - Workflows: read and write;
-  - Metadata: read (GitHub grants this automatically);
-- organization and account permissions: none;
-- events: none.
+The App has broad repository-management permissions so approval-gated tokens
+can be used effectively with `gh`: repository administration, contents,
+workflows, Actions, checks, statuses, deployments, issues, pull requests,
+discussions, environments, packages, Pages, repository projects, hooks,
+repository secrets/variables, Codespaces, and repository security controls.
+Metadata and Codespaces metadata are read-only; the remaining selected
+repository permissions are read/write. This is intentionally powerful: use
+OpenBao permission sets and installation repository selection to constrain each
+issued token.
 
-Install the App only on repositories agents may access. Adding a project later
-requires adding that repository to the installation before creating its OpenBao
-permission set.
+The App is installed on all current and future repositories for both profiles:
+
+- `xtruder`, installation `162977542`;
+- `offlinehacker`, installation `162977871`.
 
 From the App settings page, record the numeric **App ID** and generate a private
 key. The plugin requires GitHub's PKCS#1 PEM form, whose first line is:
@@ -129,8 +129,10 @@ Add these non-secret identifiers to
 `~/.config/openbao-authorizer/bootstrap.env`:
 
 ```sh
-GITHUB_APP_ID=123456
-GITHUB_APP_INSTALLATION_ID=87654321
+GITHUB_APP_ID=4999527
+GITHUB_APP_INSTALLATION_ID=162977542
+GITHUB_XTRUDER_INSTALLATION_ID=162977542
+GITHUB_OFFLINEHACKER_INSTALLATION_ID=162977871
 ```
 
 Then restart the in-memory development server:
@@ -154,17 +156,22 @@ BAO_TOKEN="$(sed -n 's/^BAO_TOKEN=//p' ~/.config/openbao-authorizer/bootstrap.en
 
 `prv_key` must be redacted by the plugin.
 
-### 3. Create one permission set per project
+### 3. Use profile-wide or repository-specific permission sets
 
-The admin helper fixes each token to exactly one repository and the selected
-permission ceiling:
+Bootstrap creates two broad, profile-wide sets:
+
+- `github/token/project-xtruder` — all repositories in the `xtruder` installation;
+- `github/token/project-offlinehacker` — all repositories in the
+  `offlinehacker` installation.
+
+For a narrower token, the admin helper fixes a permission set to one repository:
 
 ```sh
 ~/.local/lib/openbao-authorizer/configure-github-project.sh \
-  control-group offlinehq/openbao-authorizer
+  authorizer xtruder/openbao-authorizer
 ```
 
-This creates `github/token/project-control-group`. Agents can read only paths
+This creates `github/token/project-authorizer`. Agents can read only paths
 matching `github/token/project-*`; they cannot access `github/config`, the bare
 unrestricted `github/token` endpoint, or permission-set administration.
 
@@ -175,8 +182,9 @@ permission set, waits for a control-group approval, unwraps the GitHub token
 only in memory, and exports it only to the child `gh` process:
 
 ```sh
-openbao-gh control-group -- gh repo view offlinehq/openbao-authorizer
-openbao-gh control-group -- gh pr list --repo offlinehq/openbao-authorizer
+openbao-gh xtruder -- gh repo list xtruder --limit 200
+openbao-gh offlinehacker -- gh repo list offlinehacker --limit 200
+openbao-gh xtruder -- gh pr list --repo xtruder/openbao-authorizer
 ```
 
 Approve the pending request at:

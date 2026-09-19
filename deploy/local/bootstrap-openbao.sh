@@ -90,6 +90,22 @@ if [[ -n "${GITHUB_APP_ID:-}" || -n "${GITHUB_APP_INSTALLATION_ID:-}" || -e "${G
     app_id="${GITHUB_APP_ID}" \
     prv_key=@"${GITHUB_APP_PRIVATE_KEY_FILE}" \
     exclude_repository_metadata=true >/dev/null
+
+  github_permissions='{"actions":"write","actions_variables":"write","administration":"write","agent_secrets":"write","agent_tasks":"write","agent_variables":"write","artifact_metadata":"write","attestations":"write","checks":"write","code_quality":"write","security_events":"write","codespaces":"write","codespaces_lifecycle_admin":"write","codespaces_metadata":"read","codespaces_secrets":"write","statuses":"write","contents":"write","copilot_agent_settings":"write","repository_custom_properties":"write","vulnerability_alerts":"write","dependabot_secrets":"write","deployments":"write","discussions":"write","environments":"write","issues":"write","license_compliance_alerts":"write","merge_queues":"write","metadata":"read","packages":"write","pages":"write","repository_projects":"write","pull_requests":"write","repository_advisories":"write","repo_secret_scanning_dismissal_requests":"write","secret_scanning_alerts":"write","secret_scanning_bypass_requests":"write","secrets":"write","repository_hooks":"write","workflows":"write"}'
+  permissionset_file="$(mktemp)"
+  trap 'rm -f "${permissionset_file}"' EXIT
+  if [[ -n "${GITHUB_XTRUDER_INSTALLATION_ID:-}" ]]; then
+    jq -cn --argjson installation_id "${GITHUB_XTRUDER_INSTALLATION_ID}" --argjson permissions "${github_permissions}" \
+      '{installation_id: $installation_id, permissions: $permissions}' >"${permissionset_file}"
+    "${OPENBAO_BIN}" write github/permissionset/project-xtruder @"${permissionset_file}" >/dev/null
+  fi
+  if [[ -n "${GITHUB_OFFLINEHACKER_INSTALLATION_ID:-}" ]]; then
+    jq -cn --argjson installation_id "${GITHUB_OFFLINEHACKER_INSTALLATION_ID}" --argjson permissions "${github_permissions}" \
+      '{installation_id: $installation_id, permissions: $permissions}' >"${permissionset_file}"
+    "${OPENBAO_BIN}" write github/permissionset/project-offlinehacker @"${permissionset_file}" >/dev/null
+  fi
+  rm -f "${permissionset_file}"
+  trap - EXIT
 fi
 
 scanner_response="$("${OPENBAO_BIN}" write -format=json auth/token/create-orphan \
