@@ -20,6 +20,22 @@ const pendingRequest = {
   lastSeen: '2026-09-17T08:17:00Z',
 }
 
+const githubRequest = {
+  ...pendingRequest,
+  id: 'github-request',
+  operation: 'read',
+  path: 'github/token/project-authorizer',
+  githubToken: {
+    available: true,
+    permissionSet: 'project-authorizer',
+    account: 'xtruder',
+    installationId: 162977542,
+    allRepositories: false,
+    repositories: ['openbao-authorizer'],
+    permissions: { administration: 'write', contents: 'write', workflows: 'write' },
+  },
+}
+
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -149,6 +165,28 @@ describe('OpenBao Authorizer user workflows', () => {
     expect(reviewButton).toHaveFocus()
     expect(dashboardBackground).not.toHaveAttribute('inert')
     expect(dashboardBackground).not.toHaveAttribute('aria-hidden')
+  })
+
+  it('shows the original fixed GitHub permission policy before approval', async () => {
+    const user = userEvent.setup()
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ identity, csrfToken: 'csrf-policy' }))
+      .mockResolvedValueOnce(jsonResponse([githubRequest]))
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /review request/i }))
+    expect(screen.getByRole('heading', { name: 'Original GitHub permission policy' })).toBeInTheDocument()
+    expect(screen.getByText(/"permission_set": "project-authorizer"/)).toBeInTheDocument()
+    expect(screen.getByText(/"account": "xtruder"/)).toBeInTheDocument()
+    expect(screen.getByText(/"openbao-authorizer"/)).toBeInTheDocument()
+    expect(screen.getByText(/"administration": "write"/)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Approve request' }))
+    const dialog = screen.getByRole('dialog', { name: 'Confirm approval' })
+    expect(within(dialog).getByText(/"permission_set": "project-authorizer"/)).toBeInTheDocument()
+    expect(within(dialog).getByText(/"workflows": "write"/)).toBeInTheDocument()
   })
 
   it('requires confirmation before approving the selected request', async () => {

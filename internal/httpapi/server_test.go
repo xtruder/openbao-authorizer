@@ -43,6 +43,18 @@ func (f *fakeBao) RevokeSelf(_ context.Context, token string) error {
 	return nil
 }
 
+func (f *fakeBao) GitHubPermissionSet(_ context.Context, name string) (openbao.GitHubPermissionSet, error) {
+	if name != "project-authorizer" {
+		return openbao.GitHubPermissionSet{}, &openbao.HTTPError{StatusCode: http.StatusNotFound}
+	}
+	return openbao.GitHubPermissionSet{
+		InstallationID: 162977542,
+		Account:        "xtruder",
+		Repositories:   []string{"openbao-authorizer"},
+		Permissions:    map[string]string{"administration": "write", "contents": "write"},
+	}, nil
+}
+
 func (f *fakeBao) LookupSelf(_ context.Context, token string) (openbao.Identity, error) {
 	if token != "human-token" {
 		return openbao.Identity{}, &openbao.HTTPError{StatusCode: http.StatusForbidden}
@@ -58,6 +70,26 @@ func (f *fakeBao) Authorize(_ context.Context, token, _ string) (bool, error) {
 }
 func (*fakeBao) ControlGroupRequest(_ context.Context, _ string) (openbao.ControlGroupRequest, error) {
 	return openbao.ControlGroupRequest{Approved: true, Operation: "update", Path: "secret/data/payroll", Entity: openbao.Entity{ID: "alice-id", Name: "Alice"}}, nil
+}
+
+func TestEnrichesGitHubTokenRequestWithOriginalPermissionSet(t *testing.T) {
+	t.Parallel()
+
+	s := &server{bao: &fakeBao{}}
+	request := store.Request{Path: "github/token/project-authorizer"}
+	s.enrichApprovalContext(t.Context(), &request)
+	if request.GitHubToken == nil || !request.GitHubToken.Available {
+		t.Fatalf("GitHub context = %#v", request.GitHubToken)
+	}
+	if request.GitHubToken.PermissionSet != "project-authorizer" || request.GitHubToken.Account != "xtruder" || request.GitHubToken.InstallationID != 162977542 || request.GitHubToken.AllRepositories || len(request.GitHubToken.Repositories) != 1 || request.GitHubToken.Repositories[0] != "openbao-authorizer" || request.GitHubToken.Permissions["administration"] != "write" {
+		t.Fatalf("GitHub context = %#v", request.GitHubToken)
+	}
+
+	unavailable := store.Request{Path: "github/token/missing"}
+	s.enrichApprovalContext(t.Context(), &unavailable)
+	if unavailable.GitHubToken == nil || unavailable.GitHubToken.Available || unavailable.GitHubToken.PermissionSet != "missing" {
+		t.Fatalf("unavailable context = %#v", unavailable.GitHubToken)
+	}
 }
 
 func TestSessionsRestoreDurableRecords(t *testing.T) {

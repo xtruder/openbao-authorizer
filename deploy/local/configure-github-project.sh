@@ -44,9 +44,10 @@ payload="$(mktemp)"
 trap 'rm -f "${payload}"' EXIT
 jq -cn \
   --argjson installation_id "${installation_id}" \
+  --arg account "${owner}" \
   --arg repository "${repository}" \
   --argjson permissions "${permissions}" \
-  '{installation_id: $installation_id, repositories: [$repository], permissions: $permissions}' >"${payload}"
+  '{installation_id: $installation_id, org_name: $account, repositories: [$repository], permissions: $permissions}' >"${payload}"
 export BAO_ADDR BAO_TOKEN
 "${bao}" write "github/permissionset/project-${project}" @"${payload}" >/dev/null
 

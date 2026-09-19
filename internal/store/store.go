@@ -30,6 +30,18 @@ type DB struct {
 	key  []byte
 }
 
+// GitHubTokenContext describes the fixed GitHub scope behind a token request.
+type GitHubTokenContext struct {
+	Available       bool              `json:"available"`
+	PermissionSet   string            `json:"permissionSet"`
+	Account         string            `json:"account,omitempty"`
+	InstallationID  int64             `json:"installationId,omitempty"`
+	AllRepositories bool              `json:"allRepositories"`
+	Repositories    []string          `json:"repositories,omitempty"`
+	RepositoryIDs   []int64           `json:"repositoryIds,omitempty"`
+	Permissions     map[string]string `json:"permissions,omitempty"`
+}
+
 // Request is a stored control-group request. The raw accessor is intentionally absent.
 type Request struct {
 	ID             string                  `json:"id"`
@@ -37,6 +49,7 @@ type Request struct {
 	Operation      string                  `json:"operation"`
 	Path           string                  `json:"path"`
 	Data           json.RawMessage         `json:"data,omitempty"`
+	GitHubToken    *GitHubTokenContext     `json:"githubToken,omitempty"`
 	Entity         openbao.Entity          `json:"entity"`
 	Authorizations []openbao.Authorization `json:"authorizations"`
 	FirstSeen      time.Time               `json:"firstSeen"`

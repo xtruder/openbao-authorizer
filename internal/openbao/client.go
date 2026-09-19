@@ -220,6 +220,30 @@ func (c *Client) ControlGroupRequest(ctx context.Context, accessor string) (Cont
 	return envelope.Data, nil
 }
 
+// GitHubPermissionSet is safe approval context for a fixed GitHub token request.
+type GitHubPermissionSet struct {
+	InstallationID int64             `json:"installation_id"`
+	Account        string            `json:"org_name"`
+	Repositories   []string          `json:"repositories"`
+	RepositoryIDs  []int64           `json:"repository_ids"`
+	Permissions    map[string]string `json:"permissions"`
+}
+
+// GitHubPermissionSet reads a fixed token scope using the scanner credential.
+func (c *Client) GitHubPermissionSet(ctx context.Context, name string) (GitHubPermissionSet, error) {
+	if name == "" || strings.ContainsAny(name, "/\\") {
+		return GitHubPermissionSet{}, errors.New("invalid GitHub permission set name")
+	}
+	var envelope struct {
+		Data GitHubPermissionSet `json:"data"`
+	}
+	path := "/v1/github/permissionset/" + url.PathEscape(name)
+	if err := c.call(ctx, http.MethodGet, path, c.scannerToken, nil, &envelope, ""); err != nil {
+		return GitHubPermissionSet{}, err
+	}
+	return envelope.Data, nil
+}
+
 // Authorize records approval using a human approver's OpenBao token.
 func (c *Client) Authorize(ctx context.Context, humanToken, accessor string) (bool, error) {
 	var envelope struct {

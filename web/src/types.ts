@@ -13,12 +13,24 @@ export interface Session {
   csrfToken: string
 }
 
+export interface GitHubTokenContext {
+  available: boolean
+  permissionSet: string
+  account?: string
+  installationId?: number
+  allRepositories: boolean
+  repositories?: string[]
+  repositoryIds?: number[]
+  permissions?: Record<string, string>
+}
+
 export interface ApprovalRequest {
   id: string
   approved: boolean
   operation: string
   path: string
   data?: unknown
+  githubToken?: GitHubTokenContext
   entity: {
     id: string
     name: string

@@ -147,6 +147,33 @@ func TestRenewAndRevokeSelfUseHumanToken(t *testing.T) {
 	}
 }
 
+func TestGitHubPermissionSetUsesScannerToken(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/github/permissionset/project-authorizer" || r.Method != http.MethodGet {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("X-Vault-Token"); got != "scanner" {
+			t.Fatalf("token header = %q", got)
+		}
+		_, _ = w.Write([]byte(`{"data":{"installation_id":162977542,"org_name":"xtruder","repositories":["openbao-authorizer"],"permissions":{"administration":"write","contents":"write"}}}`))
+	}))
+	defer server.Close()
+
+	client, err := New(Config{Address: server.URL, ScannerToken: "scanner", HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	permissionSet, err := client.GitHubPermissionSet(t.Context(), "project-authorizer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if permissionSet.InstallationID != 162977542 || permissionSet.Account != "xtruder" || !slices.Equal(permissionSet.Repositories, []string{"openbao-authorizer"}) || permissionSet.Permissions["contents"] != "write" {
+		t.Fatalf("permission set = %#v", permissionSet)
+	}
+}
+
 func TestAuthorizeUsesHumanToken(t *testing.T) {
 	t.Parallel()
 

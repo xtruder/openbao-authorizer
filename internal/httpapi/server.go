@@ -34,6 +34,7 @@ type OpenBao interface {
 	LookupSelf(context.Context, string) (openbao.Identity, error)
 	Authorize(context.Context, string, string) (bool, error)
 	ControlGroupRequest(context.Context, string) (openbao.ControlGroupRequest, error)
+	GitHubPermissionSet(context.Context, string) (openbao.GitHubPermissionSet, error)
 }
 
 // Store is the persistence surface needed by the HTTP API.
@@ -334,12 +335,37 @@ func (s *server) listRequests(w http.ResponseWriter, r *http.Request, _ session)
 		s.internalError(w, err)
 		return
 	}
-	if !s.exposeRequestData {
-		for index := range requests {
+	for index := range requests {
+		if !s.exposeRequestData {
 			requests[index].Data = nil
 		}
+		s.enrichApprovalContext(r.Context(), &requests[index])
 	}
 	writeJSON(w, http.StatusOK, requests)
+}
+
+func (s *server) enrichApprovalContext(ctx context.Context, request *store.Request) {
+	const prefix = "github/token/"
+	name, found := strings.CutPrefix(request.Path, prefix)
+	if !found || name == "" || strings.Contains(name, "/") {
+		return
+	}
+	context := &store.GitHubTokenContext{PermissionSet: name}
+	request.GitHubToken = context
+	permissionSet, err := s.bao.GitHubPermissionSet(ctx, name)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("load GitHub approval policy", "permission_set", name, "error", err)
+		}
+		return
+	}
+	context.Available = true
+	context.Account = permissionSet.Account
+	context.InstallationID = permissionSet.InstallationID
+	context.Repositories = permissionSet.Repositories
+	context.RepositoryIDs = permissionSet.RepositoryIDs
+	context.AllRepositories = len(permissionSet.Repositories) == 0 && len(permissionSet.RepositoryIDs) == 0
+	context.Permissions = permissionSet.Permissions
 }
 
 func (s *server) approve(w http.ResponseWriter, r *http.Request, value session) {
@@ -387,6 +413,7 @@ func (s *server) approve(w http.ResponseWriter, r *http.Request, value session) 
 			if !s.exposeRequestData {
 				request.Data = nil
 			}
+			s.enrichApprovalContext(r.Context(), &request)
 			writeJSON(w, http.StatusOK, request)
 			return
 		}

@@ -95,13 +95,13 @@ if [[ -n "${GITHUB_APP_ID:-}" || -n "${GITHUB_APP_INSTALLATION_ID:-}" || -e "${G
   permissionset_file="$(mktemp)"
   trap 'rm -f "${permissionset_file}"' EXIT
   if [[ -n "${GITHUB_XTRUDER_INSTALLATION_ID:-}" ]]; then
-    jq -cn --argjson installation_id "${GITHUB_XTRUDER_INSTALLATION_ID}" --argjson permissions "${github_permissions}" \
-      '{installation_id: $installation_id, permissions: $permissions}' >"${permissionset_file}"
+    jq -cn --argjson installation_id "${GITHUB_XTRUDER_INSTALLATION_ID}" --arg account xtruder --argjson permissions "${github_permissions}" \
+      '{installation_id: $installation_id, org_name: $account, permissions: $permissions}' >"${permissionset_file}"
     "${OPENBAO_BIN}" write github/permissionset/project-xtruder @"${permissionset_file}" >/dev/null
   fi
   if [[ -n "${GITHUB_OFFLINEHACKER_INSTALLATION_ID:-}" ]]; then
-    jq -cn --argjson installation_id "${GITHUB_OFFLINEHACKER_INSTALLATION_ID}" --argjson permissions "${github_permissions}" \
-      '{installation_id: $installation_id, permissions: $permissions}' >"${permissionset_file}"
+    jq -cn --argjson installation_id "${GITHUB_OFFLINEHACKER_INSTALLATION_ID}" --arg account offlinehacker --argjson permissions "${github_permissions}" \
+      '{installation_id: $installation_id, org_name: $account, permissions: $permissions}' >"${permissionset_file}"
     "${OPENBAO_BIN}" write github/permissionset/project-offlinehacker @"${permissionset_file}" >/dev/null
   fi
   rm -f "${permissionset_file}"
