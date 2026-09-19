@@ -177,7 +177,7 @@ describe('OpenBao Authorizer user workflows', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: /review request/i }))
-    expect(screen.getByRole('heading', { name: 'Original GitHub permission policy' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Effective authorization policy' })).toBeInTheDocument()
     expect(screen.getByText(/"permission_set": "project-authorizer"/)).toBeInTheDocument()
     expect(screen.getByText(/"account": "xtruder"/)).toBeInTheDocument()
     expect(screen.getByText(/"openbao-authorizer"/)).toBeInTheDocument()

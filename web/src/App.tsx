@@ -290,7 +290,7 @@ function GitHubPermissionPolicy({ context, compact = false }: { context: GitHubT
   if (!context.available) {
     return (
       <div role="alert" className="rounded-sm border border-red-200 bg-red-50 px-3 py-3 text-sm text-red-700">
-        Original GitHub permission policy could not be loaded. Do not approve this request.
+        Effective authorization policy could not be loaded. Do not approve this request.
       </div>
     )
   }
@@ -307,7 +307,7 @@ function GitHubPermissionPolicy({ context, compact = false }: { context: GitHubT
   return (
     <div className={compact ? 'mt-3' : ''}>
       <div className="mb-2 flex items-center justify-between gap-3">
-        <h3 className="detail-label">Original GitHub permission policy</h3>
+        <h3 className="detail-label">Effective authorization policy</h3>
         <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-400">Fixed by OpenBao</span>
       </div>
       <pre className="json-block"><code>{JSON.stringify(policy, null, 2)}</code></pre>

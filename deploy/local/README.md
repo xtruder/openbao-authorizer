@@ -80,28 +80,17 @@ installation API can issue one-hour tokens narrowed to a repository and fixed
 permissions. Storing and returning the existing PAT would only put an approval
 gate around the same long-lived user credential.
 
-### 1. Create and install the GitHub App
+### 1. Create and install a GitHub App
 
-The test deployment uses the public-installable GitHub App
-`xtruder-openbao-authorizer`, owned by `xtruder`, with homepage
-`https://openbao-authorizer.x-truder.dev`. OAuth, device flow, webhooks, event
-subscriptions, organization permissions, account permissions, and enterprise
-permissions are disabled.
+Create a GitHub App with only the repository permissions your workflows need.
+Disable OAuth, device flow, webhooks, and event subscriptions unless another
+component explicitly uses them. Install it only on the accounts and
+repositories that agents may reach.
 
-The App has broad repository-management permissions so approval-gated tokens
-can be used effectively with `gh`: repository administration, contents,
-workflows, Actions, checks, statuses, deployments, issues, pull requests,
-discussions, environments, packages, Pages, repository projects, hooks,
-repository secrets/variables, Codespaces, and repository security controls.
-Metadata and Codespaces metadata are read-only; the remaining selected
-repository permissions are read/write. This is intentionally powerful: use
-OpenBao permission sets and installation repository selection to constrain each
-issued token.
-
-The App is installed on all current and future repositories for both profiles:
-
-- `xtruder`, installation `162977542`;
-- `offlinehacker`, installation `162977871`.
+Broad repository administration is possible, but should be constrained by
+fixed OpenBao permission sets. The app repository intentionally contains no
+real account names, App IDs, installation IDs, or private keys; deployment
+repositories should own those values.
 
 From the App settings page, record the numeric **App ID** and generate a private
 key. The plugin requires GitHub's PKCS#1 PEM form, whose first line is:
@@ -129,10 +118,8 @@ Add these non-secret identifiers to
 `~/.config/openbao-authorizer/bootstrap.env`:
 
 ```sh
-GITHUB_APP_ID=4999527
-GITHUB_APP_INSTALLATION_ID=162977542
-GITHUB_XTRUDER_INSTALLATION_ID=162977542
-GITHUB_OFFLINEHACKER_INSTALLATION_ID=162977871
+GITHUB_APP_ID=123456
+GITHUB_PERMISSION_SETS_FILE=/path/to/permission-sets.json
 ```
 
 Then restart the in-memory development server:
@@ -156,22 +143,17 @@ BAO_TOKEN="$(sed -n 's/^BAO_TOKEN=//p' ~/.config/openbao-authorizer/bootstrap.en
 
 `prv_key` must be redacted by the plugin.
 
-### 3. Use profile-wide or repository-specific permission sets
+### 3. Create fixed permission sets
 
-Bootstrap creates two broad, profile-wide sets:
-
-- `github/token/project-xtruder` — all repositories in the `xtruder` installation;
-- `github/token/project-offlinehacker` — all repositories in the
-  `offlinehacker` installation.
-
-For a narrower token, the admin helper fixes a permission set to one repository:
+Use a deployment-owned JSON file with `permission_sets` and
+`permission_profiles` objects, or create a repository-specific set directly:
 
 ```sh
 ~/.local/lib/openbao-authorizer/configure-github-project.sh \
-  authorizer xtruder/openbao-authorizer
+  project-name example-org/example-repo 87654321
 ```
 
-This creates `github/token/project-authorizer`. Agents can read only paths
+This creates `github/token/project-project-name`. Agents can read only paths
 matching `github/token/project-*`; they cannot access `github/config`, the bare
 unrestricted `github/token` endpoint, or permission-set administration.
 
@@ -182,9 +164,8 @@ permission set, waits for a control-group approval, unwraps the GitHub token
 only in memory, and exports it only to the child `gh` process:
 
 ```sh
-openbao-gh xtruder -- gh repo list xtruder --limit 200
-openbao-gh offlinehacker -- gh repo list offlinehacker --limit 200
-openbao-gh xtruder -- gh pr list --repo xtruder/openbao-authorizer
+openbao-gh project-name -- gh repo view example-org/example-repo
+openbao-gh project-name -- gh pr list --repo example-org/example-repo
 ```
 
 Approve the pending request at:

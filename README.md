@@ -45,6 +45,24 @@ make e2e        # tagged Go test: real OpenBao + real Go app + API approval flow
 
 The E2E Go test downloads and caches the official Linux release, verifies the repository-pinned per-architecture SHA-256 and exact archive layout, allocates kernel-assigned loopback ports, and cleans up both process groups. See [`e2e/openbao/README.md`](e2e/openbao/README.md).
 
+## Container image
+
+The multi-stage [`Dockerfile`](Dockerfile) builds the Vite frontend, embeds it
+in the Go binary, and runs as UID/GID `65532` on Alpine with CA certificates.
+GitHub Actions publishes multi-architecture images for `linux/amd64` and
+`linux/arm64`:
+
+```text
+ghcr.io/xtruder/openbao-authorizer:latest
+ghcr.io/xtruder/openbao-authorizer:sha-<commit>
+```
+
+The image expects writable `DATABASE_PATH` storage and configuration through
+the environment described below. OpenBao itself and environment-specific
+GitHub App installations, permission sets, passwords, keys, DNS, and Compose
+configuration belong in a deployment repository. Generic local-development
+examples remain under [`deploy/local`](deploy/local/).
+
 ## OpenBao policies
 
 Install [`config/scanner-policy.hcl`](config/scanner-policy.hcl) on a dedicated orphan machine token created **without the default policy**. Assign [`config/approver-policy.hcl`](config/approver-policy.hcl) to the human identity group that appears in your protected path's `control_group` factor.

@@ -79,9 +79,8 @@ agent_entity="$(jq -er '.auth.entity_id' <<<"${agent_login}")"
   member_entity_ids="${agent_entity}" \
   policies=openbao-authorizer-github-agent >/dev/null
 
-if [[ -n "${GITHUB_APP_ID:-}" || -n "${GITHUB_APP_INSTALLATION_ID:-}" || -e "${GITHUB_APP_PRIVATE_KEY_FILE}" ]]; then
+if [[ -n "${GITHUB_APP_ID:-}" || -e "${GITHUB_APP_PRIVATE_KEY_FILE}" ]]; then
   : "${GITHUB_APP_ID:?GITHUB_APP_ID is required when GitHub App setup is enabled}"
-  : "${GITHUB_APP_INSTALLATION_ID:?GITHUB_APP_INSTALLATION_ID is required when GitHub App setup is enabled}"
   [[ -r "${GITHUB_APP_PRIVATE_KEY_FILE}" ]] || {
     printf 'GitHub App private key is not readable: %s\n' "${GITHUB_APP_PRIVATE_KEY_FILE}" >&2
     exit 1
@@ -91,21 +90,19 @@ if [[ -n "${GITHUB_APP_ID:-}" || -n "${GITHUB_APP_INSTALLATION_ID:-}" || -e "${G
     prv_key=@"${GITHUB_APP_PRIVATE_KEY_FILE}" \
     exclude_repository_metadata=true >/dev/null
 
-  github_permissions='{"actions":"write","actions_variables":"write","administration":"write","agent_secrets":"write","agent_tasks":"write","agent_variables":"write","artifact_metadata":"write","attestations":"write","checks":"write","code_quality":"write","security_events":"write","codespaces":"write","codespaces_lifecycle_admin":"write","codespaces_metadata":"read","codespaces_secrets":"write","statuses":"write","contents":"write","copilot_agent_settings":"write","repository_custom_properties":"write","vulnerability_alerts":"write","dependabot_secrets":"write","deployments":"write","discussions":"write","environments":"write","issues":"write","license_compliance_alerts":"write","merge_queues":"write","metadata":"read","packages":"write","pages":"write","repository_projects":"write","pull_requests":"write","repository_advisories":"write","repo_secret_scanning_dismissal_requests":"write","secret_scanning_alerts":"write","secret_scanning_bypass_requests":"write","secrets":"write","repository_hooks":"write","workflows":"write"}'
-  permissionset_file="$(mktemp)"
-  trap 'rm -f "${permissionset_file}"' EXIT
-  if [[ -n "${GITHUB_XTRUDER_INSTALLATION_ID:-}" ]]; then
-    jq -cn --argjson installation_id "${GITHUB_XTRUDER_INSTALLATION_ID}" --arg account xtruder --argjson permissions "${github_permissions}" \
-      '{installation_id: $installation_id, org_name: $account, permissions: $permissions}' >"${permissionset_file}"
-    "${OPENBAO_BIN}" write github/permissionset/project-xtruder @"${permissionset_file}" >/dev/null
+  if [[ -n "${GITHUB_PERMISSION_SETS_FILE:-}" ]]; then
+    jq -e '.permission_sets and .permission_profiles' "${GITHUB_PERMISSION_SETS_FILE}" >/dev/null
+    jq -c '.permission_sets | to_entries[]' "${GITHUB_PERMISSION_SETS_FILE}" | while IFS= read -r entry; do
+      name="$(jq -er '.key' <<<"${entry}")"
+      profile="$(jq -er '.value.permissions_profile' <<<"${entry}")"
+      permissionset_file="$(mktemp)"
+      jq --arg profile "${profile}" --slurpfile config "${GITHUB_PERMISSION_SETS_FILE}" \
+        '.value | del(.permissions_profile) + {permissions: $config[0].permission_profiles[$profile]}' \
+        <<<"${entry}" >"${permissionset_file}"
+      "${OPENBAO_BIN}" write "github/permissionset/${name}" @"${permissionset_file}" >/dev/null
+      rm -f "${permissionset_file}"
+    done
   fi
-  if [[ -n "${GITHUB_OFFLINEHACKER_INSTALLATION_ID:-}" ]]; then
-    jq -cn --argjson installation_id "${GITHUB_OFFLINEHACKER_INSTALLATION_ID}" --arg account offlinehacker --argjson permissions "${github_permissions}" \
-      '{installation_id: $installation_id, org_name: $account, permissions: $permissions}' >"${permissionset_file}"
-    "${OPENBAO_BIN}" write github/permissionset/project-offlinehacker @"${permissionset_file}" >/dev/null
-  fi
-  rm -f "${permissionset_file}"
-  trap - EXIT
 fi
 
 scanner_response="$("${OPENBAO_BIN}" write -format=json auth/token/create-orphan \

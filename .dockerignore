@@ -1,0 +1,10 @@
+.git
+.github
+.e2e
+bin
+github-app-setup
+local-approver-credentials.env
+openbao-authorizer.db*
+web/dist
+web/node_modules
+*.log
