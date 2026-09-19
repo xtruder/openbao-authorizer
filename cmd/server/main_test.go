@@ -13,7 +13,7 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/offlinehq/openbao-authorizer/internal/openbao"
+	"github.com/xtruder/openbao-authorizer/internal/openbao"
 )
 
 type fakeRenewer struct {

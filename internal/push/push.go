@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/SherClockHolmes/webpush-go"
-	"github.com/offlinehq/openbao-authorizer/internal/openbao"
-	"github.com/offlinehq/openbao-authorizer/internal/store"
+	"github.com/xtruder/openbao-authorizer/internal/openbao"
+	"github.com/xtruder/openbao-authorizer/internal/store"
 )
 
 // Store supplies encrypted browser subscriptions.

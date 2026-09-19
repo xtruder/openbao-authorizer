@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/offlinehq/openbao-authorizer/internal/openbao"
+	"github.com/xtruder/openbao-authorizer/internal/openbao"
 )
 
 // OpenBao is the read-only API surface used by the scanner.

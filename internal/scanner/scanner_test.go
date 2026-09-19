@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/offlinehq/openbao-authorizer/internal/openbao"
+	"github.com/xtruder/openbao-authorizer/internal/openbao"
 )
 
 type fakeBao struct {

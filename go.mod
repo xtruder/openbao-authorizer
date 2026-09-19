@@ -1,4 +1,4 @@
-module github.com/offlinehq/openbao-authorizer
+module github.com/xtruder/openbao-authorizer
 
 go 1.26.0
 

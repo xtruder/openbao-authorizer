@@ -18,13 +18,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/offlinehq/openbao-authorizer/internal/config"
-	"github.com/offlinehq/openbao-authorizer/internal/httpapi"
-	"github.com/offlinehq/openbao-authorizer/internal/openbao"
-	"github.com/offlinehq/openbao-authorizer/internal/push"
-	"github.com/offlinehq/openbao-authorizer/internal/scanner"
-	"github.com/offlinehq/openbao-authorizer/internal/store"
-	frontend "github.com/offlinehq/openbao-authorizer/web"
+	"github.com/xtruder/openbao-authorizer/internal/config"
+	"github.com/xtruder/openbao-authorizer/internal/httpapi"
+	"github.com/xtruder/openbao-authorizer/internal/openbao"
+	"github.com/xtruder/openbao-authorizer/internal/push"
+	"github.com/xtruder/openbao-authorizer/internal/scanner"
+	"github.com/xtruder/openbao-authorizer/internal/store"
+	frontend "github.com/xtruder/openbao-authorizer/web"
 )
 
 func main() {

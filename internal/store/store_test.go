@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/offlinehq/openbao-authorizer/internal/openbao"
+	"github.com/xtruder/openbao-authorizer/internal/openbao"
 )
 
 func TestUpsertDeduplicatesAndEncryptsAccessor(t *testing.T) {

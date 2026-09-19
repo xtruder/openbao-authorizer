@@ -39,7 +39,7 @@ esac
 : "${installation_id:?GitHub installation ID is not configured for ${owner}}"
 
 bao="${OPENBAO_BIN:-${HOME}/.local/lib/openbao-authorizer/bao}"
-permissions='{"actions":"write","actions_variables":"write","administration":"write","checks":"write","statuses":"write","contents":"write","deployments":"write","discussions":"write","environments":"write","issues":"write","metadata":"read","packages":"write","pages":"write","pull_requests":"write","repository_hooks":"write","workflows":"write"}'
+permissions='{"actions":"write","actions_variables":"write","administration":"write","agent_secrets":"write","agent_tasks":"write","agent_variables":"write","artifact_metadata":"write","attestations":"write","checks":"write","code_quality":"write","security_events":"write","codespaces":"write","codespaces_lifecycle_admin":"write","codespaces_metadata":"read","codespaces_secrets":"write","statuses":"write","contents":"write","copilot_agent_settings":"write","repository_custom_properties":"write","vulnerability_alerts":"write","dependabot_secrets":"write","deployments":"write","discussions":"write","environments":"write","issues":"write","license_compliance_alerts":"write","merge_queues":"write","metadata":"read","packages":"write","pages":"write","repository_projects":"write","pull_requests":"write","repository_advisories":"write","repo_secret_scanning_dismissal_requests":"write","secret_scanning_alerts":"write","secret_scanning_bypass_requests":"write","secrets":"write","repository_hooks":"write","workflows":"write"}'
 payload="$(mktemp)"
 trap 'rm -f "${payload}"' EXIT
 jq -cn \

@@ -17,8 +17,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/offlinehq/openbao-authorizer/internal/openbao"
-	"github.com/offlinehq/openbao-authorizer/internal/store"
+	"github.com/xtruder/openbao-authorizer/internal/openbao"
+	"github.com/xtruder/openbao-authorizer/internal/store"
 )
 
 const (

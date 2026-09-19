@@ -18,7 +18,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/offlinehq/openbao-authorizer/internal/openbao"
+	"github.com/xtruder/openbao-authorizer/internal/openbao"
 	// modernc.org/sqlite registers the database/sql driver.
 	_ "modernc.org/sqlite"
 )
