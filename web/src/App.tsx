@@ -567,14 +567,28 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
 
   useEffect(() => {
     let source: EventSource | null = null
+    let retryTimeout: number | null = null
     let disposed = false
 
-    function connect() {
+    function connect(reconnecting = false) {
       if (disposed || !navigator.onLine) return
-      setConnection((current) => current === 'connected' ? 'reconnecting' : 'connecting')
-      source = new EventSource('/api/v1/events')
-      source.onopen = () => setConnection('connected')
-      source.onerror = () => setConnection(navigator.onLine ? 'reconnecting' : 'offline')
+      if (retryTimeout !== null) {
+        window.clearTimeout(retryTimeout)
+        retryTimeout = null
+      }
+      source?.close()
+      setConnection(reconnecting ? 'reconnecting' : 'connecting')
+      const nextSource = new EventSource('/api/v1/events')
+      source = nextSource
+      nextSource.onopen = () => setConnection('connected')
+      nextSource.onerror = () => {
+        if (source !== nextSource) return
+        nextSource.close()
+        setConnection(navigator.onLine ? 'reconnecting' : 'offline')
+        if (navigator.onLine) {
+          retryTimeout = window.setTimeout(() => connect(true), 1_000)
+        }
+      }
 
       const handleUpdate = (event: MessageEvent<string>) => {
         try {
@@ -591,17 +605,20 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
         }
         void loadRequests(true)
       }
-      source.addEventListener('new-request', handleUpdate)
-      source.addEventListener('status', handleUpdate)
+      nextSource.addEventListener('new-request', handleUpdate)
+      nextSource.addEventListener('status', handleUpdate)
     }
 
     function onOnline() {
-      source?.close()
-      connect()
+      connect(true)
     }
     function onOffline() {
       setConnection('offline')
       source?.close()
+      if (retryTimeout !== null) {
+        window.clearTimeout(retryTimeout)
+        retryTimeout = null
+      }
     }
 
     connect()
@@ -610,6 +627,7 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
     return () => {
       disposed = true
       source?.close()
+      if (retryTimeout !== null) window.clearTimeout(retryTimeout)
       window.removeEventListener('online', onOnline)
       window.removeEventListener('offline', onOffline)
     }

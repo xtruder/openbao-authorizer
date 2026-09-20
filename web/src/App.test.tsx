@@ -45,6 +45,42 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 describe('OpenBao Authorizer user workflows', () => {
+  it('opens a fresh event stream when the current connection cannot recover', async () => {
+    class TerminalEventSource {
+      static instances: TerminalEventSource[] = []
+      onopen: (() => void) | null = null
+      onerror: (() => void) | null = null
+
+      constructor() {
+        TerminalEventSource.instances.push(this)
+      }
+
+      addEventListener() {}
+      close() {}
+    }
+
+    vi.stubGlobal('EventSource', TerminalEventSource)
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ identity, csrfToken: 'csrf-events' }))
+      .mockResolvedValueOnce(jsonResponse([]))
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: 'Approval requests' })).toBeInTheDocument()
+    await waitFor(() => expect(TerminalEventSource.instances).toHaveLength(1))
+    const firstSource = TerminalEventSource.instances[0]
+    firstSource.onopen?.()
+    expect(await screen.findByText('Live')).toBeInTheDocument()
+
+    firstSource.onerror?.()
+    expect(await screen.findByText('Reconnecting')).toBeInTheDocument()
+
+    await waitFor(() => expect(TerminalEventSource.instances).toHaveLength(2), { timeout: 2_000 })
+    TerminalEventSource.instances[1].onopen?.()
+    expect(await screen.findByText('Live')).toBeInTheDocument()
+  })
+
   it('signs in with username and password without persisting credentials in browser storage', async () => {
     const user = userEvent.setup()
     const fetchMock = vi.fn<typeof fetch>()
