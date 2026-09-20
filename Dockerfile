@@ -17,7 +17,9 @@ ARG TARGETOS=linux
 ARG TARGETARCH
 RUN test -n "${TARGETARCH}" && \
     CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
-    go build -trimpath -ldflags='-s -w' -o /out/openbao-authorizer ./cmd/server
+	go build -trimpath -ldflags='-s -w' -o /out/openbao-authorizer ./cmd/server && \
+    CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
+	go build -trimpath -ldflags='-s -w' -o /out/bao-cred ./cmd/bao-cred
 
 FROM alpine:3.22
 RUN apk add --no-cache ca-certificates tzdata && \
@@ -25,6 +27,7 @@ RUN apk add --no-cache ca-certificates tzdata && \
     adduser -S -D -H -u 65532 -G authorizer authorizer && \
     install -d -o authorizer -g authorizer -m 0700 /var/lib/openbao-authorizer
 COPY --from=go-build --chown=65532:65532 /out/openbao-authorizer /usr/local/bin/openbao-authorizer
+COPY --from=go-build --chown=65532:65532 /out/bao-cred /usr/local/bin/bao-cred
 USER 65532:65532
 VOLUME ["/var/lib/openbao-authorizer"]
 EXPOSE 8080

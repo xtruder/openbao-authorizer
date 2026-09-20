@@ -1,0 +1,162 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	openbao "github.com/openbao/openbao/api/v2"
+)
+
+func TestReadReturnsImmediateSecret(t *testing.T) {
+	want := map[string]any{"token": "secret"}
+	client := testAPIClient(t, func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/path" {
+			http.NotFound(response, request)
+			return
+		}
+
+		_, _ = fmt.Fprint(response, `{"data":{"token":"secret"}}`)
+	})
+	got, err := readCredentials(t.Context(), client, "path", time.Millisecond, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+}
+
+func TestReadWaitsForApproval(t *testing.T) {
+	var statusCalls atomic.Int32
+	client := testAPIClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/v1/path":
+			_, _ = fmt.Fprint(response, `{"wrap_info":{"token":"wrap","accessor":"accessor"}}`)
+		case "/v1/sys/control-group/request":
+			approved := statusCalls.Add(1) == 2
+			_, _ = fmt.Fprintf(response, `{"data":{"approved":%t}}`, approved)
+		case "/v1/sys/wrapping/unwrap":
+			_, _ = fmt.Fprint(response, `{"data":{"token":"secret"}}`)
+		default:
+			http.NotFound(response, request)
+		}
+	})
+	got, err := readCredentials(t.Context(), client, "path", time.Millisecond, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got["token"] != "secret" || statusCalls.Load() != 2 {
+		t.Fatalf("got %#v after %d status calls", got, statusCalls.Load())
+	}
+}
+
+func TestReadHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), time.Millisecond)
+	defer cancel()
+	client := testAPIClient(t, func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/v1/path" {
+			_, _ = fmt.Fprint(response, `{"wrap_info":{"token":"wrap","accessor":"accessor"}}`)
+			return
+		}
+
+		_, _ = fmt.Fprint(response, `{"data":{"approved":false}}`)
+	})
+	_, err := readCredentials(ctx, client, "path", time.Hour, nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("got %v, want deadline exceeded", err)
+	}
+}
+
+func testAPIClient(t *testing.T, handler http.HandlerFunc) *openbao.Client {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	config := openbao.DefaultConfig()
+	config.Address = server.URL
+	config.MaxRetries = 0
+	client, err := openbao.NewClient(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client.SetToken("request-token")
+	return client
+}
+
+func TestSelectSupportsIndexesAndEscapedDots(t *testing.T) {
+	data := map[string]any{"database.config": map[string]any{"roles": []any{"reader", "writer"}}}
+	got, err := selectValue(data, `database\.config.roles.1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got != "writer" {
+		t.Fatalf("got %#v, want writer", got)
+	}
+}
+
+func TestRenderFormats(t *testing.T) {
+	data := map[string]any{"username": "alice", "password": "a'b\nc"}
+	mappings := []mapping{{Name: "DB_USER", Path: "username"}, {Name: "DB_PASSWORD", Path: "password"}}
+	values, err := resolveMappings(data, mappings)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := string(renderDotenv(values)), "DB_USER=\"alice\"\nDB_PASSWORD=\"a'b\\nc\"\n"; got != want {
+		t.Fatalf("dotenv got %q, want %q", got, want)
+	}
+
+	if got, want := string(renderShell(values)), "export DB_USER='alice'\nexport DB_PASSWORD='a'\"'\"'b\nc'\n"; got != want {
+		t.Fatalf("shell got %q, want %q", got, want)
+	}
+
+	if got, err := renderTemplate(data, `{{ .username }}:{{ .password }}`); err != nil || string(got) != "alice:a'b\nc" {
+		t.Fatalf("template got %q, %v", got, err)
+	}
+}
+
+func TestMissingAndComplexMappingsFail(t *testing.T) {
+	data := map[string]any{"nested": map[string]any{"value": "secret"}}
+	for _, selectedMapping := range []mapping{{Name: "MISSING", Path: "missing"}, {Name: "NESTED", Path: "nested"}} {
+		if _, err := resolveMappings(data, []mapping{selectedMapping}); err == nil {
+			t.Fatalf("mapping %#v unexpectedly succeeded", selectedMapping)
+		}
+	}
+}
+
+func TestWriteFileOverwritesWithOwnerOnlyPermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "credentials")
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeFile(path, []byte("new")); err != nil {
+		t.Fatal(err)
+	}
+
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if string(contents) != "new" || info.Mode().Perm() != 0o600 {
+		t.Fatalf("contents %q mode %o", contents, info.Mode().Perm())
+	}
+}

@@ -15,3 +15,12 @@ path "github/token/project-*" {
     }
   }
 }
+
+path "sys/control-group/request" {
+  capabilities = ["update"]
+
+  required_parameters = ["accessor"]
+  allowed_parameters = {
+    "accessor" = []
+  }
+}

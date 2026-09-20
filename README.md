@@ -39,7 +39,8 @@ The production Vite build is embedded in the Go binary and served by default. Th
 ```sh
 make test       # Go race tests + React workflow tests
 make lint       # go vet, golangci-lint, Oxlint
-make build      # web/dist and bin/openbao-authorizer
+make bin/openbao-authorizer
+make bin/bao-cred
 make e2e        # tagged Go test: real OpenBao + real Go app + API approval flow
 ```
 
@@ -57,11 +58,17 @@ ghcr.io/xtruder/openbao-authorizer:latest
 ghcr.io/xtruder/openbao-authorizer:sha-<commit>
 ```
 
+Version tags also publish static `openbao-authorizer` and `bao-cred` archives
+with SHA-256 checksums to the GitHub Release for Linux, macOS, and Windows on
+amd64 and arm64.
+
 The image expects writable `DATABASE_PATH` storage and configuration through
 the environment described below. OpenBao itself and environment-specific
 GitHub App installations, permission sets, passwords, keys, DNS, and Compose
 configuration belong in a deployment repository. Generic local-development
-examples remain under [`deploy/local`](deploy/local/).
+examples remain under [`deploy/local`](deploy/local/). The image also contains
+`bao-cred` at `/usr/local/bin/bao-cred` for requester workflows that use the
+same container image.
 
 ## OpenBao policies
 
@@ -104,7 +111,7 @@ path "pki/issue/*" {
 Build first:
 
 ```sh
-make build
+make bin/openbao-authorizer bin/bao-cred
 ```
 
 Create an application encryption key and place the scanner token in a mode-`0400` file:
@@ -120,6 +127,58 @@ export PUBLIC_ORIGIN=https://approvals.example.com
 ```
 
 The default listener is `127.0.0.1:8080`; terminate TLS at a trusted reverse proxy. Do not set `INSECURE_COOKIES=true` outside loopback development or the E2E harness.
+
+## Credential requester CLI
+
+`bao-cred` reads any OpenBao path and returns its data. When OpenBao applies a
+control group, it reports progress on stderr, waits up to 15 minutes for
+approval, then consumes the wrapping token. It uses the official OpenBao Go
+client and honors standard client variables such as `BAO_ADDR`, `BAO_NAMESPACE`,
+and `BAO_CACERT`.
+
+The request token is selected in this order: an explicit `-token-file`,
+`BAO_TOKEN`, then
+`$OPENBAO_CONTROL_GROUP_CONFIG_DIR/agent-token` (defaulting to
+`~/.config/openbao-authorizer/agent-token`). Credentials are delivered through
+exactly one output or command action:
+
+For protected paths, the request token's policy must also allow the
+parameter-constrained control-group status check used while waiting:
+
+```hcl
+path "sys/control-group/request" {
+  capabilities        = ["update"]
+  required_parameters = ["accessor"]
+  allowed_parameters  = { "accessor" = [] }
+}
+```
+
+```sh
+# Complete data object as JSON.
+bao-cred database/creds/app
+
+# One scalar, with no trailing newline.
+bao-cred -field username database/creds/app
+
+# Custom text from the unwrapped data object.
+bao-cred -format template -template '{{ .username }}:{{ .password }}' database/creds/app
+
+# Explicit dotenv mappings written atomically with mode 0600.
+bao-cred -format dotenv \
+  -map DB_USER=username -map DB_PASSWORD=password \
+  -output credentials.env database/creds/app
+
+# Explicit environment mappings available only to the child command.
+bao-cred -map GH_TOKEN=token github/token/project-example -- \
+  gh repo view example-org/example-repo
+```
+
+Formats are `json`, `template`, `dotenv`, and POSIX `shell`. Dot-path selectors
+support nested objects, array indexes, and backslash-escaped dots in key names.
+Missing fields, duplicate mappings, and mapped arrays or objects fail the whole
+operation. Use `-quiet`, `-timeout`, and `-poll-interval` for automation. Shell
+output contains credentials by design; source it only in a trusted shell and do
+not log it.
 
 ### Configuration
 

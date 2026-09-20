@@ -1,6 +1,6 @@
 GOLANGCI_LINT := golangci-lint
 
-.PHONY: frontend test fmt lint build e2e clean
+.PHONY: frontend test fmt lint bin/openbao-authorizer bin/bao-cred e2e clean
 
 frontend:
 	npm --prefix web run build
@@ -10,15 +10,19 @@ test: frontend
 	npm --prefix web test -- --run
 
 fmt:
-	$(GOLANGCI_LINT) fmt -c .golangci.yml
+	$(GOLANGCI_LINT) run --fix -c .golangci.yml ./...
 
 lint: frontend
 	$(GOLANGCI_LINT) run -c .golangci.yml ./...
 	npm --prefix web run lint
 
-build: frontend
-	mkdir -p bin
-	go build -o bin/openbao-authorizer ./cmd/server
+bin/openbao-authorizer: frontend
+	mkdir -p $(@D)
+	go build -o $@ ./cmd/server
+
+bin/bao-cred:
+	mkdir -p $(@D)
+	go build -o $@ ./cmd/bao-cred
 
 e2e:
 	$(MAKE) -C e2e

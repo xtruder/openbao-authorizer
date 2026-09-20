@@ -106,7 +106,69 @@ jobs:
       - if: steps.node-modules.outputs.cache-hit != 'true'
         run: npm ci --prefix web
 
-      - run: make build
+      - run: make bin/openbao-authorizer bin/bao-cred
+
+      - if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-web-dist
+          path: web/dist
+          if-no-files-found: error
+
+  release-binaries:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: github-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+        binary:
+          - name: openbao-authorizer
+            project: ./cmd/server
+          - name: bao-cred
+            project: ./cmd/bao-cred
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-web-dist
+          path: web/dist
+
+      - name: Build and upload release binary
+        uses: wangyoucao577/go-release-action@v1.55
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          goos: ${{ matrix.goos }}
+          goarch: ${{ matrix.goarch }}
+          goversion: go.mod
+          project_path: ${{ matrix.binary.project }}
+          binary_name: ${{ matrix.binary.name }}
+          pre_command: export CGO_ENABLED=0
+          build_flags: -trimpath
+          ldflags: -s -w
+          md5sum: false
+          sha256sum: true
+          release_tag: ${{ github.ref_name }}
+          overwrite: true
+          asset_name: ${{ matrix.binary.name }}_${{ github.ref_name }}_${{ matrix.goos }}_${{ matrix.goarch }}
+          compress_assets: auto
+
+  github-release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, test, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
 
   publish:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))

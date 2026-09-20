@@ -10,7 +10,7 @@ this unit as a production OpenBao deployment.
 - OpenBao API: `http://127.0.0.1:18200`
 - Approval app: `http://127.0.0.1:18202`
 - Public route: `https://authorizer.example.com`
-- Binaries/scripts: `~/.local/lib/openbao-authorizer/` and `~/.local/bin/openbao-gh`
+- Binaries/scripts: `~/.local/lib/openbao-authorizer/` and `~/.local/bin/bao-cred`
 - Secret configuration: `~/.config/openbao-authorizer/` (mode `0700`, files `0600`)
 - App state: `~/.local/state/openbao-authorizer/app.db`
 - User units:
@@ -43,7 +43,7 @@ Generated login material remains local:
 
 Sign into the PWA as `approver` with the generated approver password. The app
 stores only OpenBao's renewable token, encrypted server-side; the password is
-not retained. `openbao-gh` reads the agent token directly; do not copy it into
+not retained. `bao-cred` reads the agent token directly; do not copy it into
 `gh auth login`. Never publish these files.
 
 ## Operations
@@ -62,8 +62,9 @@ that unit, systemd restarts the app with the newly generated scanner token.
 From the repository:
 
 ```sh
-make build
+make bin/openbao-authorizer bin/bao-cred
 install -m 0755 bin/openbao-authorizer ~/.local/lib/openbao-authorizer/openbao-authorizer
+install -m 0755 bin/bao-cred ~/.local/bin/bao-cred
 systemctl --user restart openbao-authorizer.service
 ```
 
@@ -159,13 +160,15 @@ unrestricted `github/token` endpoint, or permission-set administration.
 
 ### 4. Run `gh` through approval
 
-The agent helper reads the local agent OpenBao token, requests the fixed project
-permission set, waits for a control-group approval, unwraps the GitHub token
-only in memory, and exports it only to the child `gh` process:
+The generic credential requester reads the local agent OpenBao token, requests
+the fixed project permission set, waits for a control-group approval, unwraps
+the GitHub token only in memory, and exports it only to the child `gh` process:
 
 ```sh
-openbao-gh project-name -- gh repo view example-org/example-repo
-openbao-gh project-name -- gh pr list --repo example-org/example-repo
+bao-cred -map GH_TOKEN=token github/token/project-project-name -- \
+  gh repo view example-org/example-repo
+bao-cred -map GH_TOKEN=token github/token/project-project-name -- \
+  gh pr list --repo example-org/example-repo
 ```
 
 Approve the pending request at:
@@ -178,7 +181,7 @@ Sign in there as `approver` with the current value of
 `~/.config/openbao-authorizer/approver-password`. The helper waits up to 15
 minutes. On approval, the response-wrapping token is consumed once and the
 GitHub installation token expires at GitHub after about one hour. Neither token
-is written to disk by `openbao-gh`.
+is written to disk by `bao-cred`.
 
 ## Web Push
 
