@@ -304,7 +304,7 @@ function EmptyState({ filter }: { filter: RequestFilter }) {
   )
 }
 
-function ApprovalContextView({ context, compact = false }: { context: ApprovalContext; compact?: boolean }) {
+function ApprovalContextView({ context }: { context: ApprovalContext }) {
   if (!context.available) {
     return (
       <div role="alert" className="rounded-sm border border-red-200 bg-red-50 px-3 py-3 text-sm text-red-700">
@@ -313,7 +313,7 @@ function ApprovalContextView({ context, compact = false }: { context: ApprovalCo
     )
   }
   return (
-    <div className={compact ? 'mt-3' : ''}>
+    <div>
       <div className="mb-2 flex items-center justify-between gap-3">
         <h3 className="detail-label">Approval context</h3>
         <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-400">Read from OpenBao</span>
@@ -323,12 +323,13 @@ function ApprovalContextView({ context, compact = false }: { context: ApprovalCo
   )
 }
 
-function RequestDetail({ request, onBack, onApprove, onReject, submitting }: {
+function RequestDetail({ request, onBack, onApprove, onReject, submitting, actionError }: {
   request: ApprovalRequest
   onBack: () => void
   onApprove: () => void
   onReject: () => void
   submitting: boolean
+  actionError: string
 }) {
   const headingRef = useRef<HTMLHeadingElement>(null)
 
@@ -405,6 +406,7 @@ function RequestDetail({ request, onBack, onApprove, onReject, submitting }: {
       </div>
 
       <div className="detail-footer">
+        {actionError && <div role="alert" className="mb-3 rounded-sm border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-700">{actionError}</div>}
         {request.status !== 'pending' ? (
           <div className={`flex w-full items-center justify-center gap-2 rounded-sm border px-4 py-3 text-sm font-semibold status-${request.status}`}>{request.status === 'approved' ? <CheckIcon className="size-4" /> : request.status === 'rejected' ? <CloseIcon className="size-4" /> : <ClockIcon className="size-4" />}{statusLabels[request.status]}</div>
         ) : (
@@ -415,98 +417,6 @@ function RequestDetail({ request, onBack, onApprove, onReject, submitting }: {
         )}
       </div>
     </section>
-  )
-}
-
-function ConfirmationDialog({ request, action, submitting, error, onCancel, onConfirm }: {
-  request: ApprovalRequest
-  action: 'approve' | 'reject'
-  submitting: boolean
-  error: string
-  onCancel: () => void
-  onConfirm: () => void
-}) {
-  const dialogRef = useRef<HTMLDialogElement>(null)
-  const confirmRef = useRef<HTMLButtonElement>(null)
-  const onCancelRef = useRef(onCancel)
-  const submittingRef = useRef(submitting)
-
-  useEffect(() => {
-    onCancelRef.current = onCancel
-    submittingRef.current = submitting
-  }, [onCancel, submitting])
-
-  useEffect(() => {
-    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    confirmRef.current?.focus()
-
-    function onKeyDown(event: KeyboardEvent) {
-      const dialog = dialogRef.current
-      if (!dialog) return
-
-      if (event.key === 'Escape' && !submittingRef.current) {
-        event.preventDefault()
-        onCancelRef.current()
-        return
-      }
-      if (event.key !== 'Tab') return
-
-      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-      ))
-      if (!focusable.length) {
-        event.preventDefault()
-        dialog.focus()
-        return
-      }
-
-      const first = focusable[0]
-      const last = focusable[focusable.length - 1]
-      if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
-        event.preventDefault()
-        last.focus()
-      } else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) {
-        event.preventDefault()
-        first.focus()
-      }
-    }
-
-    document.addEventListener('keydown', onKeyDown)
-    return () => {
-      document.removeEventListener('keydown', onKeyDown)
-      const rowTrigger = document.querySelector<HTMLElement>('[data-review-trigger]')
-      if (rowTrigger?.isConnected) rowTrigger.focus()
-      else if (previouslyFocused?.isConnected) previouslyFocused.focus()
-    }
-  }, [])
-
-  return (
-    <dialog
-      ref={dialogRef}
-      open
-      aria-modal="true"
-      aria-labelledby="confirmation-title"
-      aria-describedby="confirmation-description"
-      className="dialog-backdrop"
-    >
-      <div className="dialog-card">
-        <div className={`grid size-11 place-items-center rounded-full ${action === 'approve' ? 'bg-brand-soft text-zinc-900' : 'bg-red-50 text-red-700'}`}>{action === 'approve' ? <ShieldIcon className="size-5" /> : <CloseIcon className="size-5" />}</div>
-        <h2 id="confirmation-title" className="mt-5 text-xl font-semibold tracking-[-0.02em] text-zinc-950">Confirm {action === 'approve' ? 'approval' : 'rejection'}</h2>
-        <p id="confirmation-description" className="mt-2 text-sm leading-6 text-zinc-600">This {action === 'approve' ? 'authorizes the operation' : 'revokes the pending request'}. This action cannot be undone.</p>
-        <div className="mt-5 rounded-sm border border-zinc-200 bg-zinc-50 p-3.5">
-          <p className="font-mono text-xs font-semibold text-zinc-900 break-all">{request.path}</p>
-          <p className="mt-1.5 text-xs text-zinc-500">{formatOperation(request.operation)} requested by {request.entity.name || request.entity.id}</p>
-        </div>
-        {request.approvalContext && <ApprovalContextView context={request.approvalContext} compact />}
-        {error && <div role="alert" className="mt-4 rounded-sm border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-700">{error}</div>}
-        <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-          <button type="button" onClick={onCancel} disabled={submitting} className="secondary-button">Cancel</button>
-          <button ref={confirmRef} type="button" onClick={onConfirm} disabled={submitting} className={action === 'approve' ? 'approve-button' : 'reject-button'}>
-            {submitting ? <><span className="button-spinner dark" />{action === 'approve' ? 'Approving…' : 'Rejecting…'}</> : <>{action === 'approve' ? <CheckIcon className="size-4" /> : <CloseIcon className="size-4" />}Confirm {action === 'approve' ? 'approval' : 'rejection'}</>}
-          </button>
-        </div>
-      </div>
-    </dialog>
   )
 }
 
@@ -527,8 +437,6 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState('')
   const [connection, setConnection] = useState<ConnectionState>(navigator.onLine ? 'connecting' : 'offline')
-  const [confirming, setConfirming] = useState<ApprovalRequest | null>(null)
-  const [rejectingRequest, setRejectingRequest] = useState<ApprovalRequest | null>(null)
   const [approving, setApproving] = useState(false)
   const [rejecting, setRejecting] = useState(false)
   const [approvalError, setApprovalError] = useState('')
@@ -660,19 +568,15 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
     }
   }, [selectedId])
 
-  async function approve() {
-    const confirmed = confirming
-    if (!confirmed || approving) return
+  async function approve(targetRequest: ApprovalRequest) {
+    if (approving || rejecting) return
     setApproving(true)
     setApprovalError('')
     try {
-      const refreshed = await api.approveRequest(confirmed.id, session.csrfToken)
+      const refreshed = await api.approveRequest(targetRequest.id, session.csrfToken)
       setRequests((current) => current.map((request) => request.id === refreshed.id ? refreshed : request))
-      // Keep the saved row trigger; the Approve button inside the detail view
-      // is about to be replaced by the Approved status, so it cannot be
-      // relied on for focus restoration.
+      // The action button is replaced by status, so focus cannot return to it.
       setSelectedId(refreshed.id)
-      setConfirming(null)
       setNotice('Request approved successfully.')
     } catch (caught) {
       if (isSessionLost(caught)) {
@@ -681,7 +585,6 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
       }
       if (caught instanceof ApiError && caught.status === 409) {
         await loadRequests(true)
-        setConfirming(null)
         setNotice(caught.message)
         return
       }
@@ -691,16 +594,14 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
     }
   }
 
-  async function reject() {
-    const confirmed = rejectingRequest
-    if (!confirmed || rejecting) return
+  async function reject(targetRequest: ApprovalRequest) {
+    if (approving || rejecting) return
     setRejecting(true)
     setRejectionError('')
     try {
-      const refreshed = await api.rejectRequest(confirmed.id, session.csrfToken)
+      const refreshed = await api.rejectRequest(targetRequest.id, session.csrfToken)
       setRequests((current) => current.map((request) => request.id === refreshed.id ? refreshed : request))
       setSelectedId(refreshed.id)
-      setRejectingRequest(null)
       setNotice('Request rejected and revoked.')
     } catch (caught) {
       if (isSessionLost(caught)) {
@@ -709,7 +610,6 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
       }
       if (caught instanceof ApiError && caught.status === 409) {
         await loadRequests(true)
-        setRejectingRequest(null)
         setNotice(caught.message)
         return
       }
@@ -790,11 +690,7 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
 
   return (
     <>
-      <div
-        className="min-h-svh bg-canvas text-zinc-900"
-        inert={confirming !== null || rejectingRequest !== null}
-        aria-hidden={confirming || rejectingRequest ? 'true' : undefined}
-      >
+      <div className="min-h-svh bg-canvas text-zinc-900">
       <header className="sticky top-0 z-30 border-b border-white/10 bg-ink text-white shadow-[0_1px_0_rgba(0,0,0,.2)]">
         <div className="mx-auto flex h-16 max-w-[1600px] items-center gap-3 px-4 sm:px-6 lg:px-8">
           <Brand compact />
@@ -873,7 +769,7 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
             ) : <EmptyState filter={filter} />}
           </section>
 
-          {selected && <RequestDetail key={`${selected.id}-${selected.status}`} request={selected} submitting={approving || rejecting} onBack={() => setSelectedId(null)} onApprove={() => { setApprovalError(''); setConfirming(selected) }} onReject={() => { setRejectionError(''); setRejectingRequest(selected) }} />}
+          {selected && <RequestDetail key={`${selected.id}-${selected.status}`} request={selected} submitting={approving || rejecting} actionError={approvalError || rejectionError} onBack={() => setSelectedId(null)} onApprove={() => { setApprovalError(''); setRejectionError(''); void approve(selected) }} onReject={() => { setApprovalError(''); setRejectionError(''); void reject(selected) }} />}
           {!selected && (
             <aside className="detail-placeholder hidden lg:grid">
               <div className="max-w-xs text-center">
@@ -888,8 +784,6 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
 
         {notice && <div className="toast" role="status" aria-live="polite"><CheckIcon className="size-4 shrink-0 text-brand-dark" />{notice}</div>}
       </div>
-      {confirming && <ConfirmationDialog request={confirming} action="approve" submitting={approving} error={approvalError} onCancel={() => setConfirming(null)} onConfirm={() => void approve()} />}
-      {rejectingRequest && <ConfirmationDialog request={rejectingRequest} action="reject" submitting={rejecting} error={rejectionError} onCancel={() => setRejectingRequest(null)} onConfirm={() => void reject()} />}
     </>
   )
 }

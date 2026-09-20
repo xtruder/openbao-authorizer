@@ -161,7 +161,7 @@ describe('OpenBao Authorizer user workflows', () => {
     expect(screen.queryByText('Approver policy revoked')).not.toBeInTheDocument()
   })
 
-  it('manages focus for request details and traps keyboard focus in confirmation', async () => {
+  it('manages focus when opening and closing request details', async () => {
     const user = userEvent.setup()
     const fetchMock = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse({ identity, csrfToken: 'csrf-keyboard' }))
@@ -179,29 +179,6 @@ describe('OpenBao Authorizer user workflows', () => {
 
     await user.click(screen.getByRole('button', { name: 'Back to requests' }))
     await waitFor(() => expect(reviewButton).toHaveFocus())
-
-    await user.click(reviewButton)
-    const approveButton = screen.getByRole('button', { name: 'Approve request' })
-    const dashboardBackground = screen.getByRole('main').parentElement
-    await user.click(approveButton)
-
-    const dialog = screen.getByRole('dialog', { name: 'Confirm approval' })
-    const confirmButton = within(dialog).getByRole('button', { name: 'Confirm approval' })
-    const cancelButton = within(dialog).getByRole('button', { name: 'Cancel' })
-    expect(confirmButton).toHaveFocus()
-    expect(dashboardBackground).toHaveAttribute('inert')
-    expect(dashboardBackground).toHaveAttribute('aria-hidden', 'true')
-
-    await user.tab()
-    expect(cancelButton).toHaveFocus()
-    await user.tab({ shift: true })
-    expect(confirmButton).toHaveFocus()
-
-    await user.keyboard('{Escape}')
-    expect(screen.queryByRole('dialog', { name: 'Confirm approval' })).not.toBeInTheDocument()
-    expect(reviewButton).toHaveFocus()
-    expect(dashboardBackground).not.toHaveAttribute('inert')
-    expect(dashboardBackground).not.toHaveAttribute('aria-hidden')
   })
 
   it('shows generic approval context before approval', async () => {
@@ -219,14 +196,9 @@ describe('OpenBao Authorizer user workflows', () => {
     expect(screen.getByText(/"example-repo"/)).toBeInTheDocument()
     expect(screen.getByText(/"administration": "write"/)).toBeInTheDocument()
     expect(screen.getByText(/Redacted by the server/)).toBeInTheDocument()
-
-    await user.click(screen.getByRole('button', { name: 'Approve request' }))
-    const dialog = screen.getByRole('dialog', { name: 'Confirm approval' })
-    expect(within(dialog).getByText(/"org_name": "example-org"/)).toBeInTheDocument()
-    expect(within(dialog).getByText(/"workflows": "write"/)).toBeInTheDocument()
   })
 
-  it('requires confirmation before approving the selected request', async () => {
+  it('approves the selected request immediately', async () => {
     const user = userEvent.setup()
     const approvedRequest = { ...pendingRequest, approved: true, status: 'approved' }
     const fetchMock = vi.fn<typeof fetch>()
@@ -242,11 +214,6 @@ describe('OpenBao Authorizer user workflows', () => {
     expect(screen.getByText(/Emergency credential rotation/)).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Approve request' }))
-    const dialog = screen.getByRole('dialog', { name: 'Confirm approval' })
-    expect(within(dialog).getByText(/cannot be undone/i)).toBeInTheDocument()
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-
-    await user.click(within(dialog).getByRole('button', { name: 'Confirm approval' }))
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
     const [approveUrl, approveInit] = fetchMock.mock.calls[2]
@@ -258,7 +225,7 @@ describe('OpenBao Authorizer user workflows', () => {
     expect(screen.getByRole('heading', { level: 2, name: approvedRequest.path })).toHaveFocus()
   })
 
-  it('requires confirmation before rejecting and revoking a pending request', async () => {
+  it('rejects and revokes a pending request immediately', async () => {
     const user = userEvent.setup()
     const rejectedRequest = { ...pendingRequest, status: 'rejected' }
     const fetchMock = vi.fn<typeof fetch>()
@@ -271,8 +238,6 @@ describe('OpenBao Authorizer user workflows', () => {
 
     await user.click(await screen.findByRole('button', { name: /review request/i }))
     await user.click(screen.getByRole('button', { name: 'Reject request' }))
-    const dialog = screen.getByRole('dialog', { name: 'Confirm rejection' })
-    await user.click(within(dialog).getByRole('button', { name: 'Confirm rejection' }))
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
     const [rejectURL, rejectInit] = fetchMock.mock.calls[2]
