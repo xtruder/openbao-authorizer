@@ -56,6 +56,7 @@ func TestNotificationIsGenericAndRemovesGoneSubscription(t *testing.T) {
 	if strings.Contains(payload, "payroll") || strings.Contains(payload, "Alice") {
 		t.Fatalf("sensitive push payload: %s", payload)
 	}
+
 	if !strings.Contains(payload, `"url":"/?request=opaque-request-id"`) {
 		t.Fatalf("push payload URL = %s", payload)
 	}

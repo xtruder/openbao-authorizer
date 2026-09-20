@@ -53,6 +53,7 @@ func TestUpsertDeduplicatesAndEncryptsAccessor(t *testing.T) {
 	if isNew {
 		t.Fatal("second upsert must update existing request")
 	}
+
 	if id == "" || updatedID != id {
 		t.Fatalf("IDs = %q, %q", id, updatedID)
 	}

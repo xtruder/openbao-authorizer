@@ -179,6 +179,7 @@ func TestScanContinuesPastOrdinaryAccessorsAndNotifiesOnce(t *testing.T) {
 	if got := len(notifier.requestIDs); got != 1 {
 		t.Fatalf("notifications = %d, want 1", got)
 	}
+
 	if notifier.requestIDs[0] != "request-pending" {
 		t.Fatalf("notification request ID = %q", notifier.requestIDs[0])
 	}
