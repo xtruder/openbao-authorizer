@@ -17,13 +17,15 @@ import (
 )
 
 type fakeBao struct {
-	approvedToken string
-	loginUsername string
-	loginPassword string
-	renewedToken  string
-	revokedToken  string
-	identity      openbao.Identity
-	readData      json.RawMessage
+	approvedToken    string
+	loginUsername    string
+	loginPassword    string
+	renewedToken     string
+	revokedToken     string
+	revokedAccessor  string
+	identity         openbao.Identity
+	readData         json.RawMessage
+	onRevokeAccessor func()
 }
 
 func (f *fakeBao) LoginUserpass(_ context.Context, username, password string) (openbao.AuthToken, error) {
@@ -43,6 +45,14 @@ func (f *fakeBao) RenewSelf(_ context.Context, token string) error {
 
 func (f *fakeBao) RevokeSelf(_ context.Context, token string) error {
 	f.revokedToken = token
+	return nil
+}
+func (f *fakeBao) RevokeAccessor(_ context.Context, accessor string) error {
+	f.revokedAccessor = accessor
+	if f.onRevokeAccessor != nil {
+		f.onRevokeAccessor()
+	}
+
 	return nil
 }
 
@@ -301,6 +311,79 @@ func TestRequestsRequireAuthentication(t *testing.T) {
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d", response.StatusCode)
+	}
+}
+
+func TestApproverRejectsPendingRequest(t *testing.T) {
+	t.Parallel()
+
+	database, err := store.Open(filepath.Join(t.TempDir(), "app.db"), bytes.Repeat([]byte{0x28}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = database.Close() })
+
+	_, err = database.Upsert(t.Context(), "wrapping-accessor", openbao.ControlGroupRequest{
+		Operation: "read", Path: "github/token/project-authorizer", Entity: openbao.Entity{ID: "alice-id", Name: "Alice"},
+	}, store.UpsertOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	requests, err := database.List(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sessions := NewSessions()
+	sessions.sessions["approver-session"] = session{
+		Token: "human-token", CSRFToken: "csrf", Identity: openbao.Identity{EntityID: "bob-id"}, ExpiresAt: time.Now().Add(time.Hour),
+	}
+	bao := &fakeBao{onRevokeAccessor: func() {
+		changed, transitionErr := database.TransitionStatus(t.Context(), requests[0].ID, store.RequestPending, store.RequestExpired)
+		if transitionErr != nil || !changed {
+			t.Fatalf("simulate scanner expiry: changed=%v error=%v", changed, transitionErr)
+		}
+	}}
+	server := httptest.NewServer(New(Options{
+		OpenBao: bao, Store: database, Events: NewEventBus(), Sessions: sessions, ApproverPolicy: "approver", InsecureCookies: true,
+	}))
+	defer server.Close()
+
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, server.URL+"/api/v1/requests/"+requests[0].ID+"/reject", bytes.NewBufferString(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request.AddCookie(&http.Cookie{Name: "openbao-authorizer-session", Value: "approver-session"})
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-CSRF-Token", "csrf")
+
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() { _ = response.Body.Close() }()
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("reject status = %d", response.StatusCode)
+	}
+
+	if bao.revokedAccessor != "wrapping-accessor" {
+		t.Fatalf("revoked accessor = %q", bao.revokedAccessor)
+	}
+
+	var rejected struct {
+		Status string `json:"status"`
+	}
+	if decodeErr := json.NewDecoder(response.Body).Decode(&rejected); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+
+	if rejected.Status != "rejected" {
+		t.Fatalf("request status = %q", rejected.Status)
 	}
 }
 

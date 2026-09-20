@@ -211,6 +211,11 @@ func (c *Client) RevokeSelf(ctx context.Context, token string) error {
 	return c.call(ctx, http.MethodPost, "/v1/auth/token/revoke-self", token, map[string]string{}, nil, "")
 }
 
+// RevokeAccessor revokes a control-group wrapping token using the scanner token.
+func (c *Client) RevokeAccessor(ctx context.Context, accessor string) error {
+	return c.call(ctx, http.MethodPost, "/v1/auth/token/revoke-accessor", c.scannerToken, map[string]string{"accessor": accessor}, nil, "")
+}
+
 // ListAccessors lists all service-token accessors using the dedicated scanner token.
 func (c *Client) ListAccessors(ctx context.Context) ([]string, error) {
 	var envelope struct {

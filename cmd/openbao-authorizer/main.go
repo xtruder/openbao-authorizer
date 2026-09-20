@@ -198,6 +198,10 @@ func (n *notificationFanout) NewRequest(ctx context.Context, _ string, request o
 	return errors.Join(eventErr, pushErr)
 }
 
+func (n *notificationFanout) StatusChanged(_ context.Context, id string, status store.RequestStatus) error {
+	return n.events.Publish("status", map[string]any{"id": id, "status": status})
+}
+
 func scanLoop(ctx context.Context, logger *slog.Logger, accessorScanner *scanner.Scanner, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

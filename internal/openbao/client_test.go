@@ -219,3 +219,38 @@ func TestAuthorizeUsesHumanToken(t *testing.T) {
 		t.Fatal("expected approved")
 	}
 }
+
+func TestRevokeAccessorUsesScannerToken(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/auth/token/revoke-accessor" || r.Method != http.MethodPost {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+
+		if got := r.Header.Get("X-Vault-Token"); got != "scanner" {
+			t.Fatalf("token header = %q", got)
+		}
+
+		var payload map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+
+		if payload["accessor"] != "wrapping-accessor" {
+			t.Fatalf("accessor = %q", payload["accessor"])
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{Address: server.URL, ScannerToken: "scanner", HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := client.RevokeAccessor(t.Context(), "wrapping-accessor"); err != nil {
+		t.Fatal(err)
+	}
+}

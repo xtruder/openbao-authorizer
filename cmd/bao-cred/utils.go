@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -18,6 +19,8 @@ import (
 )
 
 type progressFunc func(string)
+
+var errRequestClosed = errors.New("request rejected or expired")
 
 func readCredentials(ctx context.Context, client *openbao.Client, path string, pollInterval time.Duration, progress progressFunc) (map[string]any, error) {
 	secret, err := client.Logical().ReadWithContext(ctx, path)
@@ -48,6 +51,10 @@ func readCredentials(ctx context.Context, client *openbao.Client, path string, p
 		attempt++
 		approved, statusErr := controlGroupStatus(ctx, client, secret.WrapInfo.Accessor)
 		if statusErr != nil {
+			if errors.Is(statusErr, errRequestClosed) {
+				return nil, errRequestClosed
+			}
+
 			return nil, fmt.Errorf("check approval: %w", statusErr)
 		}
 
@@ -82,6 +89,11 @@ func readCredentials(ctx context.Context, client *openbao.Client, path string, p
 func controlGroupStatus(ctx context.Context, client *openbao.Client, accessor string) (bool, error) {
 	secret, err := client.Logical().WriteWithContext(ctx, "sys/control-group/request", map[string]any{"accessor": accessor})
 	if err != nil {
+		var responseErr *openbao.ResponseError
+		if errors.As(err, &responseErr) && (responseErr.StatusCode == http.StatusBadRequest || responseErr.StatusCode == http.StatusNotFound) {
+			return false, errRequestClosed
+		}
+
 		return false, err
 	}
 

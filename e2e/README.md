@@ -46,7 +46,7 @@ All credentials, OpenBao state, and application state are disposable. The test v
 - userpass aliases bind Alice and Bob to explicit identity entities;
 - Alice belongs to `e2e-requesters`, Bob belongs to `e2e-approvers`, and both inherit policy through their identity groups;
 - Alice's write to `kv/data/payroll` is deferred by a factor with `approvals = 1` and `self_auth_allowed = false`;
-- the scanner token has only `e2e-scanner`, can list service-token accessors with `sudo`, and can inspect `sys/control-group/request`;
+- the scanner token has only `e2e-scanner`, can list service-token accessors with `sudo`, inspect `sys/control-group/request`, and revoke a rejected wrapping token by accessor;
 - the scanner receives HTTP 403 from `sys/control-group/authorize`, and the denied call does not change request state;
 - the real application scanner discovers and persists the pending request;
 - Bob logs in through `POST /api/v1/session`;

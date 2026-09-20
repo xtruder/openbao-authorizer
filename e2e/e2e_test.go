@@ -341,6 +341,34 @@ requests {
 		t.Fatalf("resulting secret = %+v, want approved marker %q", secret.Data.Data, marker)
 	}
 
+	rejectedWrite := mustCall(t, ctx, bao, alice.Auth.ClientToken, http.MethodPost, "kv/data/payroll", map[string]any{
+		"data": map[string]string{"status": "must-not-run", "marker": "rejected"},
+	}, http.StatusOK)
+	var rejectedWrapping struct {
+		WrapInfo struct {
+			Token    string `json:"token"`
+			Accessor string `json:"accessor"`
+		} `json:"wrap_info"`
+	}
+	decodeResponse(t, rejectedWrite, &rejectedWrapping)
+	if rejectedWrapping.WrapInfo.Token == "" || rejectedWrapping.WrapInfo.Accessor == "" {
+		t.Fatal("second protected write did not return wrapping details")
+	}
+
+	rejectedID := waitForApplicationRequest(t, ctx, application, "kv/data/payroll")
+	rejection := mustCallWithHeaders(t, ctx, application, "", http.MethodPost, "api/v1/requests/"+url.PathEscape(rejectedID)+"/reject", map[string]any{}, approvalHeaders, http.StatusOK)
+	var rejectedApplicationRequest struct {
+		Status string `json:"status"`
+	}
+	decodeResponse(t, rejection, &rejectedApplicationRequest)
+	if rejectedApplicationRequest.Status != "rejected" {
+		t.Fatalf("application rejection status = %q", rejectedApplicationRequest.Status)
+	}
+
+	mustCall(t, ctx, bao, scannerToken, http.MethodPost, "sys/control-group/request", map[string]string{"accessor": rejectedWrapping.WrapInfo.Accessor}, http.StatusBadRequest, http.StatusNotFound)
+
+	t.Log("application rejected a second request and revoked its wrapping token")
+
 	t.Log("real OpenBao control-group workflow passed")
 }
 
@@ -532,12 +560,13 @@ func waitForApplicationRequest(t *testing.T, ctx context.Context, application *l
 		response, status, err := callAPI(ctx, application, "", http.MethodGet, "api/v1/requests", nil, nil)
 		if err == nil && status == http.StatusOK {
 			var requests []struct {
-				ID   string `json:"id"`
-				Path string `json:"path"`
+				ID     string `json:"id"`
+				Path   string `json:"path"`
+				Status string `json:"status"`
 			}
 			if json.Unmarshal(response, &requests) == nil {
 				for _, request := range requests {
-					if request.Path == path && request.ID != "" {
+					if request.Path == path && request.ID != "" && request.Status == "pending" {
 						return request.ID
 					}
 				}

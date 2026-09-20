@@ -45,10 +45,25 @@ type UpsertOptions struct {
 	ApprovalContext ApprovalContextUpdate
 }
 
+// RequestStatus is the durable lifecycle state of a control-group request.
+type RequestStatus string
+
+const (
+	// RequestPending can still be approved or rejected.
+	RequestPending RequestStatus = "pending"
+	// RequestApproved was authorized by the control group.
+	RequestApproved RequestStatus = "approved"
+	// RequestRejected was explicitly revoked by an approver.
+	RequestRejected RequestStatus = "rejected"
+	// RequestExpired disappeared before an approval decision.
+	RequestExpired RequestStatus = "expired"
+)
+
 // Request is a stored control-group request. The raw accessor is intentionally absent.
 type Request struct {
 	ID              string                   `json:"id"`
 	Approved        bool                     `json:"approved"`
+	Status          RequestStatus            `json:"status"`
 	Operation       string                   `json:"operation"`
 	Path            string                   `json:"path"`
 	Data            json.RawMessage          `json:"data,omitempty"`
@@ -138,6 +153,7 @@ CREATE TABLE IF NOT EXISTS requests (
   accessor_nonce BLOB NOT NULL,
   accessor_ciphertext BLOB NOT NULL,
   approved INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
   operation TEXT NOT NULL,
   path TEXT NOT NULL,
   data_nonce BLOB NOT NULL,
@@ -175,6 +191,14 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 	if err := d.addColumn(ctx, "requests", "approval_context_ciphertext", "BLOB"); err != nil {
 		return err
+	}
+
+	if err := d.addColumn(ctx, "requests", "status", "TEXT NOT NULL DEFAULT 'pending'"); err != nil {
+		return err
+	}
+
+	if _, err := d.db.ExecContext(ctx, "UPDATE requests SET status = 'approved' WHERE approved = 1 AND status = 'pending'"); err != nil {
+		return fmt.Errorf("migrate request statuses: %w", err)
 	}
 
 	return nil
@@ -260,22 +284,27 @@ func (d *DB) Upsert(ctx context.Context, accessor string, request openbao.Contro
 		return false, err
 	}
 
+	status := RequestPending
+	if request.Approved {
+		status = RequestApproved
+	}
+
 	if isNew {
 		_, err = d.db.ExecContext(ctx, `INSERT INTO requests
-(id, fingerprint, accessor_nonce, accessor_ciphertext, approved, operation, path, data_nonce, data_ciphertext, approval_context_nonce, approval_context_ciphertext, requester_id, requester_name, authorizations, first_seen, last_seen)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, fingerprint, accessorNonce, accessorCiphertext, request.Approved, request.Operation, request.Path,
+(id, fingerprint, accessor_nonce, accessor_ciphertext, approved, status, operation, path, data_nonce, data_ciphertext, approval_context_nonce, approval_context_ciphertext, requester_id, requester_name, authorizations, first_seen, last_seen)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, fingerprint, accessorNonce, accessorCiphertext, request.Approved, status, request.Operation, request.Path,
 			dataNonce, dataCiphertext, approvalContextNonce, approvalContextCiphertext, request.Entity.ID, request.Entity.Name, authorizations, now, now)
 	} else {
 		if options.ApprovalContext == ReplaceApprovalContext {
 			_, err = d.db.ExecContext(ctx, `UPDATE requests SET
-accessor_nonce = ?, accessor_ciphertext = ?, approved = ?, operation = ?, path = ?, data_nonce = ?, data_ciphertext = ?, approval_context_nonce = ?, approval_context_ciphertext = ?, requester_id = ?, requester_name = ?, authorizations = ?, last_seen = ?
-WHERE id = ?`, accessorNonce, accessorCiphertext, request.Approved, request.Operation, request.Path,
+accessor_nonce = ?, accessor_ciphertext = ?, approved = CASE WHEN status IN ('rejected', 'expired') THEN approved ELSE ? END, status = CASE WHEN status IN ('rejected', 'expired') THEN status ELSE ? END, operation = ?, path = ?, data_nonce = ?, data_ciphertext = ?, approval_context_nonce = ?, approval_context_ciphertext = ?, requester_id = ?, requester_name = ?, authorizations = ?, last_seen = ?
+WHERE id = ?`, accessorNonce, accessorCiphertext, request.Approved, status, request.Operation, request.Path,
 				dataNonce, dataCiphertext, approvalContextNonce, approvalContextCiphertext, request.Entity.ID, request.Entity.Name, authorizations, now, id)
 		} else {
 			_, err = d.db.ExecContext(ctx, `UPDATE requests SET
-accessor_nonce = ?, accessor_ciphertext = ?, approved = ?, operation = ?, path = ?, data_nonce = ?, data_ciphertext = ?, requester_id = ?, requester_name = ?, authorizations = ?, last_seen = ?
-WHERE id = ?`, accessorNonce, accessorCiphertext, request.Approved, request.Operation, request.Path,
+accessor_nonce = ?, accessor_ciphertext = ?, approved = CASE WHEN status IN ('rejected', 'expired') THEN approved ELSE ? END, status = CASE WHEN status IN ('rejected', 'expired') THEN status ELSE ? END, operation = ?, path = ?, data_nonce = ?, data_ciphertext = ?, requester_id = ?, requester_name = ?, authorizations = ?, last_seen = ?
+WHERE id = ?`, accessorNonce, accessorCiphertext, request.Approved, status, request.Operation, request.Path,
 				dataNonce, dataCiphertext, request.Entity.ID, request.Entity.Name, authorizations, now, id)
 		}
 	}
@@ -289,7 +318,7 @@ WHERE id = ?`, accessorNonce, accessorCiphertext, request.Approved, request.Oper
 
 // List returns all discovered requests, newest first.
 func (d *DB) List(ctx context.Context) ([]Request, error) {
-	rows, err := d.db.QueryContext(ctx, `SELECT id, approved, operation, path, data_nonce, data_ciphertext, approval_context_nonce, approval_context_ciphertext,
+	rows, err := d.db.QueryContext(ctx, `SELECT id, approved, status, operation, path, data_nonce, data_ciphertext, approval_context_nonce, approval_context_ciphertext,
 requester_id, requester_name, authorizations, first_seen, last_seen FROM requests ORDER BY first_seen DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list requests: %w", err)
@@ -302,7 +331,7 @@ requester_id, requester_name, authorizations, first_seen, last_seen FROM request
 		var request Request
 		var dataNonce, dataCiphertext, approvalContextNonce, approvalContextCiphertext, authorizations []byte
 		var firstSeen, lastSeen string
-		if err := rows.Scan(&request.ID, &request.Approved, &request.Operation, &request.Path, &dataNonce, &dataCiphertext, &approvalContextNonce, &approvalContextCiphertext,
+		if err := rows.Scan(&request.ID, &request.Approved, &request.Status, &request.Operation, &request.Path, &dataNonce, &dataCiphertext, &approvalContextNonce, &approvalContextCiphertext,
 			&request.Entity.ID, &request.Entity.Name, &authorizations, &firstSeen, &lastSeen); err != nil {
 			return nil, fmt.Errorf("scan request: %w", err)
 		}
@@ -372,7 +401,12 @@ func (d *DB) Accessor(ctx context.Context, id string) (string, error) {
 
 // SetApproved updates the locally cached approval status.
 func (d *DB) SetApproved(ctx context.Context, id string, approved bool) error {
-	result, err := d.db.ExecContext(ctx, "UPDATE requests SET approved = ?, last_seen = ? WHERE id = ?", approved, time.Now().UTC().Format(time.RFC3339Nano), id)
+	status := RequestPending
+	if approved {
+		status = RequestApproved
+	}
+
+	result, err := d.db.ExecContext(ctx, "UPDATE requests SET approved = ?, status = ?, last_seen = ? WHERE id = ? AND status = ?", approved, status, time.Now().UTC().Format(time.RFC3339Nano), id, RequestPending)
 	if err != nil {
 		return fmt.Errorf("update request: %w", err)
 	}
@@ -383,10 +417,88 @@ func (d *DB) SetApproved(ctx context.Context, id string, approved bool) error {
 	}
 
 	if rows == 0 {
-		return ErrNotFound
+		return ErrStatusChanged
 	}
 
 	return nil
+}
+
+// TransitionStatus atomically changes a request from one lifecycle state to another.
+func (d *DB) TransitionStatus(ctx context.Context, id string, from, to RequestStatus) (bool, error) {
+	if !validRequestStatus(from) || !validRequestStatus(to) {
+		return false, fmt.Errorf("invalid request status transition %q to %q", from, to)
+	}
+
+	result, err := d.db.ExecContext(ctx, "UPDATE requests SET status = ?, approved = ? WHERE id = ? AND status = ?", to, to == RequestApproved, id, from)
+	if err != nil {
+		return false, fmt.Errorf("transition request status: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("read status transition result: %w", err)
+	}
+
+	return rows == 1, nil
+}
+
+func validRequestStatus(status RequestStatus) bool {
+	return status == RequestPending || status == RequestApproved || status == RequestRejected || status == RequestExpired
+}
+
+// ExpireMissing marks pending requests absent from a complete accessor snapshot.
+func (d *DB) ExpireMissing(ctx context.Context, accessors []string) ([]string, error) {
+	present := make(map[string]struct{}, len(accessors))
+	for _, accessor := range accessors {
+		present[hex.EncodeToString(d.fingerprint(accessor))] = struct{}{}
+	}
+
+	rows, err := d.db.QueryContext(ctx, "SELECT id, fingerprint FROM requests WHERE status = ?", RequestPending)
+	if err != nil {
+		return nil, fmt.Errorf("list pending request fingerprints: %w", err)
+	}
+
+	var expired []string
+	for rows.Next() {
+		var id string
+		var fingerprint []byte
+		if err := rows.Scan(&id, &fingerprint); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("scan pending request fingerprint: %w", err)
+		}
+
+		if _, ok := present[hex.EncodeToString(fingerprint)]; !ok {
+			expired = append(expired, id)
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("iterate pending request fingerprints: %w", err)
+	}
+
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close pending request fingerprints: %w", err)
+	}
+
+	changed := make([]string, 0, len(expired))
+	for _, id := range expired {
+		result, err := d.db.ExecContext(ctx, "UPDATE requests SET status = ?, approved = 0 WHERE id = ? AND status = ?", RequestExpired, id, RequestPending)
+		if err != nil {
+			return nil, fmt.Errorf("expire missing request: %w", err)
+		}
+
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return nil, fmt.Errorf("read expiration result: %w", err)
+		}
+
+		if rows == 1 {
+			changed = append(changed, id)
+		}
+	}
+
+	return changed, nil
 }
 
 // PutSession creates or replaces an encrypted durable application session.
@@ -570,6 +682,9 @@ func (d *DB) DeleteSubscriptionsByEntity(ctx context.Context, entityID string) e
 
 // ErrNotFound marks an unknown opaque application request ID.
 var ErrNotFound = errors.New("request not found")
+
+// ErrStatusChanged marks a request that left pending before a decision completed.
+var ErrStatusChanged = errors.New("request status changed")
 
 func (d *DB) fingerprint(value string) []byte {
 	mac := hmac.New(sha256.New, d.key)

@@ -23,11 +23,16 @@ type OpenBao interface {
 // Sink persists discovered requests and reports whether they are new.
 type Sink interface {
 	Upsert(context.Context, string, openbao.ControlGroupRequest, store.UpsertOptions) (bool, error)
+	ExpireMissing(context.Context, []string) ([]string, error)
 }
 
 // Notifier emits a notification for a newly discovered request.
 type Notifier interface {
 	NewRequest(context.Context, string, openbao.ControlGroupRequest) error
+}
+
+type statusNotifier interface {
+	StatusChanged(context.Context, string, store.RequestStatus) error
 }
 
 // Scanner probes service-token accessors with bounded concurrency.
@@ -123,6 +128,16 @@ func (s *Scanner) Scan(ctx context.Context) error {
 
 	close(jobs)
 	wg.Wait()
+	expired, expireErr := s.sink.ExpireMissing(ctx, accessors)
+	if expireErr != nil {
+		scanErrors = append(scanErrors, fmt.Errorf("expire missing requests: %w", expireErr))
+	} else if notifier, ok := s.notifier.(statusNotifier); ok {
+		for _, id := range expired {
+			if notifyErr := notifier.StatusChanged(ctx, id, store.RequestExpired); notifyErr != nil {
+				scanErrors = append(scanErrors, fmt.Errorf("notify request status: %w", notifyErr))
+			}
+		}
+	}
 
 	return errors.Join(scanErrors...)
 }

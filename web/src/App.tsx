@@ -73,7 +73,7 @@ function authorizationLabel(value: unknown) {
 function isApprovalRequest(value: unknown): value is ApprovalRequest {
   if (!value || typeof value !== 'object') return false
   const request = value as Partial<ApprovalRequest>
-  return typeof request.id === 'string' && typeof request.path === 'string' && typeof request.approved === 'boolean'
+  return typeof request.id === 'string' && typeof request.path === 'string' && ['pending', 'approved', 'rejected', 'expired'].includes(request.status ?? '')
 }
 
 function Brand({ compact = false }: { compact?: boolean }) {
@@ -244,16 +244,30 @@ function ConnectionBadge({ state }: { state: ConnectionState }) {
   )
 }
 
+const statusLabels = {
+  pending: 'Pending',
+  approved: 'Approved',
+  rejected: 'Rejected',
+  expired: 'Expired',
+} as const
+
+const statusIconClasses = {
+  pending: 'border-amber-200 bg-amber-50 text-amber-700',
+  approved: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+  rejected: 'border-red-200 bg-red-50 text-red-700',
+  expired: 'border-zinc-200 bg-zinc-50 text-zinc-500',
+} as const
+
 function RequestRow({ request, onReview }: { request: ApprovalRequest; onReview: (trigger: HTMLButtonElement) => void }) {
   return (
     <article className="request-row group">
       <div className="flex min-w-0 flex-1 gap-3.5 sm:gap-5">
-        <div className={`mt-0.5 grid size-10 shrink-0 place-items-center rounded-sm border ${request.approved ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-amber-200 bg-amber-50 text-amber-700'}`}>
-          {request.approved ? <CheckIcon className="size-5" /> : <ClockIcon className="size-5" />}
+        <div className={`mt-0.5 grid size-10 shrink-0 place-items-center rounded-sm border ${statusIconClasses[request.status]}`}>
+          {request.status === 'approved' ? <CheckIcon className="size-5" /> : request.status === 'rejected' ? <CloseIcon className="size-5" /> : <ClockIcon className="size-5" />}
         </div>
         <div className="min-w-0 flex-1">
           <div className="mb-2 flex flex-wrap items-center gap-2">
-            <span className={`status-pill ${request.approved ? 'status-approved' : 'status-pending'}`}>{request.approved ? 'Approved' : 'Pending'}</span>
+            <span className={`status-pill status-${request.status}`}>{statusLabels[request.status]}</span>
             <span className="operation-pill">{formatOperation(request.operation)}</span>
           </div>
           <h3 className="truncate font-mono text-[13px] font-semibold text-zinc-900 sm:text-sm" title={request.path}>{request.path}</h3>
@@ -271,16 +285,20 @@ function RequestRow({ request, onReview }: { request: ApprovalRequest; onReview:
 }
 
 function EmptyState({ filter }: { filter: RequestFilter }) {
+  const content = {
+    pending: ['Queue is clear', 'New control group requests will appear here as they arrive.'],
+    approved: ['No approved requests', 'Requests you approve will be collected here.'],
+    rejected: ['No rejected requests', 'Requests you reject will be collected here.'],
+    expired: ['No expired requests', 'Requests that expire before a decision will be collected here.'],
+  }[filter]
   return (
     <div className="grid min-h-[390px] place-items-center px-6 py-16 text-center">
       <div>
         <div className="mx-auto grid size-14 place-items-center rounded-full border border-zinc-200 bg-zinc-50 text-zinc-400">
-          {filter === 'pending' ? <InboxIcon className="size-6" /> : <CheckIcon className="size-6" />}
+          {filter === 'pending' ? <InboxIcon className="size-6" /> : filter === 'approved' ? <CheckIcon className="size-6" /> : filter === 'rejected' ? <CloseIcon className="size-6" /> : <ClockIcon className="size-6" />}
         </div>
-        <h3 className="mt-5 text-base font-semibold text-zinc-900">{filter === 'pending' ? 'Queue is clear' : 'No approved requests'}</h3>
-        <p className="mx-auto mt-2 max-w-xs text-sm leading-6 text-zinc-500">
-          {filter === 'pending' ? 'New control group requests will appear here as they arrive.' : 'Requests you approve will be collected here.'}
-        </p>
+        <h3 className="mt-5 text-base font-semibold text-zinc-900">{content[0]}</h3>
+        <p className="mx-auto mt-2 max-w-xs text-sm leading-6 text-zinc-500">{content[1]}</p>
       </div>
     </div>
   )
@@ -305,11 +323,12 @@ function ApprovalContextView({ context, compact = false }: { context: ApprovalCo
   )
 }
 
-function RequestDetail({ request, onBack, onApprove, approving }: {
+function RequestDetail({ request, onBack, onApprove, onReject, submitting }: {
   request: ApprovalRequest
   onBack: () => void
   onApprove: () => void
-  approving: boolean
+  onReject: () => void
+  submitting: boolean
 }) {
   const headingRef = useRef<HTMLHeadingElement>(null)
 
@@ -323,7 +342,7 @@ function RequestDetail({ request, onBack, onApprove, approving }: {
         <button type="button" onClick={onBack} className="icon-button lg:hidden" aria-label="Back to requests"><ArrowLeftIcon className="size-5" /></button>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className={`status-pill ${request.approved ? 'status-approved' : 'status-pending'}`}>{request.approved ? 'Approved' : 'Pending review'}</span>
+            <span className={`status-pill status-${request.status}`}>{request.status === 'pending' ? 'Pending review' : statusLabels[request.status]}</span>
             <span className="operation-pill">{formatOperation(request.operation)}</span>
           </div>
           <h2 ref={headingRef} id="request-detail-title" tabIndex={-1} className="mt-3 break-all font-mono text-base font-semibold leading-6 text-zinc-950">{request.path}</h2>
@@ -386,20 +405,22 @@ function RequestDetail({ request, onBack, onApprove, approving }: {
       </div>
 
       <div className="detail-footer">
-        {request.approved ? (
-          <div className="flex w-full items-center justify-center gap-2 rounded-sm border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-700"><CheckIcon className="size-4" />Approved</div>
+        {request.status !== 'pending' ? (
+          <div className={`flex w-full items-center justify-center gap-2 rounded-sm border px-4 py-3 text-sm font-semibold status-${request.status}`}>{request.status === 'approved' ? <CheckIcon className="size-4" /> : request.status === 'rejected' ? <CloseIcon className="size-4" /> : <ClockIcon className="size-4" />}{statusLabels[request.status]}</div>
         ) : (
-          <button type="button" onClick={onApprove} disabled={approving} className="approve-button w-full">
-            <ShieldIcon className="size-4" />Approve request
-          </button>
+          <div className="grid w-full grid-cols-2 gap-2">
+            <button type="button" onClick={onReject} disabled={submitting} className="reject-button"><CloseIcon className="size-4" />Reject request</button>
+            <button type="button" onClick={onApprove} disabled={submitting} className="approve-button"><ShieldIcon className="size-4" />Approve request</button>
+          </div>
         )}
       </div>
     </section>
   )
 }
 
-function ConfirmationDialog({ request, submitting, error, onCancel, onConfirm }: {
+function ConfirmationDialog({ request, action, submitting, error, onCancel, onConfirm }: {
   request: ApprovalRequest
+  action: 'approve' | 'reject'
   submitting: boolean
   error: string
   onCancel: () => void
@@ -469,9 +490,9 @@ function ConfirmationDialog({ request, submitting, error, onCancel, onConfirm }:
       className="dialog-backdrop"
     >
       <div className="dialog-card">
-        <div className="grid size-11 place-items-center rounded-full bg-brand-soft text-zinc-900"><ShieldIcon className="size-5" /></div>
-        <h2 id="confirmation-title" className="mt-5 text-xl font-semibold tracking-[-0.02em] text-zinc-950">Confirm approval</h2>
-        <p id="confirmation-description" className="mt-2 text-sm leading-6 text-zinc-600">This authorizes the operation below. This action cannot be undone.</p>
+        <div className={`grid size-11 place-items-center rounded-full ${action === 'approve' ? 'bg-brand-soft text-zinc-900' : 'bg-red-50 text-red-700'}`}>{action === 'approve' ? <ShieldIcon className="size-5" /> : <CloseIcon className="size-5" />}</div>
+        <h2 id="confirmation-title" className="mt-5 text-xl font-semibold tracking-[-0.02em] text-zinc-950">Confirm {action === 'approve' ? 'approval' : 'rejection'}</h2>
+        <p id="confirmation-description" className="mt-2 text-sm leading-6 text-zinc-600">This {action === 'approve' ? 'authorizes the operation' : 'revokes the pending request'}. This action cannot be undone.</p>
         <div className="mt-5 rounded-sm border border-zinc-200 bg-zinc-50 p-3.5">
           <p className="font-mono text-xs font-semibold text-zinc-900 break-all">{request.path}</p>
           <p className="mt-1.5 text-xs text-zinc-500">{formatOperation(request.operation)} requested by {request.entity.name || request.entity.id}</p>
@@ -480,8 +501,8 @@ function ConfirmationDialog({ request, submitting, error, onCancel, onConfirm }:
         {error && <div role="alert" className="mt-4 rounded-sm border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-700">{error}</div>}
         <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
           <button type="button" onClick={onCancel} disabled={submitting} className="secondary-button">Cancel</button>
-          <button ref={confirmRef} type="button" onClick={onConfirm} disabled={submitting} className="approve-button">
-            {submitting ? <><span className="button-spinner dark" />Approving…</> : <><CheckIcon className="size-4" />Confirm approval</>}
+          <button ref={confirmRef} type="button" onClick={onConfirm} disabled={submitting} className={action === 'approve' ? 'approve-button' : 'reject-button'}>
+            {submitting ? <><span className="button-spinner dark" />{action === 'approve' ? 'Approving…' : 'Rejecting…'}</> : <>{action === 'approve' ? <CheckIcon className="size-4" /> : <CloseIcon className="size-4" />}Confirm {action === 'approve' ? 'approval' : 'rejection'}</>}
           </button>
         </div>
       </div>
@@ -507,8 +528,11 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
   const [error, setError] = useState('')
   const [connection, setConnection] = useState<ConnectionState>(navigator.onLine ? 'connecting' : 'offline')
   const [confirming, setConfirming] = useState<ApprovalRequest | null>(null)
+  const [rejectingRequest, setRejectingRequest] = useState<ApprovalRequest | null>(null)
   const [approving, setApproving] = useState(false)
+  const [rejecting, setRejecting] = useState(false)
   const [approvalError, setApprovalError] = useState('')
+  const [rejectionError, setRejectionError] = useState('')
   const [signingOut, setSigningOut] = useState(false)
   const [signOutError, setSignOutError] = useState('')
   const [notificationStatus, setNotificationStatus] = useState<'idle' | 'enabling' | 'enabled' | 'disabling' | 'unsupported'>(() => {
@@ -597,12 +621,8 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
     return () => window.clearTimeout(timeout)
   }, [notice])
 
-  const pendingCount = requests.filter((request) => !request.approved).length
-  const approvedCount = requests.filter((request) => request.approved).length
-  const visibleRequests = useMemo(
-    () => requests.filter((request) => filter === 'approved' ? request.approved : !request.approved),
-    [filter, requests],
-  )
+  const counts = Object.fromEntries(['pending', 'approved', 'rejected', 'expired'].map((status) => [status, requests.filter((request) => request.status === status).length]))
+  const visibleRequests = useMemo(() => requests.filter((request) => request.status === filter), [filter, requests])
   const selected = requests.find((request) => request.id === selectedId) ?? null
   const operatorName = identityName(session.identity)
 
@@ -650,6 +670,34 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
       setApprovalError(getErrorMessage(caught, 'Approval failed. Try again.'))
     } finally {
       setApproving(false)
+    }
+  }
+
+  async function reject() {
+    const confirmed = rejectingRequest
+    if (!confirmed || rejecting) return
+    setRejecting(true)
+    setRejectionError('')
+    try {
+      const refreshed = await api.rejectRequest(confirmed.id, session.csrfToken)
+      setRequests((current) => current.map((request) => request.id === refreshed.id ? refreshed : request))
+      setSelectedId(refreshed.id)
+      setRejectingRequest(null)
+      setNotice('Request rejected and revoked.')
+    } catch (caught) {
+      if (isSessionLost(caught)) {
+        onSignedOut()
+        return
+      }
+      if (caught instanceof ApiError && caught.status === 409) {
+        await loadRequests(true)
+        setRejectingRequest(null)
+        setNotice(caught.message)
+        return
+      }
+      setRejectionError(getErrorMessage(caught, 'Rejection failed. Try again.'))
+    } finally {
+      setRejecting(false)
     }
   }
 
@@ -726,8 +774,8 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
     <>
       <div
         className="min-h-svh bg-canvas text-zinc-900"
-        inert={confirming !== null}
-        aria-hidden={confirming ? 'true' : undefined}
+        inert={confirming !== null || rejectingRequest !== null}
+        aria-hidden={confirming || rejectingRequest ? 'true' : undefined}
       >
       <header className="sticky top-0 z-30 border-b border-white/10 bg-ink text-white shadow-[0_1px_0_rgba(0,0,0,.2)]">
         <div className="mx-auto flex h-16 max-w-[1600px] items-center gap-3 px-4 sm:px-6 lg:px-8">
@@ -785,11 +833,13 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
             <div className="list-toolbar">
               <div className="filter-tabs" role="group" aria-label="Filter requests">
                 <button type="button" aria-pressed={filter === 'pending'} onClick={() => setFilter('pending')} className={filter === 'pending' ? 'active' : ''}>
-                  Pending <span>{pendingCount}</span>
+                  Pending <span>{counts.pending}</span>
                 </button>
                 <button type="button" aria-pressed={filter === 'approved'} onClick={() => setFilter('approved')} className={filter === 'approved' ? 'active' : ''}>
-                  Approved <span>{approvedCount}</span>
+                  Approved <span>{counts.approved}</span>
                 </button>
+                <button type="button" aria-pressed={filter === 'rejected'} onClick={() => setFilter('rejected')} className={filter === 'rejected' ? 'active' : ''}>Rejected <span>{counts.rejected}</span></button>
+                <button type="button" aria-pressed={filter === 'expired'} onClick={() => setFilter('expired')} className={filter === 'expired' ? 'active' : ''}>Expired <span>{counts.expired}</span></button>
               </div>
               <p className="hidden text-xs text-zinc-400 sm:block">{visibleRequests.length} {visibleRequests.length === 1 ? 'request' : 'requests'}</p>
             </div>
@@ -805,7 +855,7 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
             ) : <EmptyState filter={filter} />}
           </section>
 
-          {selected && <RequestDetail key={`${selected.id}-${selected.approved}`} request={selected} approving={approving} onBack={() => setSelectedId(null)} onApprove={() => { setApprovalError(''); setConfirming(selected) }} />}
+          {selected && <RequestDetail key={`${selected.id}-${selected.status}`} request={selected} submitting={approving || rejecting} onBack={() => setSelectedId(null)} onApprove={() => { setApprovalError(''); setConfirming(selected) }} onReject={() => { setRejectionError(''); setRejectingRequest(selected) }} />}
           {!selected && (
             <aside className="detail-placeholder hidden lg:grid">
               <div className="max-w-xs text-center">
@@ -820,7 +870,8 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
 
         {notice && <div className="toast" role="status" aria-live="polite"><CheckIcon className="size-4 shrink-0 text-brand-dark" />{notice}</div>}
       </div>
-      {confirming && <ConfirmationDialog request={confirming} submitting={approving} error={approvalError} onCancel={() => setConfirming(null)} onConfirm={() => void approve()} />}
+      {confirming && <ConfirmationDialog request={confirming} action="approve" submitting={approving} error={approvalError} onCancel={() => setConfirming(null)} onConfirm={() => void approve()} />}
+      {rejectingRequest && <ConfirmationDialog request={rejectingRequest} action="reject" submitting={rejecting} error={rejectionError} onCancel={() => setRejectingRequest(null)} onConfirm={() => void reject()} />}
     </>
   )
 }

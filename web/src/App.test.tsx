@@ -11,6 +11,7 @@ const identity = {
 const pendingRequest = {
   id: 'req-7f31',
   approved: false,
+  status: 'pending',
   operation: 'update',
   path: 'secret/data/production/payments',
   data: { ttl: '30m', reason: 'Emergency credential rotation' },
@@ -191,7 +192,7 @@ describe('OpenBao Authorizer user workflows', () => {
 
   it('requires confirmation before approving the selected request', async () => {
     const user = userEvent.setup()
-    const approvedRequest = { ...pendingRequest, approved: true }
+    const approvedRequest = { ...pendingRequest, approved: true, status: 'approved' }
     const fetchMock = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse({ identity, csrfToken: 'csrf-approve' }))
       .mockResolvedValueOnce(jsonResponse([pendingRequest]))
@@ -219,5 +220,28 @@ describe('OpenBao Authorizer user workflows', () => {
     expect(new Headers(approveInit?.headers).get('X-CSRF-Token')).toBe('csrf-approve')
     expect((await screen.findAllByText('Approved')).length).toBeGreaterThan(0)
     expect(screen.getByRole('heading', { level: 2, name: approvedRequest.path })).toHaveFocus()
+  })
+
+  it('requires confirmation before rejecting and revoking a pending request', async () => {
+    const user = userEvent.setup()
+    const rejectedRequest = { ...pendingRequest, status: 'rejected' }
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ identity, csrfToken: 'csrf-reject' }))
+      .mockResolvedValueOnce(jsonResponse([pendingRequest]))
+      .mockResolvedValueOnce(jsonResponse(rejectedRequest))
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /review request/i }))
+    await user.click(screen.getByRole('button', { name: 'Reject request' }))
+    const dialog = screen.getByRole('dialog', { name: 'Confirm rejection' })
+    await user.click(within(dialog).getByRole('button', { name: 'Confirm rejection' }))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+    const [rejectURL, rejectInit] = fetchMock.mock.calls[2]
+    expect(rejectURL).toBe('/api/v1/requests/req-7f31/reject')
+    expect(new Headers(rejectInit?.headers).get('X-CSRF-Token')).toBe('csrf-reject')
+    expect((await screen.findAllByText('Rejected')).length).toBeGreaterThan(0)
   })
 })

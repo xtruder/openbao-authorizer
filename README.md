@@ -8,7 +8,7 @@ A self-hosted approval inbox for [OpenBao control groups](https://openbao.org/co
 
 Two OpenBao credentials have deliberately different roles:
 
-- **Scanner token:** lists service-token accessors, calls `sys/control-group/request`, and may read explicitly configured non-secret approval metadata. It cannot approve, unwrap, revoke, or renew. Context-reader policies must expose only data safe for every approver to inspect.
+- **Scanner token:** lists service-token accessors, calls `sys/control-group/request`, may revoke a reviewed wrapping token after an authenticated approver rejects it, and may read explicitly configured non-secret approval metadata. It cannot approve, unwrap, or renew. Context-reader policies must expose only data safe for every approver to inspect.
 - **Human token:** obtained by exchanging username/password with OpenBao's `userpass` auth method, encrypted in the server-side SQLite session store, renewed while the 30-day app session is active, and used for `sys/control-group/authorize`. The password is discarded immediately. Login and every authenticated request require the configured `APPROVER_POLICY`; OpenBao—not this app—then decides whether that identity satisfies each request's control-group factor and prevents disallowed self-approval.
 
 The browser receives neither OpenBao token nor password after login. Its opaque 30-day session is an `HttpOnly`, `SameSite=Strict`, secure cookie; encrypted server-side sessions survive application restarts. Mutations require a session-bound CSRF token, JSON content type, and same-origin checks. Signing out revokes the human token. Wrapping tokens remain with requesters; the app never stores or unwraps them.
@@ -20,7 +20,7 @@ Accessors, deferred request payloads, and push subscriptions are AES-256-GCM enc
 ```text
 OpenBao ── LIST accessors / inspect ──> Go scanner ──> encrypted SQLite
    ^                                         │              │
-   │ human authorize                         ├── SSE ────────┤
+   │ human authorize / app revoke            ├── SSE ────────┤
    │                                         └── Web Push    │
 Browser PWA ── HttpOnly session + CSRF ──> Go HTTP API ─────┘
 ```
@@ -93,7 +93,7 @@ bao token create -orphan \
   -renewable=false
 ```
 
-The scanner policy uses path-scoped `sudo`; it is not a root token. Listing `auth/token/accessors` still exposes every service-token accessor and must be tightly controlled. The `-no-default-policy` flag is required: without it, OpenBao attaches capabilities such as token self-renewal that are outside the documented scanner role.
+The scanner policy uses path-scoped `sudo`; it is not a root token. Listing `auth/token/accessors` exposes every service-token accessor, and `auth/token/revoke-accessor` can revoke any token whose accessor is supplied, so this credential must be tightly controlled. The application invokes revocation only for an encrypted accessor belonging to a stored pending request after an authenticated, CSRF-protected rejection. The `-no-default-policy` flag is required: without it, OpenBao attaches capabilities such as token self-renewal that are outside the documented scanner role.
 
 Each protected factor must explicitly set `approvals >= 1` and should leave self-authorization disabled:
 
@@ -274,6 +274,11 @@ provided its persistent approver session remains active. Push messages contain
 only a generic pending-approval notice; request details still require opening
 the authenticated app.
 
+Requests move through `pending`, `approved`, `rejected`, or `expired` states.
+Rejected and expired requests leave the default pending queue but remain
+available in their corresponding history tabs. A complete scanner snapshot
+marks pending records expired when their wrapping accessor has disappeared.
+
 ### Frontend development
 
 Run the Go server on port 8080, then:
@@ -293,6 +298,7 @@ The Vite dev server proxies `/api` to `http://127.0.0.1:8080`.
 - `DELETE /api/v1/session` — sign out
 - `GET /api/v1/requests` — list discovered requests without accessors
 - `POST /api/v1/requests/{id}/approve` — approve with the session's human token
+- `POST /api/v1/requests/{id}/reject` — revoke the wrapping token and mark the request rejected
 - `GET /api/v1/events` — same-origin SSE update hints
 - `GET /api/v1/push/public-key`, `POST /api/v1/push/subscriptions`, and `DELETE /api/v1/push/subscriptions` — Web Push enrollment/removal
 - `GET /healthz` — process health
@@ -302,6 +308,6 @@ The Vite dev server proxies `/api` to `http://127.0.0.1:8080`.
 - Encrypted sessions and subscriptions are durable in SQLite, while SSE fan-out remains process-local; deploy one instance unless you add shared event infrastructure.
 - SQLite is suited to one app instance. Back it up together with the external encryption key.
 - Discovery cost scales with all active service-token accessors because OpenBao has no pending-control-group list endpoint.
-- OpenBao currently provides authorize, review, and unwrap operations, not a durable reject operation.
+- OpenBao provides no native durable rejection state. The application records rejection locally and revokes the wrapping token by accessor; `bao-cred` reports a revoked or naturally expired request as `request rejected or expired`.
 - Browser push is best-effort. The request list and SSE remain authoritative.
 - Deferred request payloads are encrypted at rest and redacted from the API by default. If `requests.expose_data = true`, every app approver can view them; use that only where submitted fields are safe to disclose.

@@ -63,6 +63,10 @@ func TestUpsertDeduplicatesAndEncryptsAccessor(t *testing.T) {
 		t.Fatalf("records = %#v", records)
 	}
 
+	if records[0].Status != RequestApproved {
+		t.Fatalf("status = %q", records[0].Status)
+	}
+
 	if records[0].ApprovalContext == nil || !records[0].ApprovalContext.Available || string(records[0].ApprovalContext.Data) != `{"role":"restricted-role"}` {
 		t.Fatalf("approval context = %#v", records[0].ApprovalContext)
 	}
@@ -96,6 +100,74 @@ func TestUpsertDeduplicatesAndEncryptsAccessor(t *testing.T) {
 
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("database mode = %o, want 600", got)
+	}
+}
+
+func TestExpireMissingOnlyTransitionsPendingRequests(t *testing.T) {
+	t.Parallel()
+
+	database, err := Open(filepath.Join(t.TempDir(), "requests.db"), bytes.Repeat([]byte{0x43}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = database.Close() })
+
+	for _, accessor := range []string{"present", "missing", "rejected"} {
+		_, upsertErr := database.Upsert(t.Context(), accessor, openbao.ControlGroupRequest{Path: "secret/data/" + accessor}, UpsertOptions{})
+		if upsertErr != nil {
+			t.Fatal(upsertErr)
+		}
+	}
+
+	records, err := database.List(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, request := range records {
+		if request.Path == "secret/data/rejected" {
+			changed, statusErr := database.TransitionStatus(t.Context(), request.ID, RequestPending, RequestRejected)
+			if statusErr != nil {
+				t.Fatal(statusErr)
+			}
+
+			if !changed {
+				t.Fatal("pending request was not rejected")
+			}
+
+			changed, statusErr = database.TransitionStatus(t.Context(), request.ID, RequestPending, RequestExpired)
+			if statusErr != nil {
+				t.Fatal(statusErr)
+			}
+
+			if changed {
+				t.Fatal("terminal request accepted a stale pending transition")
+			}
+		}
+	}
+
+	expired, err := database.ExpireMissing(t.Context(), []string{"present"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(expired) != 1 {
+		t.Fatalf("expired IDs = %#v", expired)
+	}
+
+	records, err = database.List(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	statuses := make(map[string]RequestStatus)
+	for _, request := range records {
+		statuses[request.Path] = request.Status
+	}
+
+	if statuses["secret/data/present"] != RequestPending || statuses["secret/data/missing"] != RequestExpired || statuses["secret/data/rejected"] != RequestRejected {
+		t.Fatalf("statuses = %#v", statuses)
 	}
 }
 

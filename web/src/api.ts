@@ -57,6 +57,14 @@ export const api = {
       body: JSON.stringify({}),
     },
   ),
+  rejectRequest: (id: string, csrfToken: string) => apiFetch<ApprovalRequest>(
+    `/api/v1/requests/${encodeURIComponent(id)}/reject`,
+    {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': csrfToken },
+      body: JSON.stringify({}),
+    },
+  ),
   getPushPublicKey: () => apiFetch<{ publicKey: string }>('/api/v1/push/public-key'),
   subscribeToPush: (
     subscription: { endpoint: string; keys: { p256dh: string; auth: string } },

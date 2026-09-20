@@ -10,3 +10,12 @@ path "sys/control-group/request" {
     "accessor" = []
   }
 }
+
+path "auth/token/revoke-accessor" {
+  capabilities = ["update", "sudo"]
+
+  required_parameters = ["accessor"]
+  allowed_parameters = {
+    "accessor" = []
+  }
+}

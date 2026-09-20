@@ -21,6 +21,7 @@ export interface ApprovalContext {
 export interface ApprovalRequest {
   id: string
   approved: boolean
+  status: RequestStatus
   operation: string
   path: string
   data?: unknown
@@ -34,5 +35,6 @@ export interface ApprovalRequest {
   lastSeen: string
 }
 
-export type RequestFilter = 'pending' | 'approved'
+export type RequestStatus = 'pending' | 'approved' | 'rejected' | 'expired'
+export type RequestFilter = RequestStatus
 export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'offline'

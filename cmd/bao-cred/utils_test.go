@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -75,6 +76,32 @@ func TestReadHonorsCancellation(t *testing.T) {
 	_, err := readCredentials(ctx, client, "path", time.Hour, nil)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("got %v, want deadline exceeded", err)
+	}
+}
+
+func TestReadStopsWhenRequestIsRejectedOrExpired(t *testing.T) {
+	var statusCalls atomic.Int32
+	client := testAPIClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/v1/path":
+			_, _ = fmt.Fprint(response, `{"wrap_info":{"token":"wrap","accessor":"accessor"}}`)
+		case "/v1/sys/control-group/request":
+			statusCalls.Add(1)
+			response.Header().Set("Content-Type", "application/json")
+			response.WriteHeader(http.StatusNotFound)
+			_, _ = fmt.Fprint(response, `{"errors":["invalid accessor"]}`)
+		default:
+			http.NotFound(response, request)
+		}
+	})
+
+	_, err := readCredentials(t.Context(), client, "path", time.Millisecond, nil)
+	if err == nil || !strings.Contains(err.Error(), "request rejected or expired") {
+		t.Fatalf("error = %v", err)
+	}
+
+	if statusCalls.Load() != 1 {
+		t.Fatalf("status calls = %d", statusCalls.Load())
 	}
 }
 

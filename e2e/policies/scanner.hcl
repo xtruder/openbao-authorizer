@@ -5,3 +5,7 @@ path "auth/token/accessors" {
 path "sys/control-group/request" {
   capabilities = ["update"]
 }
+
+path "auth/token/revoke-accessor" {
+  capabilities = ["update", "sudo"]
+}

@@ -33,6 +33,7 @@ type OpenBao interface {
 	LoginUserpass(context.Context, string, string) (openbao.AuthToken, error)
 	RenewSelf(context.Context, string) error
 	RevokeSelf(context.Context, string) error
+	RevokeAccessor(context.Context, string) error
 	LookupSelf(context.Context, string) (openbao.Identity, error)
 	Authorize(context.Context, string, string) (bool, error)
 	ControlGroupRequest(context.Context, string) (openbao.ControlGroupRequest, error)
@@ -45,6 +46,7 @@ type Store interface {
 	Accessor(context.Context, string) (string, error)
 	Upsert(context.Context, string, openbao.ControlGroupRequest, store.UpsertOptions) (bool, error)
 	SetApproved(context.Context, string, bool) error
+	TransitionStatus(context.Context, string, store.RequestStatus, store.RequestStatus) (bool, error)
 	PutSession(context.Context, store.Session) error
 	DeleteSession(context.Context, string) error
 	PutSubscription(context.Context, store.Subscription) error
@@ -81,6 +83,8 @@ type server struct {
 	insecureCookies      bool
 	sessions             *Sessions
 	validatePushEndpoint func(context.Context, string) error
+	// OpenBao decisions are externally stateful and must not race each other.
+	decisionMu sync.Mutex
 }
 
 type session struct {
@@ -234,6 +238,7 @@ func New(options Options) http.Handler {
 	mux.HandleFunc("DELETE /api/v1/session", s.authenticated(s.logout))
 	mux.HandleFunc("GET /api/v1/requests", s.authenticated(s.listRequests))
 	mux.HandleFunc("POST /api/v1/requests/{id}/approve", s.authenticated(s.approve))
+	mux.HandleFunc("POST /api/v1/requests/{id}/reject", s.authenticated(s.reject))
 	mux.HandleFunc("GET /api/v1/events", s.authenticated(s.streamEvents))
 	mux.HandleFunc("GET /api/v1/push/public-key", s.authenticated(s.pushPublicKey))
 	mux.HandleFunc("POST /api/v1/push/subscriptions", s.authenticated(s.putSubscription))
@@ -384,6 +389,9 @@ func (s *server) approve(w http.ResponseWriter, r *http.Request, value session) 
 		return
 	}
 
+	s.decisionMu.Lock()
+	defer s.decisionMu.Unlock()
+
 	accessor, err := s.store.Accessor(r.Context(), r.PathValue("id"))
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "request not found")
@@ -411,6 +419,11 @@ func (s *server) approve(w http.ResponseWriter, r *http.Request, value session) 
 
 	if stored == nil {
 		writeError(w, http.StatusNotFound, "request not found")
+		return
+	}
+
+	if stored.Status != store.RequestPending {
+		writeError(w, http.StatusConflict, "request is no longer pending")
 		return
 	}
 
@@ -459,9 +472,13 @@ func (s *server) approve(w http.ResponseWriter, r *http.Request, value session) 
 		}
 
 		_, err = s.store.Upsert(r.Context(), accessor, fresh, store.UpsertOptions{ApprovalContext: store.ReplaceApprovalContext})
-		approved = fresh.Approved
 	} else {
 		err = s.store.SetApproved(r.Context(), r.PathValue("id"), approved)
+	}
+
+	if errors.Is(err, store.ErrStatusChanged) {
+		writeError(w, http.StatusConflict, "request is no longer pending")
+		return
 	}
 
 	if err != nil {
@@ -469,7 +486,6 @@ func (s *server) approve(w http.ResponseWriter, r *http.Request, value session) 
 		return
 	}
 
-	_ = s.events.Publish("status", map[string]any{"id": r.PathValue("id"), "approved": approved})
 	requests, err = s.store.List(r.Context())
 	if err != nil {
 		s.internalError(w, err)
@@ -478,6 +494,12 @@ func (s *server) approve(w http.ResponseWriter, r *http.Request, value session) 
 
 	for _, request := range requests {
 		if request.ID == r.PathValue("id") {
+			if request.Status == store.RequestRejected || request.Status == store.RequestExpired {
+				writeError(w, http.StatusConflict, "request is no longer pending")
+				return
+			}
+
+			_ = s.events.Publish("status", map[string]any{"id": request.ID, "status": request.Status})
 			if !s.exposeRequestData {
 				request.Data = nil
 			}
@@ -488,6 +510,97 @@ func (s *server) approve(w http.ResponseWriter, r *http.Request, value session) 
 	}
 
 	writeError(w, http.StatusNotFound, "request not found")
+}
+
+func (s *server) reject(w http.ResponseWriter, r *http.Request, value session) {
+	if !s.validMutationWithCSRF(w, r, value) {
+		return
+	}
+
+	s.decisionMu.Lock()
+	defer s.decisionMu.Unlock()
+
+	id := r.PathValue("id")
+	accessor, err := s.store.Accessor(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "request not found")
+		return
+	}
+
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
+
+	requests, err := s.store.List(r.Context())
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
+
+	var rejected *store.Request
+	for index := range requests {
+		if requests[index].ID == id {
+			rejected = &requests[index]
+			break
+		}
+	}
+
+	if rejected == nil {
+		writeError(w, http.StatusNotFound, "request not found")
+		return
+	}
+
+	if rejected.Status != store.RequestPending {
+		writeError(w, http.StatusConflict, "request is no longer pending")
+		return
+	}
+
+	status := store.RequestRejected
+	revokeErr := s.bao.RevokeAccessor(r.Context(), accessor)
+	if revokeErr != nil {
+		var httpErr *openbao.HTTPError
+		if errors.As(revokeErr, &httpErr) && (httpErr.StatusCode == http.StatusBadRequest || httpErr.StatusCode == http.StatusNotFound) {
+			status = store.RequestExpired
+		} else {
+			s.internalError(w, revokeErr)
+			return
+		}
+	}
+
+	changed, err := s.store.TransitionStatus(r.Context(), id, store.RequestPending, status)
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
+
+	if !changed && status == store.RequestRejected {
+		// The scanner can observe successful revocation before this handler records it.
+		changed, err = s.store.TransitionStatus(r.Context(), id, store.RequestExpired, store.RequestRejected)
+		if err != nil {
+			s.internalError(w, err)
+			return
+		}
+	}
+
+	if !changed {
+		writeError(w, http.StatusConflict, "request is no longer pending")
+		return
+	}
+
+	rejected.Status = status
+	rejected.Approved = false
+	_ = s.events.Publish("status", map[string]any{"id": id, "status": status})
+	if status == store.RequestExpired {
+		writeError(w, http.StatusConflict, "request has expired")
+		return
+	}
+
+	if !s.exposeRequestData {
+		rejected.Data = nil
+	}
+
+	writeJSON(w, http.StatusOK, rejected)
 }
 
 func sameApprovalContext(left, right *openbao.ApprovalContext) bool {
