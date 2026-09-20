@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,6 +21,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	baoapi "github.com/openbao/openbao/api/v2"
 )
 
 const (
@@ -90,15 +93,25 @@ func TestOpenBaoControlGroupWorkflow(t *testing.T) {
 
 	registerProcessCleanup(t, "OpenBao", baoProcess)
 	listenerContext, listenerCancel := context.WithTimeout(ctx, 20*time.Second)
-	baoPort, err := waitForOwnedHTTPListener(listenerContext, baoProcess, "/v1/sys/health")
+	baoPort, err := waitForOwnedHTTPListener(listenerContext, baoProcess)
 	listenerCancel()
 	if err != nil {
 		t.Fatalf("wait for OpenBao listener: %v\n%s", err, readProcessLog(baoLog))
 	}
 
+	baoAddress := fmt.Sprintf("http://127.0.0.1:%d", baoPort)
+	baoConfig := baoapi.DefaultConfig()
+	baoConfig.Address = baoAddress
+	baoConfig.Timeout = 15 * time.Second
+	baoConfig.DisableEnvironment = true
+	baoClient, err := baoapi.NewClient(baoConfig)
+	if err != nil {
+		t.Fatalf("create OpenBao API client: %v", err)
+	}
+
 	bao := &liveAPI{
-		baseURL: fmt.Sprintf("http://127.0.0.1:%d/v1", baoPort),
-		client:  &http.Client{Timeout: 15 * time.Second},
+		baseURL: baoAddress,
+		openBao: baoClient,
 		process: baoProcess,
 		port:    baoPort,
 	}
@@ -332,6 +345,7 @@ func (p isolatedProcessPaths) environment(values ...string) []string {
 type liveAPI struct {
 	baseURL string
 	client  *http.Client
+	openBao *baoapi.Client
 	process *managedProcess
 	port    int
 }
@@ -549,6 +563,10 @@ func callAPI(ctx context.Context, api *liveAPI, token, method, path string, payl
 		return nil, 0, fmt.Errorf("refuse API call without listener ownership: %w", err)
 	}
 
+	if api.openBao != nil {
+		return callOpenBaoAPI(ctx, api, token, method, path, payload, headers)
+	}
+
 	var body io.Reader
 	if payload != nil {
 		encoded, err := json.Marshal(payload)
@@ -569,10 +587,6 @@ func callAPI(ctx context.Context, api *liveAPI, token, method, path string, payl
 		request.Header.Set("Content-Type", "application/json")
 	}
 
-	if token != "" {
-		request.Header.Set("X-Vault-Token", token)
-	}
-
 	for name, value := range headers {
 		request.Header.Set(name, value)
 	}
@@ -590,6 +604,50 @@ func callAPI(ctx context.Context, api *liveAPI, token, method, path string, payl
 
 	if err := api.process.assertOwnsLoopbackPort(api.port); err != nil {
 		return nil, 0, fmt.Errorf("process lost listener during API call: %w", err)
+	}
+
+	return contents, response.StatusCode, nil
+}
+
+func callOpenBaoAPI(ctx context.Context, api *liveAPI, token, method, path string, payload any, headers map[string]string) ([]byte, int, error) {
+	client, err := api.openBao.CloneWithHeaders()
+	if err != nil {
+		return nil, 0, fmt.Errorf("clone OpenBao client: %w", err)
+	}
+
+	client.SetToken(token)
+
+	request := client.NewRequest(method, "/v1/"+strings.TrimPrefix(path, "/"))
+	for name, value := range headers {
+		request.Headers.Set(name, value)
+	}
+
+	if payload != nil {
+		if bodyErr := request.SetJSONBody(payload); bodyErr != nil {
+			return nil, 0, bodyErr
+		}
+	}
+
+	response, requestErr := client.RawRequestWithContext(ctx, request)
+	if response == nil {
+		return nil, 0, requestErr
+	}
+
+	defer func() { _ = response.Body.Close() }()
+
+	contents, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if requestErr != nil {
+		if _, ok := errors.AsType[*baoapi.ResponseError](requestErr); !ok {
+			return contents, response.StatusCode, requestErr
+		}
+	}
+
+	if err := api.process.assertOwnsLoopbackPort(api.port); err != nil {
+		return nil, 0, fmt.Errorf("OpenBao process lost listener during API call: %w", err)
 	}
 
 	return contents, response.StatusCode, nil

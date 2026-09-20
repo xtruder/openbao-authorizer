@@ -18,11 +18,15 @@ func TestClientListsAndInspectsControlGroupRequests(t *testing.T) {
 			t.Fatalf("token header = %q", got)
 		}
 
+		if got := r.Header.Get("X-Vault-Namespace"); got != "engineering" {
+			t.Fatalf("namespace header = %q", got)
+		}
+
 		switch r.URL.Path {
 		case "/v1/auth/token/accessors":
 			sawList = true
-			if r.Method != "LIST" {
-				t.Fatalf("method = %s", r.Method)
+			if r.Method != http.MethodGet || r.URL.Query().Get("list") != "true" {
+				t.Fatalf("request = %s %s", r.Method, r.URL.String())
 			}
 
 			_, _ = w.Write([]byte(`{"data":{"keys":["ordinary","pending"]}}`))
@@ -35,7 +39,7 @@ func TestClientListsAndInspectsControlGroupRequests(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(Config{Address: server.URL, ScannerToken: "scanner", HTTPClient: server.Client()})
+	client, err := New(Config{Address: server.URL, ScannerToken: "scanner", Namespace: "engineering", HTTPClient: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +91,7 @@ func TestLoginUserpassExchangesPasswordForRenewableToken(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/auth/userpass/login/bob" || r.Method != http.MethodPost {
+		if r.URL.Path != "/v1/auth/userpass/login/bob" || r.Method != http.MethodPut {
 			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
 		}
 

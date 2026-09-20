@@ -2,20 +2,17 @@
 package openbao
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
 	"slices"
 	"strings"
 	"time"
-)
 
-const maxResponseBytes = 4 << 20
+	baoapi "github.com/openbao/openbao/api/v2"
+)
 
 // ErrNotControlGroup marks an accessor that is not a control-group wrapping token.
 var ErrNotControlGroup = errors.New("not a control-group accessor")
@@ -31,12 +28,9 @@ type Config struct {
 	HTTPClient   *http.Client
 }
 
-// Client is a minimal, testable OpenBao API client.
+// Client exposes the OpenBao operations used by the application.
 type Client struct {
-	baseURL      *url.URL
-	scannerToken string
-	namespace    string
-	httpClient   *http.Client
+	client *baoapi.Client
 }
 
 // Entity is an OpenBao identity entity.
@@ -118,30 +112,25 @@ func (e *HTTPError) Error() string {
 
 // New constructs an OpenBao client.
 func New(config Config) (*Client, error) {
-	baseURL, err := url.Parse(config.Address)
+	apiConfig := baoapi.DefaultConfig()
+	apiConfig.Address = config.Address
+	apiConfig.Timeout = 10 * time.Second
+	apiConfig.DisableEnvironment = true
+	if config.HTTPClient != nil {
+		apiConfig.HttpClient = config.HTTPClient
+	}
+
+	client, err := baoapi.NewClient(apiConfig)
 	if err != nil {
-		return nil, fmt.Errorf("parse OpenBao address: %w", err)
+		return nil, fmt.Errorf("create OpenBao client: %w", err)
 	}
 
-	if baseURL.Scheme != "http" && baseURL.Scheme != "https" {
-		return nil, errors.New("OpenBao address must use http or https")
+	client.SetToken(config.ScannerToken)
+	if config.Namespace != "" {
+		client.SetNamespace(config.Namespace)
 	}
 
-	if baseURL.Host == "" {
-		return nil, errors.New("OpenBao address must include a host")
-	}
-
-	client := config.HTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
-	}
-
-	return &Client{
-		baseURL:      baseURL,
-		scannerToken: config.ScannerToken,
-		namespace:    config.Namespace,
-		httpClient:   client,
-	}, nil
+	return &Client{client: client}, nil
 }
 
 // AuthToken is a renewable human token returned by an OpenBao auth method.
@@ -158,41 +147,39 @@ func (c *Client) LoginUserpass(ctx context.Context, username, password string) (
 		return AuthToken{}, errors.New("invalid OpenBao username")
 	}
 
-	var envelope struct {
-		Auth struct {
-			ClientToken   string `json:"client_token"`
-			Renewable     bool   `json:"renewable"`
-			LeaseDuration int    `json:"lease_duration"`
-		} `json:"auth"`
-	}
-	path := "/v1/auth/userpass/login/" + url.PathEscape(username)
-	if err := c.call(ctx, http.MethodPost, path, "", map[string]string{"password": password}, &envelope, ""); err != nil {
+	client, err := c.withToken("")
+	if err != nil {
 		return AuthToken{}, err
 	}
 
-	if envelope.Auth.ClientToken == "" {
+	secret, err := client.Logical().WriteWithContext(ctx, "auth/userpass/login/"+username, map[string]any{"password": password})
+	if err != nil {
+		return AuthToken{}, translateError(err)
+	}
+
+	if secret == nil || secret.Auth == nil || secret.Auth.ClientToken == "" {
 		return AuthToken{}, errors.New("OpenBao userpass login returned no token")
 	}
 
 	return AuthToken{
-		Token: envelope.Auth.ClientToken, Renewable: envelope.Auth.Renewable,
-		TTL: time.Duration(envelope.Auth.LeaseDuration) * time.Second,
+		Token: secret.Auth.ClientToken, Renewable: secret.Auth.Renewable,
+		TTL: time.Duration(secret.Auth.LeaseDuration) * time.Second,
 	}, nil
 }
 
 // RenewSelf renews a human token issued by a renewable auth role.
 func (c *Client) RenewSelf(ctx context.Context, token string) error {
-	var envelope struct {
-		Auth struct {
-			ClientToken string `json:"client_token"`
-			Renewable   bool   `json:"renewable"`
-		} `json:"auth"`
-	}
-	if err := c.call(ctx, http.MethodPost, "/v1/auth/token/renew-self", token, map[string]string{}, &envelope, ""); err != nil {
+	client, err := c.withToken(token)
+	if err != nil {
 		return err
 	}
 
-	if envelope.Auth.ClientToken == "" || !envelope.Auth.Renewable {
+	secret, err := client.Logical().WriteWithContext(ctx, "auth/token/renew-self", map[string]any{})
+	if err != nil {
+		return translateError(err)
+	}
+
+	if secret == nil || secret.Auth == nil || secret.Auth.ClientToken == "" || !secret.Auth.Renewable {
 		return errors.New("OpenBao token renewal returned a non-renewable token")
 	}
 
@@ -201,30 +188,37 @@ func (c *Client) RenewSelf(ctx context.Context, token string) error {
 
 // RevokeSelf revokes a human token when its application session is closed.
 func (c *Client) RevokeSelf(ctx context.Context, token string) error {
-	return c.call(ctx, http.MethodPost, "/v1/auth/token/revoke-self", token, map[string]string{}, nil, "")
+	client, err := c.withToken(token)
+	if err != nil {
+		return err
+	}
+
+	_, err = client.Logical().WriteWithContext(ctx, "auth/token/revoke-self", map[string]any{})
+	return translateError(err)
 }
 
 // ListAccessors lists all service-token accessors using the dedicated scanner token.
 func (c *Client) ListAccessors(ctx context.Context) ([]string, error) {
-	var envelope struct {
-		Data struct {
-			Keys []string `json:"keys"`
-		} `json:"data"`
+	secret, err := c.client.Logical().ListWithContext(ctx, "auth/token/accessors")
+	if err != nil {
+		return nil, translateError(err)
 	}
-	if err := c.call(ctx, http.MethodGet, "/v1/auth/token/accessors", c.scannerToken, nil, &envelope, "LIST"); err != nil {
+
+	var data struct {
+		Keys []string `json:"keys"`
+	}
+	if err := decodeData(secret, &data); err != nil {
 		return nil, err
 	}
 
-	return envelope.Data.Keys, nil
+	return data.Keys, nil
 }
 
 // ControlGroupRequest reviews a candidate accessor with the scanner token.
 func (c *Client) ControlGroupRequest(ctx context.Context, accessor string) (ControlGroupRequest, error) {
-	var envelope struct {
-		Data ControlGroupRequest `json:"data"`
-	}
-	err := c.call(ctx, http.MethodPost, "/v1/sys/control-group/request", c.scannerToken, map[string]string{"accessor": accessor}, &envelope, "")
+	secret, err := c.client.Logical().WriteWithContext(ctx, "sys/control-group/request", map[string]any{"accessor": accessor})
 	if err != nil {
+		err = translateError(err)
 		var httpErr *HTTPError
 		if errors.As(err, &httpErr) && (httpErr.StatusCode == http.StatusBadRequest || httpErr.StatusCode == http.StatusNotFound) {
 			return ControlGroupRequest{}, fmt.Errorf("%w: %w", ErrNotControlGroup, err)
@@ -233,7 +227,12 @@ func (c *Client) ControlGroupRequest(ctx context.Context, accessor string) (Cont
 		return ControlGroupRequest{}, err
 	}
 
-	return envelope.Data, nil
+	var request ControlGroupRequest
+	if err := decodeData(secret, &request); err != nil {
+		return ControlGroupRequest{}, err
+	}
+
+	return request, nil
 }
 
 // GitHubPermissionSet is safe approval context for a fixed GitHub token request.
@@ -251,100 +250,105 @@ func (c *Client) GitHubPermissionSet(ctx context.Context, name string) (GitHubPe
 		return GitHubPermissionSet{}, errors.New("invalid GitHub permission set name")
 	}
 
-	var envelope struct {
-		Data GitHubPermissionSet `json:"data"`
+	secret, err := c.client.Logical().ReadWithContext(ctx, "github/permissionset/"+name)
+	if err != nil {
+		return GitHubPermissionSet{}, translateError(err)
 	}
-	path := "/v1/github/permissionset/" + url.PathEscape(name)
-	if err := c.call(ctx, http.MethodGet, path, c.scannerToken, nil, &envelope, ""); err != nil {
+
+	if secret == nil {
+		return GitHubPermissionSet{}, &HTTPError{StatusCode: http.StatusNotFound}
+	}
+
+	var permissionSet GitHubPermissionSet
+	if err := decodeData(secret, &permissionSet); err != nil {
 		return GitHubPermissionSet{}, err
 	}
 
-	return envelope.Data, nil
+	return permissionSet, nil
 }
 
 // Authorize records approval using a human approver's OpenBao token.
 func (c *Client) Authorize(ctx context.Context, humanToken, accessor string) (bool, error) {
-	var envelope struct {
-		Data struct {
-			Approved bool `json:"approved"`
-		} `json:"data"`
-	}
-	if err := c.call(ctx, http.MethodPost, "/v1/sys/control-group/authorize", humanToken, map[string]string{"accessor": accessor}, &envelope, ""); err != nil {
+	client, err := c.withToken(humanToken)
+	if err != nil {
 		return false, err
 	}
 
-	return envelope.Data.Approved, nil
+	secret, err := client.Logical().WriteWithContext(ctx, "sys/control-group/authorize", map[string]any{"accessor": accessor})
+	if err != nil {
+		return false, translateError(err)
+	}
+
+	var result struct {
+		Approved bool `json:"approved"`
+	}
+	if err := decodeData(secret, &result); err != nil {
+		return false, err
+	}
+
+	return result.Approved, nil
 }
 
 // LookupSelf validates a human token and returns its identity metadata.
 func (c *Client) LookupSelf(ctx context.Context, token string) (Identity, error) {
-	var envelope struct {
-		Data Identity `json:"data"`
-	}
-	if err := c.call(ctx, http.MethodGet, "/v1/auth/token/lookup-self", token, nil, &envelope, ""); err != nil {
+	client, err := c.withToken(token)
+	if err != nil {
 		return Identity{}, err
 	}
 
-	return envelope.Data, nil
+	secret, err := client.Logical().ReadWithContext(ctx, "auth/token/lookup-self")
+	if err != nil {
+		return Identity{}, translateError(err)
+	}
+
+	if secret == nil {
+		return Identity{}, &HTTPError{StatusCode: http.StatusNotFound}
+	}
+
+	var identity Identity
+	if err := decodeData(secret, &identity); err != nil {
+		return Identity{}, err
+	}
+
+	return identity, nil
 }
 
-func (c *Client) call(ctx context.Context, method, path, token string, payload, output any, methodOverride string) error {
-	var body io.Reader
-	if payload != nil {
-		encoded, err := json.Marshal(payload)
-		if err != nil {
-			return fmt.Errorf("encode OpenBao request: %w", err)
-		}
-
-		body = bytes.NewReader(encoded)
-	}
-
-	endpoint := c.baseURL.ResolveReference(&url.URL{Path: path})
-	req, err := http.NewRequestWithContext(ctx, method, endpoint.String(), body)
+func (c *Client) withToken(token string) (*baoapi.Client, error) {
+	client, err := c.client.CloneWithHeaders()
 	if err != nil {
-		return fmt.Errorf("create OpenBao request: %w", err)
+		return nil, fmt.Errorf("clone OpenBao client: %w", err)
 	}
 
-	if methodOverride != "" {
-		req.Method = methodOverride
+	client.SetToken(token)
+	return client, nil
+}
+
+func decodeData(secret *baoapi.Secret, destination any) error {
+	if secret == nil {
+		return errors.New("OpenBao returned an empty response")
 	}
 
-	req.Header.Set("Accept", "application/json")
-	if payload != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	if token != "" {
-		req.Header.Set("X-Vault-Token", token)
-	}
-
-	if c.namespace != "" {
-		req.Header.Set("X-Vault-Namespace", c.namespace)
-	}
-
-	response, err := c.httpClient.Do(req)
+	encoded, err := json.Marshal(secret.Data)
 	if err != nil {
-		return fmt.Errorf("call OpenBao: %w", err)
+		return fmt.Errorf("encode OpenBao response data: %w", err)
 	}
 
-	defer func() { _ = response.Body.Close() }()
-
-	limited := io.LimitReader(response.Body, maxResponseBytes)
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		var envelope struct {
-			Errors []string `json:"errors"`
-		}
-		_ = json.NewDecoder(limited).Decode(&envelope)
-		return &HTTPError{StatusCode: response.StatusCode, Errors: envelope.Errors}
-	}
-
-	if output == nil || response.StatusCode == http.StatusNoContent {
-		return nil
-	}
-
-	if err := json.NewDecoder(limited).Decode(output); err != nil {
-		return fmt.Errorf("decode OpenBao response: %w", err)
+	if err := json.Unmarshal(encoded, destination); err != nil {
+		return fmt.Errorf("decode OpenBao response data: %w", err)
 	}
 
 	return nil
+}
+
+func translateError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	responseErr, ok := errors.AsType[*baoapi.ResponseError](err)
+	if !ok {
+		return err
+	}
+
+	return &HTTPError{StatusCode: responseErr.StatusCode, Errors: responseErr.Errors}
 }

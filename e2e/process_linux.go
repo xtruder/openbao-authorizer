@@ -7,7 +7,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +17,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	baoapi "github.com/openbao/openbao/api/v2"
 )
 
 type managedProcess struct {
@@ -152,10 +153,9 @@ func waitForOwnedListener(ctx context.Context, process *managedProcess, expected
 	}
 }
 
-func waitForOwnedHTTPListener(ctx context.Context, process *managedProcess, healthPath string) (int, error) {
+func waitForOwnedHTTPListener(ctx context.Context, process *managedProcess) (int, error) {
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
-	client := &http.Client{Timeout: 250 * time.Millisecond}
 	for {
 		if !process.running() {
 			return 0, processExitedError(process.pid, "before opening its HTTP listener", process.exitError())
@@ -164,15 +164,17 @@ func waitForOwnedHTTPListener(ctx context.Context, process *managedProcess, heal
 		ports, err := ownedLoopbackListenerPorts(process.pid)
 		if err == nil {
 			for _, port := range ports {
-				url := fmt.Sprintf("http://127.0.0.1:%d%s", port, healthPath)
-				request, requestErr := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-				if requestErr != nil {
-					return 0, fmt.Errorf("construct listener probe: %w", requestErr)
+				config := baoapi.DefaultConfig()
+				config.Address = fmt.Sprintf("http://127.0.0.1:%d", port)
+				config.Timeout = 250 * time.Millisecond
+				config.DisableEnvironment = true
+				client, clientErr := baoapi.NewClient(config)
+				if clientErr != nil {
+					return 0, fmt.Errorf("construct listener probe: %w", clientErr)
 				}
 
-				response, probeErr := client.Do(request)
+				_, probeErr := client.Sys().HealthWithContext(ctx)
 				if probeErr == nil {
-					_ = response.Body.Close()
 					return port, nil
 				}
 			}
