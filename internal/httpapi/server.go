@@ -455,9 +455,7 @@ func (s *server) approve(w http.ResponseWriter, r *http.Request, value session) 
 
 	approved, err := s.bao.Authorize(r.Context(), value.Token, accessor)
 	if err != nil {
-		var httpErr *openbao.HTTPError
-		if errors.As(err, &httpErr) && (httpErr.StatusCode == http.StatusBadRequest || httpErr.StatusCode == http.StatusForbidden) {
-			writeError(w, http.StatusForbidden, "OpenBao rejected this approval")
+		if s.writeOpenBaoError(w, "approval", err) {
 			return
 		}
 
@@ -563,6 +561,10 @@ func (s *server) reject(w http.ResponseWriter, r *http.Request, value session) {
 		if errors.As(revokeErr, &httpErr) && (httpErr.StatusCode == http.StatusBadRequest || httpErr.StatusCode == http.StatusNotFound) {
 			status = store.RequestExpired
 		} else {
+			if s.writeOpenBaoError(w, "request revocation", revokeErr) {
+				return
+			}
+
 			s.internalError(w, revokeErr)
 			return
 		}
@@ -880,6 +882,22 @@ func (s *server) cookieName() string {
 func (s *server) internalError(w http.ResponseWriter, err error) {
 	s.logger.Error("request failed", "error", err)
 	writeError(w, http.StatusInternalServerError, "internal server error")
+}
+
+func (s *server) writeOpenBaoError(w http.ResponseWriter, action string, err error) bool {
+	var httpErr *openbao.HTTPError
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+
+	s.logger.Error("OpenBao request failed", "action", action, "error", err)
+	message := fmt.Sprintf("OpenBao %s failed (HTTP %d)", action, httpErr.StatusCode)
+	if len(httpErr.Errors) > 0 {
+		message += ": " + strings.Join(httpErr.Errors, "; ")
+	}
+
+	writeError(w, http.StatusBadGateway, message)
+	return true
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, output any) bool {

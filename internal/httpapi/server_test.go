@@ -17,15 +17,16 @@ import (
 )
 
 type fakeBao struct {
-	approvedToken    string
-	loginUsername    string
-	loginPassword    string
-	renewedToken     string
-	revokedToken     string
-	revokedAccessor  string
-	identity         openbao.Identity
-	readData         json.RawMessage
-	onRevokeAccessor func()
+	approvedToken     string
+	loginUsername     string
+	loginPassword     string
+	renewedToken      string
+	revokedToken      string
+	revokedAccessor   string
+	identity          openbao.Identity
+	readData          json.RawMessage
+	onRevokeAccessor  func()
+	revokeAccessorErr error
 }
 
 func (f *fakeBao) LoginUserpass(_ context.Context, username, password string) (openbao.AuthToken, error) {
@@ -53,7 +54,7 @@ func (f *fakeBao) RevokeAccessor(_ context.Context, accessor string) error {
 		f.onRevokeAccessor()
 	}
 
-	return nil
+	return f.revokeAccessorErr
 }
 
 func (f *fakeBao) LookupSelf(_ context.Context, token string) (openbao.Identity, error) {
@@ -384,6 +385,67 @@ func TestApproverRejectsPendingRequest(t *testing.T) {
 
 	if rejected.Status != "rejected" {
 		t.Fatalf("request status = %q", rejected.Status)
+	}
+}
+
+func TestRejectExposesOpenBaoFailure(t *testing.T) {
+	t.Parallel()
+
+	database, err := store.Open(filepath.Join(t.TempDir(), "app.db"), bytes.Repeat([]byte{0x29}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = database.Close() })
+	_, err = database.Upsert(t.Context(), "wrapping-accessor", openbao.ControlGroupRequest{
+		Operation: "read", Path: "github/token/project-authorizer", Entity: openbao.Entity{ID: "alice-id", Name: "Alice"},
+	}, store.UpsertOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	requests, err := database.List(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sessions := NewSessions()
+	sessions.sessions["approver-session"] = session{
+		Token: "human-token", CSRFToken: "csrf", Identity: openbao.Identity{EntityID: "bob-id"}, ExpiresAt: time.Now().Add(time.Hour),
+	}
+	bao := &fakeBao{revokeAccessorErr: &openbao.HTTPError{StatusCode: http.StatusForbidden, Errors: []string{"permission denied"}}}
+	server := httptest.NewServer(New(Options{
+		OpenBao: bao, Store: database, Events: NewEventBus(), Sessions: sessions, ApproverPolicy: "approver", InsecureCookies: true,
+	}))
+	defer server.Close()
+
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, server.URL+"/api/v1/requests/"+requests[0].ID+"/reject", bytes.NewBufferString(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request.AddCookie(&http.Cookie{Name: "openbao-authorizer-session", Value: "approver-session"})
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-CSRF-Token", "csrf")
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("reject status = %d", response.StatusCode)
+	}
+
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if decodeErr := json.NewDecoder(response.Body).Decode(&payload); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+
+	if payload.Error != "OpenBao request revocation failed (HTTP 403): permission denied" {
+		t.Fatalf("reject error = %q", payload.Error)
 	}
 }
 

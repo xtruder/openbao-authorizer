@@ -11,3 +11,8 @@ export const navigateFallbackDenylist = [
   /^\/api(?:\/|$)/,
   /^\/healthz(?:\/|$)/,
 ]
+
+export const workboxActivation = {
+  skipWaiting: true,
+  clientsClaim: true,
+} as const

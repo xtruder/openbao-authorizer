@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api } from './api'
+import { api, ApiError } from './api'
 
 describe('push subscription API', () => {
   afterEach(() => vi.unstubAllGlobals())
@@ -18,5 +18,18 @@ describe('push subscription API', () => {
     const headers = new Headers(fetchMock.mock.calls[0]?.[1]?.headers)
     expect(headers.get('Content-Type')).toBe('application/json')
     expect(headers.get('X-CSRF-Token')).toBe('csrf-token')
+  })
+
+  it('preserves server error details for request actions', async () => {
+    const message = 'OpenBao request revocation failed (HTTP 403): permission denied'
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(
+      JSON.stringify({ error: message }),
+      { status: 502, headers: { 'Content-Type': 'application/json' } },
+    ))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(api.rejectRequest('request-id', 'csrf-token')).rejects.toEqual(
+      new ApiError(message, 502),
+    )
   })
 })

@@ -2,7 +2,7 @@ import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 import { VitePWA } from 'vite-plugin-pwa'
-import { apiNetworkOnlyUrlPattern, navigateFallbackDenylist } from './pwa.js'
+import { apiNetworkOnlyUrlPattern, navigateFallbackDenylist, workboxActivation } from './pwa.js'
 
 export default defineConfig({
   server: {
@@ -35,6 +35,7 @@ export default defineConfig({
         ],
       },
       workbox: {
+		...workboxActivation,
         globPatterns: ['**/*.{js,css,html,svg,png,ico}'],
         navigateFallback: '/index.html',
         navigateFallbackDenylist,

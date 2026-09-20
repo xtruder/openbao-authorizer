@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { apiNetworkOnlyUrlPattern, navigateFallbackDenylist } from '../pwa'
+import { apiNetworkOnlyUrlPattern, navigateFallbackDenylist, workboxActivation } from '../pwa'
 
 describe('service worker routing', () => {
+	it('activates updates immediately and takes control of open clients', () => {
+		expect(workboxActivation).toEqual({ skipWaiting: true, clientsClaim: true })
+	})
+
   it('keeps same-origin API requests network-only using the Workbox URL callback', () => {
     expect(apiNetworkOnlyUrlPattern({
       sameOrigin: true,
