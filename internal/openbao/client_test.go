@@ -162,11 +162,11 @@ func TestRenewAndRevokeSelfUseHumanToken(t *testing.T) {
 	}
 }
 
-func TestGitHubPermissionSetUsesScannerToken(t *testing.T) {
+func TestReadUsesScannerToken(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/github/permissionset/project-authorizer" || r.Method != http.MethodGet {
+		if r.URL.Path != "/v1/github/permissionset/project authorizer" || r.URL.RawPath != "" || r.Method != http.MethodGet {
 			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
 		}
 
@@ -183,13 +183,13 @@ func TestGitHubPermissionSetUsesScannerToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	permissionSet, err := client.GitHubPermissionSet(t.Context(), "project-authorizer")
+	data, err := client.Read(t.Context(), "github/permissionset/project authorizer")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if permissionSet.InstallationID != 87654321 || permissionSet.Account != "example-org" || !slices.Equal(permissionSet.Repositories, []string{"example-repo"}) || permissionSet.Permissions["contents"] != "write" {
-		t.Fatalf("permission set = %#v", permissionSet)
+	if string(data) != `{"installation_id":87654321,"org_name":"example-org","repositories":["example-repo"],"permissions":{"administration":"write","contents":"write"}}` {
+		t.Fatalf("data = %s", data)
 	}
 }
 

@@ -6,7 +6,7 @@ umask 077
 : "${BAO_TOKEN:?BAO_TOKEN is required}"
 : "${OPENBAO_BIN:?OPENBAO_BIN is required}"
 : "${PROJECT_DIR:?PROJECT_DIR is required}"
-: "${APP_ENV_FILE:?APP_ENV_FILE is required}"
+: "${APP_CONFIG_FILE:?APP_CONFIG_FILE is required}"
 : "${APP_ENCRYPTION_KEY:?APP_ENCRYPTION_KEY is required}"
 : "${APPROVER_PASSWORD:?APPROVER_PASSWORD is required}"
 : "${REQUESTER_PASSWORD:?REQUESTER_PASSWORD is required}"
@@ -34,6 +34,7 @@ if ! "${OPENBAO_BIN}" secrets list -format=json | jq -e 'has("kv/")' >/dev/null;
 fi
 
 "${OPENBAO_BIN}" policy write openbao-authorizer-scanner "${PROJECT_DIR}/config/scanner-policy.hcl" >/dev/null
+"${OPENBAO_BIN}" policy write openbao-authorizer-github-context "${PROJECT_DIR}/deploy/local/github-context-reader-policy.hcl" >/dev/null
 "${OPENBAO_BIN}" policy write openbao-authorizer-approver "${PROJECT_DIR}/config/approver-policy.hcl" >/dev/null
 "${OPENBAO_BIN}" policy write openbao-authorizer-requester "${PROJECT_DIR}/deploy/local/requester-policy.hcl" >/dev/null
 "${OPENBAO_BIN}" policy write openbao-authorizer-github-agent "${PROJECT_DIR}/deploy/local/github-agent-policy.hcl" >/dev/null
@@ -106,30 +107,67 @@ if [[ -n "${GITHUB_APP_ID:-}" || -e "${GITHUB_APP_PRIVATE_KEY_FILE}" ]]; then
 fi
 
 scanner_response="$("${OPENBAO_BIN}" write -format=json auth/token/create-orphan \
-  policies=openbao-authorizer-scanner no_default_policy=true ttl=24h renewable=false)"
+  policies=openbao-authorizer-scanner,openbao-authorizer-github-context no_default_policy=true ttl=24h renewable=false)"
 scanner_token="$(jq -er '.auth.client_token' <<<"${scanner_response}")"
 
-install -d -m 0700 "$(dirname "${APP_ENV_FILE}")"
-temporary="${APP_ENV_FILE}.tmp.$$"
-cat >"${temporary}" <<EOF
-APP_ENCRYPTION_KEY=${APP_ENCRYPTION_KEY}
-OPENBAO_SCANNER_TOKEN=${scanner_token}
-OPENBAO_ADDRESS=${BAO_ADDR}
-APPROVER_POLICY=openbao-authorizer-approver
-EXPOSE_REQUEST_DATA=false
-LISTEN_ADDRESS=127.0.0.1:18202
-PUBLIC_ORIGIN=${PUBLIC_ORIGIN}
-VAPID_PUBLIC_KEY=${VAPID_PUBLIC_KEY:-}
-VAPID_PRIVATE_KEY=${VAPID_PRIVATE_KEY:-}
-VAPID_SUBJECT=${VAPID_SUBJECT:-}
-PUSH_ALLOWED_HOST_SUFFIXES=${PUSH_ALLOWED_HOST_SUFFIXES:-}
-SCAN_INTERVAL=5s
-SCAN_CONCURRENCY=8
-EOF
-chmod 0600 "${temporary}"
-mv -f "${temporary}" "${APP_ENV_FILE}"
+config_directory="$(dirname "${APP_CONFIG_FILE}")"
+install -d -m 0700 "${config_directory}"
+printf '%s\n' "${APP_ENCRYPTION_KEY}" >"${config_directory}/encryption-key"
+printf '%s\n' "${scanner_token}" >"${config_directory}/scanner-token"
+chmod 0600 "${config_directory}/encryption-key" "${config_directory}/scanner-token"
 
-printf '%s\n' "${approver_login}" | jq -er '.auth.client_token' >"$(dirname "${APP_ENV_FILE}")/approver-token"
-printf '%s\n' "${requester_login}" | jq -er '.auth.client_token' >"$(dirname "${APP_ENV_FILE}")/requester-token"
-printf '%s\n' "${agent_login}" | jq -er '.auth.client_token' >"$(dirname "${APP_ENV_FILE}")/agent-token"
-chmod 0600 "$(dirname "${APP_ENV_FILE}")/approver-token" "$(dirname "${APP_ENV_FILE}")/requester-token" "$(dirname "${APP_ENV_FILE}")/agent-token"
+temporary="${APP_CONFIG_FILE}.tmp.$$"
+cat >"${temporary}" <<EOF
+server {
+  listen_address   = "127.0.0.1:18202"
+  public_origin    = $(jq -Rn --arg value "${PUBLIC_ORIGIN}" '$value')
+  insecure_cookies = false
+  static_directory = ""
+}
+storage {
+  database_path       = $(jq -Rn --arg value "${HOME}/.local/state/openbao-authorizer/app.db" '$value')
+  encryption_key_file = "encryption-key"
+}
+openbao {
+  address            = $(jq -Rn --arg value "${BAO_ADDR}" '$value')
+  namespace          = ""
+  ca_file            = ""
+  scanner_token_file = "scanner-token"
+  approver_policy    = "openbao-authorizer-approver"
+}
+scanner {
+  interval    = "5s"
+  concurrency = 8
+}
+requests {
+  expose_data = false
+}
+approval_context "github-token" {
+  match_path = "github/token/{name}"
+  read_path  = "github/permissionset/{name}"
+}
+EOF
+if [[ -n "${VAPID_PUBLIC_KEY:-}" || -n "${VAPID_PRIVATE_KEY:-}" || -n "${VAPID_SUBJECT:-}" ]]; then
+  : "${VAPID_PUBLIC_KEY:?all VAPID settings are required together}"
+  : "${VAPID_PRIVATE_KEY:?all VAPID settings are required together}"
+  : "${VAPID_SUBJECT:?all VAPID settings are required together}"
+  : "${PUSH_ALLOWED_HOST_SUFFIXES:?PUSH_ALLOWED_HOST_SUFFIXES is required with VAPID}"
+  printf '%s\n' "${VAPID_PUBLIC_KEY}" >"${config_directory}/vapid-public-key"
+  printf '%s\n' "${VAPID_PRIVATE_KEY}" >"${config_directory}/vapid-private-key"
+  chmod 0600 "${config_directory}/vapid-public-key" "${config_directory}/vapid-private-key"
+  cat >>"${temporary}" <<EOF
+web_push {
+  public_key_file      = "vapid-public-key"
+  private_key_file     = "vapid-private-key"
+  subject              = $(jq -Rn --arg value "${VAPID_SUBJECT}" '$value')
+  allowed_host_suffixes = $(jq -Rn --arg value "${PUSH_ALLOWED_HOST_SUFFIXES}" '$value | split(",") | map(select(length > 0))')
+}
+EOF
+fi
+chmod 0600 "${temporary}"
+mv -f "${temporary}" "${APP_CONFIG_FILE}"
+
+printf '%s\n' "${approver_login}" | jq -er '.auth.client_token' >"${config_directory}/approver-token"
+printf '%s\n' "${requester_login}" | jq -er '.auth.client_token' >"${config_directory}/requester-token"
+printf '%s\n' "${agent_login}" | jq -er '.auth.client_token' >"${config_directory}/agent-token"
+chmod 0600 "${config_directory}/approver-token" "${config_directory}/requester-token" "${config_directory}/agent-token"

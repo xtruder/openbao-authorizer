@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"flag"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -28,14 +29,16 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil {
+	configPath := flag.String("config", "openbao-authorizer.hcl", "path to the HCL configuration file")
+	flag.Parse()
+	if err := run(*configPath); err != nil {
 		slog.Error("server stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	cfg, err := config.Load()
+func run(configPath string) error {
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
 	}
@@ -125,7 +128,7 @@ func run() error {
 	}
 
 	notifier := &notificationFanout{events: events, push: pushService}
-	accessorScanner := scanner.New(bao, database, notifier, cfg.ScanConcurrency)
+	accessorScanner := scanner.New(bao, database, notifier, cfg.ApprovalContext, cfg.ScanConcurrency)
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -142,6 +145,7 @@ func run() error {
 		VAPIDPublicKey:       cfg.VAPIDPublicKey,
 		ApproverPolicy:       cfg.ApproverPolicy,
 		ExposeRequestData:    cfg.ExposeRequestData,
+		ApprovalContext:      cfg.ApprovalContext,
 		InsecureCookies:      cfg.InsecureCookies,
 		Sessions:             sessions,
 		ValidatePushEndpoint: pushService.ValidateEndpoint,
@@ -305,7 +309,7 @@ func openBaoHTTPClient(caFile string) (*http.Client, error) {
 		}
 
 		if !roots.AppendCertsFromPEM(certificate) {
-			return nil, errors.New("OPENBAO_CA_FILE did not contain a valid certificate")
+			return nil, errors.New("openbao.ca_file did not contain a valid certificate")
 		}
 	}
 

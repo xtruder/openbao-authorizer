@@ -11,7 +11,7 @@ EnvironmentFile=%h/.config/openbao-authorizer/openbao.env
 EnvironmentFile=%h/.config/openbao-authorizer/bootstrap.env
 Environment=OPENBAO_BIN=%h/.local/lib/openbao-authorizer/bao
 Environment=PROJECT_DIR=%h/Code/openbao-authorizer
-Environment=APP_ENV_FILE=%h/.config/openbao-authorizer/app.env
+Environment=APP_CONFIG_FILE=%h/.config/openbao-authorizer/app.hcl
 Environment=PLUGIN_DIRECTORY=%h/.local/lib/openbao-authorizer/plugins
 Environment=GITHUB_APP_PRIVATE_KEY_FILE=%h/.config/openbao-authorizer/github-app-private-key.pem
 ExecStart=%h/.local/lib/openbao-authorizer/bao server -dev -config=%h/.config/openbao-authorizer/openbao.hcl -dev-listen-address=127.0.0.1:18200 -dev-no-store-token

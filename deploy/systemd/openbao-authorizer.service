@@ -8,9 +8,7 @@ PartOf=openbao-authorizer-openbao.service
 
 [Service]
 Type=simple
-EnvironmentFile=%h/.config/openbao-authorizer/app.env
-Environment=DATABASE_PATH=%h/.local/state/openbao-authorizer/app.db
-ExecStart=%h/.local/lib/openbao-authorizer/openbao-authorizer
+ExecStart=%h/.local/lib/openbao-authorizer/openbao-authorizer -config %h/.config/openbao-authorizer/app.hcl
 Restart=on-failure
 RestartSec=3s
 UMask=0077

@@ -20,19 +20,19 @@ const pendingRequest = {
   lastSeen: '2026-09-17T08:17:00Z',
 }
 
-const githubRequest = {
+const contextualRequest = {
   ...pendingRequest,
   id: 'github-request',
   operation: 'read',
   path: 'github/token/project-authorizer',
-  githubToken: {
+  data: undefined,
+  approvalContext: {
     available: true,
-    permissionSet: 'project-authorizer',
-    account: 'example-org',
-    installationId: 87654321,
-    allRepositories: false,
-    repositories: ['example-repo'],
-    permissions: { administration: 'write', contents: 'write', workflows: 'write' },
+    data: {
+      org_name: 'example-org',
+      repositories: ['example-repo'],
+      permissions: { administration: 'write', contents: 'write', workflows: 'write' },
+    },
   },
 }
 
@@ -167,26 +167,25 @@ describe('OpenBao Authorizer user workflows', () => {
     expect(dashboardBackground).not.toHaveAttribute('aria-hidden')
   })
 
-  it('shows the effective fixed GitHub permission policy before approval', async () => {
+  it('shows generic approval context before approval', async () => {
     const user = userEvent.setup()
     const fetchMock = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse({ identity, csrfToken: 'csrf-policy' }))
-      .mockResolvedValueOnce(jsonResponse([githubRequest]))
+      .mockResolvedValueOnce(jsonResponse([contextualRequest]))
     vi.stubGlobal('fetch', fetchMock)
 
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: /review request/i }))
-    expect(screen.getByRole('heading', { name: 'Effective authorization policy' })).toBeInTheDocument()
-    expect(screen.getByText(/"permission_set": "project-authorizer"/)).toBeInTheDocument()
-    expect(screen.getByText(/"account": "example-org"/)).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Approval context' })).toBeInTheDocument()
+    expect(screen.getByText(/"org_name": "example-org"/)).toBeInTheDocument()
     expect(screen.getByText(/"example-repo"/)).toBeInTheDocument()
     expect(screen.getByText(/"administration": "write"/)).toBeInTheDocument()
-    expect(screen.queryByText(/Redacted by the server/)).not.toBeInTheDocument()
+    expect(screen.getByText(/Redacted by the server/)).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Approve request' }))
     const dialog = screen.getByRole('dialog', { name: 'Confirm approval' })
-    expect(within(dialog).getByText(/"permission_set": "project-authorizer"/)).toBeInTheDocument()
+    expect(within(dialog).getByText(/"org_name": "example-org"/)).toBeInTheDocument()
     expect(within(dialog).getByText(/"workflows": "write"/)).toBeInTheDocument()
   })
 

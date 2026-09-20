@@ -71,14 +71,21 @@ type Authorization struct {
 	EntityName string `json:"entity_name"`
 }
 
+// ApprovalContext is plugin-agnostic metadata shown before approval.
+type ApprovalContext struct {
+	Available bool            `json:"available"`
+	Data      json.RawMessage `json:"data,omitempty"`
+}
+
 // ControlGroupRequest is the reviewable state returned by OpenBao.
 type ControlGroupRequest struct {
-	Approved       bool            `json:"approved"`
-	Operation      string          `json:"request_operation"`
-	Path           string          `json:"request_path"`
-	Data           json.RawMessage `json:"request_data"`
-	Entity         Entity          `json:"request_entity"`
-	Authorizations []Authorization `json:"authorizations"`
+	Approved        bool             `json:"approved"`
+	Operation       string           `json:"request_operation"`
+	Path            string           `json:"request_path"`
+	Data            json.RawMessage  `json:"request_data"`
+	ApprovalContext *ApprovalContext `json:"approval_context,omitempty"`
+	Entity          Entity           `json:"request_entity"`
+	Authorizations  []Authorization  `json:"authorizations"`
 }
 
 // Identity is the authenticated identity associated with a token.
@@ -236,27 +243,13 @@ func (c *Client) ControlGroupRequest(ctx context.Context, accessor string) (Cont
 	return envelope.Data, nil
 }
 
-// GitHubPermissionSet is safe approval context for a fixed GitHub token request.
-type GitHubPermissionSet struct {
-	InstallationID int64             `json:"installation_id"`
-	Account        string            `json:"org_name"`
-	Repositories   []string          `json:"repositories"`
-	RepositoryIDs  []int64           `json:"repository_ids"`
-	Permissions    map[string]string `json:"permissions"`
-}
-
-// GitHubPermissionSet reads a fixed token scope using the scanner credential.
-func (c *Client) GitHubPermissionSet(ctx context.Context, name string) (GitHubPermissionSet, error) {
-	if name == "" || strings.ContainsAny(name, "/\\") {
-		return GitHubPermissionSet{}, errors.New("invalid GitHub permission set name")
-	}
-
+// Read fetches configured approval context using the scanner credential.
+func (c *Client) Read(ctx context.Context, path string) (json.RawMessage, error) {
 	var envelope struct {
-		Data GitHubPermissionSet `json:"data"`
+		Data json.RawMessage `json:"data"`
 	}
-	path := "/v1/github/permissionset/" + url.PathEscape(name)
-	if err := c.call(ctx, http.MethodGet, path, c.scannerToken, nil, &envelope, ""); err != nil {
-		return GitHubPermissionSet{}, err
+	if err := c.call(ctx, http.MethodGet, "/v1/"+path, c.scannerToken, nil, &envelope, ""); err != nil {
+		return nil, err
 	}
 
 	return envelope.Data, nil

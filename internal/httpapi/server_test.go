@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xtruder/openbao-authorizer/internal/approvalcontext"
 	"github.com/xtruder/openbao-authorizer/internal/openbao"
 	"github.com/xtruder/openbao-authorizer/internal/store"
 )
@@ -22,6 +23,7 @@ type fakeBao struct {
 	renewedToken  string
 	revokedToken  string
 	identity      openbao.Identity
+	readData      json.RawMessage
 }
 
 func (f *fakeBao) LoginUserpass(_ context.Context, username, password string) (openbao.AuthToken, error) {
@@ -44,19 +46,6 @@ func (f *fakeBao) RevokeSelf(_ context.Context, token string) error {
 	return nil
 }
 
-func (f *fakeBao) GitHubPermissionSet(_ context.Context, name string) (openbao.GitHubPermissionSet, error) {
-	if name != "project-authorizer" {
-		return openbao.GitHubPermissionSet{}, &openbao.HTTPError{StatusCode: http.StatusNotFound}
-	}
-
-	return openbao.GitHubPermissionSet{
-		InstallationID: 87654321,
-		Account:        "example-org",
-		Repositories:   []string{"example-repo"},
-		Permissions:    map[string]string{"administration": "write", "contents": "write"},
-	}, nil
-}
-
 func (f *fakeBao) LookupSelf(_ context.Context, token string) (openbao.Identity, error) {
 	if token != "human-token" {
 		return openbao.Identity{}, &openbao.HTTPError{StatusCode: http.StatusForbidden}
@@ -75,27 +64,7 @@ func (f *fakeBao) Authorize(_ context.Context, token, _ string) (bool, error) {
 func (*fakeBao) ControlGroupRequest(_ context.Context, _ string) (openbao.ControlGroupRequest, error) {
 	return openbao.ControlGroupRequest{Approved: true, Operation: "update", Path: "secret/data/payroll", Entity: openbao.Entity{ID: "alice-id", Name: "Alice"}}, nil
 }
-
-func TestEnrichesGitHubTokenRequestWithOriginalPermissionSet(t *testing.T) {
-	t.Parallel()
-
-	s := &server{bao: &fakeBao{}}
-	request := store.Request{Path: "github/token/project-authorizer"}
-	s.enrichApprovalContext(t.Context(), &request)
-	if request.GitHubToken == nil || !request.GitHubToken.Available {
-		t.Fatalf("GitHub context = %#v", request.GitHubToken)
-	}
-
-	if request.GitHubToken.PermissionSet != "project-authorizer" || request.GitHubToken.Account != "example-org" || request.GitHubToken.InstallationID != 87654321 || request.GitHubToken.AllRepositories || len(request.GitHubToken.Repositories) != 1 || request.GitHubToken.Repositories[0] != "example-repo" || request.GitHubToken.Permissions["administration"] != "write" {
-		t.Fatalf("GitHub context = %#v", request.GitHubToken)
-	}
-
-	unavailable := store.Request{Path: "github/token/missing"}
-	s.enrichApprovalContext(t.Context(), &unavailable)
-	if unavailable.GitHubToken == nil || unavailable.GitHubToken.Available || unavailable.GitHubToken.PermissionSet != "missing" {
-		t.Fatalf("unavailable context = %#v", unavailable.GitHubToken)
-	}
-}
+func (f *fakeBao) Read(context.Context, string) (json.RawMessage, error) { return f.readData, nil }
 
 func TestSessionsRestoreDurableRecords(t *testing.T) {
 	t.Parallel()
@@ -143,16 +112,24 @@ func TestSessionListAndApproveWorkflow(t *testing.T) {
 		}
 	})
 	_, err = database.Upsert(t.Context(), "wrapping-accessor", openbao.ControlGroupRequest{
-		Operation: "update",
-		Path:      "secret/data/payroll",
-		Entity:    openbao.Entity{ID: "alice-id", Name: "Alice"},
-	})
+		Operation:       "read",
+		Path:            "github/token/project-authorizer",
+		ApprovalContext: &openbao.ApprovalContext{Available: true, Data: json.RawMessage(`{"repositories":["example-repo"]}`)},
+		Entity:          openbao.Entity{ID: "alice-id", Name: "Alice"},
+	}, store.UpsertOptions{ApprovalContext: store.ReplaceApprovalContext})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	bao := &fakeBao{}
-	server := httptest.NewServer(New(Options{OpenBao: bao, Store: database, Events: NewEventBus(), ApproverPolicy: "approver", InsecureCookies: true}))
+	bao := &fakeBao{readData: json.RawMessage(`{"repositories":["example-repo"]}`)}
+	contexts, err := approvalcontext.New([]approvalcontext.Rule{{
+		Name: "github-token", MatchPath: "github/token/{name}", ReadPath: "github/permissionset/{name}",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(New(Options{OpenBao: bao, Store: database, Events: NewEventBus(), ApproverPolicy: "approver", ApprovalContext: contexts, InsecureCookies: true}))
 	defer server.Close()
 	jar, err := cookiejar.New(nil)
 	if err != nil {
@@ -261,6 +238,15 @@ func TestSessionListAndApproveWorkflow(t *testing.T) {
 
 	if bao.approvedToken != "human-token" {
 		t.Fatalf("approved with token %q", bao.approvedToken)
+	}
+
+	storedRequests, err := database.List(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if storedRequests[0].ApprovalContext == nil || string(storedRequests[0].ApprovalContext.Data) != string(bao.readData) {
+		t.Fatalf("stored approval context = %#v", storedRequests[0].ApprovalContext)
 	}
 
 	request, err = http.NewRequestWithContext(t.Context(), http.MethodDelete, server.URL+"/api/v1/session", bytes.NewBufferString(`{}`))
@@ -379,7 +365,7 @@ func TestSessionRevalidatesPolicyAndRedactsPayload(t *testing.T) {
 	_, err = database.Upsert(t.Context(), "accessor", openbao.ControlGroupRequest{
 		Operation: "update", Path: "secret/data/payroll", Data: json.RawMessage(`{"password":"must-not-leak"}`),
 		Entity: openbao.Entity{ID: "alice-id", Name: "Alice"},
-	})
+	}, store.UpsertOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

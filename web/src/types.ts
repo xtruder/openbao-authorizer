@@ -13,15 +13,9 @@ export interface Session {
   csrfToken: string
 }
 
-export interface GitHubTokenContext {
+export interface ApprovalContext {
   available: boolean
-  permissionSet: string
-  account?: string
-  installationId?: number
-  allRepositories: boolean
-  repositories?: string[]
-  repositoryIds?: number[]
-  permissions?: Record<string, string>
+  data?: unknown
 }
 
 export interface ApprovalRequest {
@@ -30,7 +24,7 @@ export interface ApprovalRequest {
   operation: string
   path: string
   data?: unknown
-  githubToken?: GitHubTokenContext
+  approvalContext?: ApprovalContext
   entity: {
     id: string
     name: string

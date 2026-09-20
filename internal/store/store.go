@@ -30,30 +30,33 @@ type DB struct {
 	key  []byte
 }
 
-// GitHubTokenContext describes the fixed GitHub scope behind a token request.
-type GitHubTokenContext struct {
-	Available       bool              `json:"available"`
-	PermissionSet   string            `json:"permissionSet"`
-	Account         string            `json:"account,omitempty"`
-	InstallationID  int64             `json:"installationId,omitempty"`
-	AllRepositories bool              `json:"allRepositories"`
-	Repositories    []string          `json:"repositories,omitempty"`
-	RepositoryIDs   []int64           `json:"repositoryIds,omitempty"`
-	Permissions     map[string]string `json:"permissions,omitempty"`
+// ApprovalContextUpdate controls whether an upsert preserves or replaces stored context.
+type ApprovalContextUpdate uint8
+
+const (
+	// PreserveApprovalContext retains the existing context when updating a request.
+	PreserveApprovalContext ApprovalContextUpdate = iota
+	// ReplaceApprovalContext writes the request's context, including an explicit nil value.
+	ReplaceApprovalContext
+)
+
+// UpsertOptions controls fields whose absence has distinct preserve and clear meanings.
+type UpsertOptions struct {
+	ApprovalContext ApprovalContextUpdate
 }
 
 // Request is a stored control-group request. The raw accessor is intentionally absent.
 type Request struct {
-	ID             string                  `json:"id"`
-	Approved       bool                    `json:"approved"`
-	Operation      string                  `json:"operation"`
-	Path           string                  `json:"path"`
-	Data           json.RawMessage         `json:"data,omitempty"`
-	GitHubToken    *GitHubTokenContext     `json:"githubToken,omitempty"`
-	Entity         openbao.Entity          `json:"entity"`
-	Authorizations []openbao.Authorization `json:"authorizations"`
-	FirstSeen      time.Time               `json:"firstSeen"`
-	LastSeen       time.Time               `json:"lastSeen"`
+	ID              string                   `json:"id"`
+	Approved        bool                     `json:"approved"`
+	Operation       string                   `json:"operation"`
+	Path            string                   `json:"path"`
+	Data            json.RawMessage          `json:"data,omitempty"`
+	ApprovalContext *openbao.ApprovalContext `json:"approvalContext,omitempty"`
+	Entity          openbao.Entity           `json:"entity"`
+	Authorizations  []openbao.Authorization  `json:"authorizations"`
+	FirstSeen       time.Time                `json:"firstSeen"`
+	LastSeen        time.Time                `json:"lastSeen"`
 }
 
 // Session is an encrypted durable application session. Passwords are never stored.
@@ -139,6 +142,8 @@ CREATE TABLE IF NOT EXISTS requests (
   path TEXT NOT NULL,
   data_nonce BLOB NOT NULL,
   data_ciphertext BLOB NOT NULL,
+  approval_context_nonce BLOB,
+  approval_context_ciphertext BLOB,
   requester_id TEXT NOT NULL,
   requester_name TEXT NOT NULL,
   authorizations BLOB NOT NULL,
@@ -164,6 +169,47 @@ CREATE TABLE IF NOT EXISTS sessions (
 		return fmt.Errorf("migrate database: %w", err)
 	}
 
+	if err := d.addColumn(ctx, "requests", "approval_context_nonce", "BLOB"); err != nil {
+		return err
+	}
+
+	if err := d.addColumn(ctx, "requests", "approval_context_ciphertext", "BLOB"); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (d *DB) addColumn(ctx context.Context, table, column, definition string) error {
+	rows, err := d.db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return fmt.Errorf("inspect %s schema: %w", table, err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return fmt.Errorf("scan %s schema: %w", table, err)
+		}
+
+		if name == column {
+			return nil
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("inspect %s schema: %w", table, err)
+	}
+
+	if _, err := d.db.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN "+column+" "+definition); err != nil {
+		return fmt.Errorf("add %s.%s: %w", table, column, err)
+	}
+
 	return nil
 }
 
@@ -171,7 +217,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 func (d *DB) Close() error { return d.db.Close() }
 
 // Upsert stores current OpenBao state and reports whether this accessor was first observed.
-func (d *DB) Upsert(ctx context.Context, accessor string, request openbao.ControlGroupRequest) (bool, error) {
+func (d *DB) Upsert(ctx context.Context, accessor string, request openbao.ControlGroupRequest, options UpsertOptions) (bool, error) {
 	fingerprint := d.fingerprint(accessor)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
@@ -204,17 +250,34 @@ func (d *DB) Upsert(ctx context.Context, accessor string, request openbao.Contro
 		return false, fmt.Errorf("encode authorizations: %w", err)
 	}
 
+	approvalContext, err := json.Marshal(request.ApprovalContext)
+	if err != nil {
+		return false, fmt.Errorf("encode approval context: %w", err)
+	}
+
+	approvalContextNonce, approvalContextCiphertext, err := d.encrypt(approvalContext, []byte(id+":approval-context"))
+	if err != nil {
+		return false, err
+	}
+
 	if isNew {
 		_, err = d.db.ExecContext(ctx, `INSERT INTO requests
-(id, fingerprint, accessor_nonce, accessor_ciphertext, approved, operation, path, data_nonce, data_ciphertext, requester_id, requester_name, authorizations, first_seen, last_seen)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+(id, fingerprint, accessor_nonce, accessor_ciphertext, approved, operation, path, data_nonce, data_ciphertext, approval_context_nonce, approval_context_ciphertext, requester_id, requester_name, authorizations, first_seen, last_seen)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			id, fingerprint, accessorNonce, accessorCiphertext, request.Approved, request.Operation, request.Path,
-			dataNonce, dataCiphertext, request.Entity.ID, request.Entity.Name, authorizations, now, now)
+			dataNonce, dataCiphertext, approvalContextNonce, approvalContextCiphertext, request.Entity.ID, request.Entity.Name, authorizations, now, now)
 	} else {
-		_, err = d.db.ExecContext(ctx, `UPDATE requests SET
+		if options.ApprovalContext == ReplaceApprovalContext {
+			_, err = d.db.ExecContext(ctx, `UPDATE requests SET
+accessor_nonce = ?, accessor_ciphertext = ?, approved = ?, operation = ?, path = ?, data_nonce = ?, data_ciphertext = ?, approval_context_nonce = ?, approval_context_ciphertext = ?, requester_id = ?, requester_name = ?, authorizations = ?, last_seen = ?
+WHERE id = ?`, accessorNonce, accessorCiphertext, request.Approved, request.Operation, request.Path,
+				dataNonce, dataCiphertext, approvalContextNonce, approvalContextCiphertext, request.Entity.ID, request.Entity.Name, authorizations, now, id)
+		} else {
+			_, err = d.db.ExecContext(ctx, `UPDATE requests SET
 accessor_nonce = ?, accessor_ciphertext = ?, approved = ?, operation = ?, path = ?, data_nonce = ?, data_ciphertext = ?, requester_id = ?, requester_name = ?, authorizations = ?, last_seen = ?
 WHERE id = ?`, accessorNonce, accessorCiphertext, request.Approved, request.Operation, request.Path,
-			dataNonce, dataCiphertext, request.Entity.ID, request.Entity.Name, authorizations, now, id)
+				dataNonce, dataCiphertext, request.Entity.ID, request.Entity.Name, authorizations, now, id)
+		}
 	}
 
 	if err != nil {
@@ -226,7 +289,7 @@ WHERE id = ?`, accessorNonce, accessorCiphertext, request.Approved, request.Oper
 
 // List returns all discovered requests, newest first.
 func (d *DB) List(ctx context.Context) ([]Request, error) {
-	rows, err := d.db.QueryContext(ctx, `SELECT id, approved, operation, path, data_nonce, data_ciphertext,
+	rows, err := d.db.QueryContext(ctx, `SELECT id, approved, operation, path, data_nonce, data_ciphertext, approval_context_nonce, approval_context_ciphertext,
 requester_id, requester_name, authorizations, first_seen, last_seen FROM requests ORDER BY first_seen DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list requests: %w", err)
@@ -237,9 +300,9 @@ requester_id, requester_name, authorizations, first_seen, last_seen FROM request
 	requests := make([]Request, 0)
 	for rows.Next() {
 		var request Request
-		var dataNonce, dataCiphertext, authorizations []byte
+		var dataNonce, dataCiphertext, approvalContextNonce, approvalContextCiphertext, authorizations []byte
 		var firstSeen, lastSeen string
-		if err := rows.Scan(&request.ID, &request.Approved, &request.Operation, &request.Path, &dataNonce, &dataCiphertext,
+		if err := rows.Scan(&request.ID, &request.Approved, &request.Operation, &request.Path, &dataNonce, &dataCiphertext, &approvalContextNonce, &approvalContextCiphertext,
 			&request.Entity.ID, &request.Entity.Name, &authorizations, &firstSeen, &lastSeen); err != nil {
 			return nil, fmt.Errorf("scan request: %w", err)
 		}
@@ -250,6 +313,19 @@ requester_id, requester_name, authorizations, first_seen, last_seen FROM request
 		}
 
 		request.Data = data
+		if len(approvalContextCiphertext) > 0 {
+			approvalContext, decryptErr := d.decrypt(approvalContextNonce, approvalContextCiphertext, []byte(request.ID+":approval-context"))
+			if decryptErr != nil {
+				return nil, decryptErr
+			}
+
+			if string(approvalContext) != "null" {
+				if decodeErr := json.Unmarshal(approvalContext, &request.ApprovalContext); decodeErr != nil {
+					return nil, fmt.Errorf("decode approval context: %w", decodeErr)
+				}
+			}
+		}
+
 		authorizationErr := json.Unmarshal(authorizations, &request.Authorizations)
 		if authorizationErr != nil {
 			return nil, fmt.Errorf("decode authorizations: %w", authorizationErr)

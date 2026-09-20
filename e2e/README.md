@@ -20,7 +20,7 @@ Requirements are Linux on `amd64` or `arm64`, Go 1.26 or newer, `curl`, `sha256s
 
 Downloads and the extracted `bao` binary are cached beneath ignored `.e2e/openbao/`. Set `OPENBAO_E2E_KEEP_RUNTIME=1` to retain successful-run logs and temporary state. Failed runs retain their runtime directory automatically and print both process logs.
 
-`make e2e` builds the application first and passes its binary path to the harness. The harness gives the OpenBao and application processes isolated home, temporary, and configuration directories. Child environments use explicit allowlists, so workstation credentials, OpenBao/Vault settings, application secrets, GitHub credentials, and CLI authentication state are not inherited. The workflow mounts only OpenBao's built-in engines and asserts that no `github/` plugin mount exists.
+`make e2e` builds the application first and passes its binary path to the harness. The harness gives the OpenBao and application processes isolated home, temporary, and configuration directories, then writes an isolated HCL application config and secret files. Child environments use explicit allowlists, so workstation credentials, OpenBao/Vault settings, application secrets, GitHub credentials, and CLI authentication state are not inherited. The workflow mounts only OpenBao's built-in engines and asserts that no `github/` plugin mount exists.
 
 ## Supply-chain and process checks
 

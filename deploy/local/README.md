@@ -19,8 +19,8 @@ this unit as a production OpenBao deployment.
 - Traefik file-provider route:
   `~/.config/traefik/dynamic/openbao-authorizer.yml`
 
-The app binary embeds `web/dist`; the service does not need a frontend directory
-or `STATIC_DIRECTORY` at runtime.
+The app binary embeds `web/dist`; `app.hcl` leaves `server.static_directory`
+empty so the service does not need a frontend directory at runtime.
 
 ## Provisioned local identities
 
@@ -36,6 +36,9 @@ Generated login material remains local:
 
 ```text
 ~/.config/openbao-authorizer/approver-password
+~/.config/openbao-authorizer/app.hcl
+~/.config/openbao-authorizer/encryption-key
+~/.config/openbao-authorizer/scanner-token
 ~/.config/openbao-authorizer/requester-password
 ~/.config/openbao-authorizer/requester-token
 ~/.config/openbao-authorizer/agent-token

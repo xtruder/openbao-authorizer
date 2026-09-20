@@ -10,9 +10,3 @@ path "sys/control-group/request" {
     "accessor" = []
   }
 }
-
-# Approval UI context only: permission sets contain fixed repository selectors
-# and permission names, never GitHub tokens or the App private key.
-path "github/permissionset/*" {
-  capabilities = ["read"]
-}

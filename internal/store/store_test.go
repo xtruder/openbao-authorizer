@@ -27,12 +27,13 @@ func TestUpsertDeduplicatesAndEncryptsAccessor(t *testing.T) {
 	})
 
 	request := openbao.ControlGroupRequest{
-		Operation: "update",
-		Path:      "secret/data/payroll",
-		Data:      []byte(`{"ttl":"1h"}`),
-		Entity:    openbao.Entity{ID: "requester-1", Name: "Alice"},
+		Operation:       "update",
+		Path:            "secret/data/payroll",
+		Data:            []byte(`{"ttl":"1h"}`),
+		ApprovalContext: &openbao.ApprovalContext{Available: true, Data: []byte(`{"role":"restricted-role"}`)},
+		Entity:          openbao.Entity{ID: "requester-1", Name: "Alice"},
 	}
-	isNew, err := db.Upsert(t.Context(), "very-sensitive-accessor", request)
+	isNew, err := db.Upsert(t.Context(), "very-sensitive-accessor", request, UpsertOptions{ApprovalContext: ReplaceApprovalContext})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +42,10 @@ func TestUpsertDeduplicatesAndEncryptsAccessor(t *testing.T) {
 		t.Fatal("first upsert must be new")
 	}
 
-	isNew, err = db.Upsert(t.Context(), "very-sensitive-accessor", request)
+	updated := request
+	updated.Approved = true
+	updated.ApprovalContext = nil
+	isNew, err = db.Upsert(t.Context(), "very-sensitive-accessor", updated, UpsertOptions{ApprovalContext: PreserveApprovalContext})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,6 +61,10 @@ func TestUpsertDeduplicatesAndEncryptsAccessor(t *testing.T) {
 
 	if len(records) != 1 || records[0].Path != request.Path {
 		t.Fatalf("records = %#v", records)
+	}
+
+	if records[0].ApprovalContext == nil || !records[0].ApprovalContext.Available || string(records[0].ApprovalContext.Data) != `{"role":"restricted-role"}` {
+		t.Fatalf("approval context = %#v", records[0].ApprovalContext)
 	}
 
 	accessor, err := db.Accessor(t.Context(), records[0].ID)
@@ -75,6 +83,10 @@ func TestUpsertDeduplicatesAndEncryptsAccessor(t *testing.T) {
 
 	if bytes.Contains(contents, []byte("very-sensitive-accessor")) {
 		t.Fatal("database contains plaintext accessor")
+	}
+
+	if bytes.Contains(contents, []byte("restricted-role")) {
+		t.Fatal("database contains plaintext approval context")
 	}
 
 	info, err := os.Stat(path)

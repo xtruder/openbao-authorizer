@@ -16,7 +16,7 @@ import {
   UserIcon,
   WifiOffIcon,
 } from './components/Icons'
-import type { ApprovalRequest, ConnectionState, GitHubTokenContext, Identity, RequestFilter, Session } from './types'
+import type { ApprovalContext, ApprovalRequest, ConnectionState, Identity, RequestFilter, Session } from './types'
 
 function isSessionLost(error: unknown) {
   return error instanceof ApiError && (error.status === 401 || error.status === 403)
@@ -286,31 +286,21 @@ function EmptyState({ filter }: { filter: RequestFilter }) {
   )
 }
 
-function GitHubPermissionPolicy({ context, compact = false }: { context: GitHubTokenContext; compact?: boolean }) {
+function ApprovalContextView({ context, compact = false }: { context: ApprovalContext; compact?: boolean }) {
   if (!context.available) {
     return (
       <div role="alert" className="rounded-sm border border-red-200 bg-red-50 px-3 py-3 text-sm text-red-700">
-        Effective authorization policy could not be loaded. Do not approve this request.
+        Approval context could not be loaded. Do not approve this request.
       </div>
     )
-  }
-  const repositories = context.allRepositories
-    ? { scope: 'all repositories in this installation' }
-    : { names: context.repositories ?? [], ids: context.repositoryIds ?? [] }
-  const policy = {
-    permission_set: context.permissionSet,
-    account: context.account || null,
-    installation_id: context.installationId ?? null,
-    repositories,
-    permissions: context.permissions ?? {},
   }
   return (
     <div className={compact ? 'mt-3' : ''}>
       <div className="mb-2 flex items-center justify-between gap-3">
-        <h3 className="detail-label">Effective authorization policy</h3>
-        <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-400">Fixed by OpenBao</span>
+        <h3 className="detail-label">Approval context</h3>
+        <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-400">Read from OpenBao</span>
       </div>
-      <pre className="json-block"><code>{JSON.stringify(policy, null, 2)}</code></pre>
+      <pre className="json-block"><code>{JSON.stringify(context.data, null, 2)}</code></pre>
     </div>
   )
 }
@@ -362,25 +352,23 @@ function RequestDetail({ request, onBack, onApprove, approving }: {
           </div>
         </div>
 
-        {request.githubToken && (
+        {request.approvalContext && (
           <div className="detail-section">
-            <GitHubPermissionPolicy context={request.githubToken} />
+            <ApprovalContextView context={request.approvalContext} />
           </div>
         )}
 
-        {!request.githubToken && (
-          <div className="detail-section">
-            <div className="mb-3 flex items-center justify-between gap-3">
-              <h3 className="detail-label">Request payload</h3>
-              <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-400">JSON</span>
-            </div>
-            {request.data === undefined ? (
-              <p className="rounded-sm border border-zinc-200 bg-zinc-50 px-3 py-3 text-sm text-zinc-500">Redacted by the server. Enable path-specific payload exposure only when the submitted fields are safe to display.</p>
-            ) : (
-              <pre className="json-block"><code>{JSON.stringify(request.data, null, 2) ?? 'null'}</code></pre>
-            )}
+        <div className="detail-section">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <h3 className="detail-label">Request payload</h3>
+            <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-400">JSON</span>
           </div>
-        )}
+          {request.data === undefined ? (
+            <p className="rounded-sm border border-zinc-200 bg-zinc-50 px-3 py-3 text-sm text-zinc-500">Redacted by the server. Enable request payload exposure only when the submitted fields are safe to display.</p>
+          ) : (
+            <pre className="json-block"><code>{JSON.stringify(request.data, null, 2) ?? 'null'}</code></pre>
+          )}
+        </div>
 
         <div className="detail-section">
           <h3 className="detail-label">Required authorizations</h3>
@@ -488,7 +476,7 @@ function ConfirmationDialog({ request, submitting, error, onCancel, onConfirm }:
           <p className="font-mono text-xs font-semibold text-zinc-900 break-all">{request.path}</p>
           <p className="mt-1.5 text-xs text-zinc-500">{formatOperation(request.operation)} requested by {request.entity.name || request.entity.id}</p>
         </div>
-        {request.githubToken && <GitHubPermissionPolicy context={request.githubToken} compact />}
+        {request.approvalContext && <ApprovalContextView context={request.approvalContext} compact />}
         {error && <div role="alert" className="mt-4 rounded-sm border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-700">{error}</div>}
         <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
           <button type="button" onClick={onCancel} disabled={submitting} className="secondary-button">Cancel</button>
@@ -651,6 +639,12 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
     } catch (caught) {
       if (isSessionLost(caught)) {
         onSignedOut()
+        return
+      }
+      if (caught instanceof ApiError && caught.status === 409) {
+        await loadRequests(true)
+        setConfirming(null)
+        setNotice(caught.message)
         return
       }
       setApprovalError(getErrorMessage(caught, 'Approval failed. Try again.'))

@@ -228,18 +228,48 @@ func TestOpenBaoControlGroupWorkflow(t *testing.T) {
 		t.Fatalf("create static directory: %v", mkdirErr)
 	}
 
-	appEnvironment := processPaths.environment(
-		"APP_ENCRYPTION_KEY="+base64.StdEncoding.EncodeToString(encryptionKey),
-		"APPROVER_POLICY="+approverPolicy,
-		"DATABASE_PATH="+filepath.Join(runtimeDirectory, "app.db"),
-		"INSECURE_COOKIES=true",
-		"LISTEN_ADDRESS=127.0.0.1:0",
-		"OPENBAO_ADDRESS="+strings.TrimSuffix(bao.baseURL, "/v1"),
-		"OPENBAO_SCANNER_TOKEN="+scannerToken,
-		"SCAN_INTERVAL=1s",
-		"STATIC_DIRECTORY="+staticDirectory,
-	)
-	appProcess, err := startManagedProcess(appLog, repositoryRoot, appEnvironment, appBinary)
+	encryptionKeyFile := filepath.Join(runtimeDirectory, "encryption-key")
+	if writeErr := os.WriteFile(encryptionKeyFile, []byte(base64.StdEncoding.EncodeToString(encryptionKey)), 0o600); writeErr != nil {
+		t.Fatalf("write encryption key: %v", writeErr)
+	}
+
+	scannerTokenFile := filepath.Join(runtimeDirectory, "scanner-token")
+	if writeErr := os.WriteFile(scannerTokenFile, []byte(scannerToken), 0o600); writeErr != nil {
+		t.Fatalf("write scanner token: %v", writeErr)
+	}
+
+	appConfig := filepath.Join(runtimeDirectory, "app.hcl")
+	configuration := fmt.Sprintf(`
+server {
+  listen_address   = "127.0.0.1:0"
+  public_origin    = ""
+  insecure_cookies = true
+  static_directory = %q
+}
+storage {
+  database_path       = %q
+  encryption_key_file = %q
+}
+openbao {
+  address            = %q
+  namespace          = ""
+  ca_file            = ""
+  scanner_token_file = %q
+  approver_policy    = %q
+}
+scanner {
+  interval    = "1s"
+  concurrency = 8
+}
+requests {
+  expose_data = false
+}
+`, staticDirectory, filepath.Join(runtimeDirectory, "app.db"), encryptionKeyFile, strings.TrimSuffix(bao.baseURL, "/v1"), scannerTokenFile, approverPolicy)
+	if writeErr := os.WriteFile(appConfig, []byte(configuration), 0o600); writeErr != nil {
+		t.Fatalf("write application config: %v", writeErr)
+	}
+
+	appProcess, err := startManagedProcess(appLog, repositoryRoot, processPaths.environment(), appBinary, "-config", appConfig)
 	if err != nil {
 		t.Fatalf("start application: %v", err)
 	}

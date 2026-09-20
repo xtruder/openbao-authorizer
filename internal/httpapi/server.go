@@ -13,10 +13,12 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/xtruder/openbao-authorizer/internal/approvalcontext"
 	"github.com/xtruder/openbao-authorizer/internal/openbao"
 	"github.com/xtruder/openbao-authorizer/internal/store"
 )
@@ -34,14 +36,14 @@ type OpenBao interface {
 	LookupSelf(context.Context, string) (openbao.Identity, error)
 	Authorize(context.Context, string, string) (bool, error)
 	ControlGroupRequest(context.Context, string) (openbao.ControlGroupRequest, error)
-	GitHubPermissionSet(context.Context, string) (openbao.GitHubPermissionSet, error)
+	Read(context.Context, string) (json.RawMessage, error)
 }
 
 // Store is the persistence surface needed by the HTTP API.
 type Store interface {
 	List(context.Context) ([]store.Request, error)
 	Accessor(context.Context, string) (string, error)
-	Upsert(context.Context, string, openbao.ControlGroupRequest) (bool, error)
+	Upsert(context.Context, string, openbao.ControlGroupRequest, store.UpsertOptions) (bool, error)
 	SetApproved(context.Context, string, bool) error
 	PutSession(context.Context, store.Session) error
 	DeleteSession(context.Context, string) error
@@ -60,6 +62,7 @@ type Options struct {
 	VAPIDPublicKey       string
 	ApproverPolicy       string
 	ExposeRequestData    bool
+	ApprovalContext      *approvalcontext.Resolver
 	InsecureCookies      bool
 	Sessions             *Sessions
 	ValidatePushEndpoint func(context.Context, string) error
@@ -74,6 +77,7 @@ type server struct {
 	vapidPublicKey       string
 	approverPolicy       string
 	exposeRequestData    bool
+	approvalContext      *approvalcontext.Resolver
 	insecureCookies      bool
 	sessions             *Sessions
 	validatePushEndpoint func(context.Context, string) error
@@ -205,6 +209,11 @@ func New(options Options) http.Handler {
 		sessions = NewSessions()
 	}
 
+	contexts := options.ApprovalContext
+	if contexts == nil {
+		contexts, _ = approvalcontext.New(nil)
+	}
+
 	s := &server{
 		bao:                  options.OpenBao,
 		store:                options.Store,
@@ -214,6 +223,7 @@ func New(options Options) http.Handler {
 		vapidPublicKey:       options.VAPIDPublicKey,
 		approverPolicy:       options.ApproverPolicy,
 		exposeRequestData:    options.ExposeRequestData,
+		approvalContext:      contexts,
 		insecureCookies:      options.InsecureCookies,
 		sessions:             sessions,
 		validatePushEndpoint: options.ValidatePushEndpoint,
@@ -364,38 +374,9 @@ func (s *server) listRequests(w http.ResponseWriter, r *http.Request, _ session)
 		if !s.exposeRequestData {
 			requests[index].Data = nil
 		}
-
-		s.enrichApprovalContext(r.Context(), &requests[index])
 	}
 
 	writeJSON(w, http.StatusOK, requests)
-}
-
-func (s *server) enrichApprovalContext(ctx context.Context, request *store.Request) {
-	const prefix = "github/token/"
-	name, found := strings.CutPrefix(request.Path, prefix)
-	if !found || name == "" || strings.Contains(name, "/") {
-		return
-	}
-
-	context := &store.GitHubTokenContext{PermissionSet: name}
-	request.GitHubToken = context
-	permissionSet, err := s.bao.GitHubPermissionSet(ctx, name)
-	if err != nil {
-		if s.logger != nil {
-			s.logger.Warn("load GitHub approval policy", "permission_set", name, "error", err)
-		}
-
-		return
-	}
-
-	context.Available = true
-	context.Account = permissionSet.Account
-	context.InstallationID = permissionSet.InstallationID
-	context.Repositories = permissionSet.Repositories
-	context.RepositoryIDs = permissionSet.RepositoryIDs
-	context.AllRepositories = len(permissionSet.Repositories) == 0 && len(permissionSet.RepositoryIDs) == 0
-	context.Permissions = permissionSet.Permissions
 }
 
 func (s *server) approve(w http.ResponseWriter, r *http.Request, value session) {
@@ -414,6 +395,51 @@ func (s *server) approve(w http.ResponseWriter, r *http.Request, value session) 
 		return
 	}
 
+	requests, err := s.store.List(r.Context())
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
+
+	var stored *store.Request
+	for index := range requests {
+		if requests[index].ID == r.PathValue("id") {
+			stored = &requests[index]
+			break
+		}
+	}
+
+	if stored == nil {
+		writeError(w, http.StatusNotFound, "request not found")
+		return
+	}
+
+	currentContext := stored.ApprovalContext
+	contextPath, hasContext := s.approvalContext.Resolve(stored.Path)
+	if hasContext {
+		contextData, contextErr := s.bao.Read(r.Context(), contextPath)
+		currentContext = &openbao.ApprovalContext{Available: contextErr == nil, Data: contextData}
+		request := openbao.ControlGroupRequest{
+			Approved: stored.Approved, Operation: stored.Operation, Path: stored.Path, Data: stored.Data,
+			ApprovalContext: currentContext, Entity: stored.Entity, Authorizations: stored.Authorizations,
+		}
+		if _, upsertErr := s.store.Upsert(r.Context(), accessor, request, store.UpsertOptions{ApprovalContext: store.ReplaceApprovalContext}); upsertErr != nil {
+			s.internalError(w, upsertErr)
+			return
+		}
+
+		if contextErr != nil {
+			s.logger.Warn("refresh approval context", "path", stored.Path, "error", contextErr)
+			writeError(w, http.StatusConflict, "approval context could not be refreshed; review the request again")
+			return
+		}
+
+		if !sameApprovalContext(stored.ApprovalContext, currentContext) {
+			writeError(w, http.StatusConflict, "approval context changed; review the request again")
+			return
+		}
+	}
+
 	approved, err := s.bao.Authorize(r.Context(), value.Token, accessor)
 	if err != nil {
 		var httpErr *openbao.HTTPError
@@ -428,7 +454,11 @@ func (s *server) approve(w http.ResponseWriter, r *http.Request, value session) 
 
 	fresh, err := s.bao.ControlGroupRequest(r.Context(), accessor)
 	if err == nil {
-		_, err = s.store.Upsert(r.Context(), accessor, fresh)
+		if fresh.ApprovalContext == nil {
+			fresh.ApprovalContext = currentContext
+		}
+
+		_, err = s.store.Upsert(r.Context(), accessor, fresh, store.UpsertOptions{ApprovalContext: store.ReplaceApprovalContext})
 		approved = fresh.Approved
 	} else {
 		err = s.store.SetApproved(r.Context(), r.PathValue("id"), approved)
@@ -440,7 +470,7 @@ func (s *server) approve(w http.ResponseWriter, r *http.Request, value session) 
 	}
 
 	_ = s.events.Publish("status", map[string]any{"id": r.PathValue("id"), "approved": approved})
-	requests, err := s.store.List(r.Context())
+	requests, err = s.store.List(r.Context())
 	if err != nil {
 		s.internalError(w, err)
 		return
@@ -452,13 +482,29 @@ func (s *server) approve(w http.ResponseWriter, r *http.Request, value session) 
 				request.Data = nil
 			}
 
-			s.enrichApprovalContext(r.Context(), &request)
 			writeJSON(w, http.StatusOK, request)
 			return
 		}
 	}
 
 	writeError(w, http.StatusNotFound, "request not found")
+}
+
+func sameApprovalContext(left, right *openbao.ApprovalContext) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+
+	if left.Available != right.Available {
+		return false
+	}
+
+	var leftData, rightData any
+	if json.Unmarshal(left.Data, &leftData) != nil || json.Unmarshal(right.Data, &rightData) != nil {
+		return false
+	}
+
+	return reflect.DeepEqual(leftData, rightData)
 }
 
 func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, value session) {

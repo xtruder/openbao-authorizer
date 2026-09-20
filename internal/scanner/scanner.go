@@ -3,22 +3,26 @@ package scanner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
 
+	"github.com/xtruder/openbao-authorizer/internal/approvalcontext"
 	"github.com/xtruder/openbao-authorizer/internal/openbao"
+	"github.com/xtruder/openbao-authorizer/internal/store"
 )
 
 // OpenBao is the read-only API surface used by the scanner.
 type OpenBao interface {
 	ListAccessors(context.Context) ([]string, error)
 	ControlGroupRequest(context.Context, string) (openbao.ControlGroupRequest, error)
+	Read(context.Context, string) (json.RawMessage, error)
 }
 
 // Sink persists discovered requests and reports whether they are new.
 type Sink interface {
-	Upsert(context.Context, string, openbao.ControlGroupRequest) (bool, error)
+	Upsert(context.Context, string, openbao.ControlGroupRequest, store.UpsertOptions) (bool, error)
 }
 
 // Notifier emits a notification for a newly discovered request.
@@ -31,16 +35,21 @@ type Scanner struct {
 	bao         OpenBao
 	sink        Sink
 	notifier    Notifier
+	contexts    *approvalcontext.Resolver
 	concurrency int
 }
 
 // New constructs a scanner.
-func New(bao OpenBao, sink Sink, notifier Notifier, concurrency int) *Scanner {
+func New(bao OpenBao, sink Sink, notifier Notifier, contexts *approvalcontext.Resolver, concurrency int) *Scanner {
 	if concurrency < 1 {
 		concurrency = 1
 	}
 
-	return &Scanner{bao: bao, sink: sink, notifier: notifier, concurrency: concurrency}
+	if contexts == nil {
+		contexts, _ = approvalcontext.New(nil)
+	}
+
+	return &Scanner{bao: bao, sink: sink, notifier: notifier, contexts: contexts, concurrency: concurrency}
 }
 
 // Scan performs one complete accessor snapshot scan.
@@ -70,7 +79,16 @@ func (s *Scanner) Scan(ctx context.Context) error {
 				continue
 			}
 
-			isNew, sinkErr := s.sink.Upsert(ctx, accessor, request)
+			options := store.UpsertOptions{ApprovalContext: store.PreserveApprovalContext}
+			if !request.Approved {
+				options.ApprovalContext = store.ReplaceApprovalContext
+				if contextPath, matched := s.contexts.Resolve(request.Path); matched {
+					contextData, contextErr := s.bao.Read(ctx, contextPath)
+					request.ApprovalContext = &openbao.ApprovalContext{Available: contextErr == nil, Data: contextData}
+				}
+			}
+
+			isNew, sinkErr := s.sink.Upsert(ctx, accessor, request, options)
 			if sinkErr != nil {
 				errorMu.Lock()
 				scanErrors = append(scanErrors, fmt.Errorf("store request: %w", sinkErr))

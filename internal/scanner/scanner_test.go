@@ -2,15 +2,21 @@ package scanner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
 
+	"github.com/xtruder/openbao-authorizer/internal/approvalcontext"
 	"github.com/xtruder/openbao-authorizer/internal/openbao"
+	"github.com/xtruder/openbao-authorizer/internal/store"
 )
 
 type fakeBao struct {
 	requests map[string]openbao.ControlGroupRequest
+	readPath string
+	readData json.RawMessage
+	readErr  error
 }
 
 func (f *fakeBao) ListAccessors(context.Context) ([]string, error) {
@@ -24,13 +30,76 @@ func (f *fakeBao) ControlGroupRequest(_ context.Context, accessor string) (openb
 
 	return request, nil
 }
+func (f *fakeBao) Read(_ context.Context, path string) (json.RawMessage, error) {
+	f.readPath = path
+	return f.readData, f.readErr
+}
+
+func TestScanStoresUnavailableContextWithoutFailing(t *testing.T) {
+	t.Parallel()
+
+	bao := &fakeBao{
+		requests: map[string]openbao.ControlGroupRequest{
+			"pending": {Path: "github/token/missing", Operation: "read"},
+		},
+		readErr: errors.New("context unavailable"),
+	}
+	contexts, err := approvalcontext.New([]approvalcontext.Rule{{
+		Name: "github-token", MatchPath: "github/token/{name}", ReadPath: "github/permissionset/{name}",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &memorySink{}
+	if err := New(bao, sink, nil, contexts, 1).Scan(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	context := sink.records["pending"].ApprovalContext
+	if context == nil || context.Available {
+		t.Fatalf("approval context = %#v", context)
+	}
+}
 
 type memorySink struct {
 	mu      sync.Mutex
 	records map[string]openbao.ControlGroupRequest
 }
 
-func (s *memorySink) Upsert(_ context.Context, accessor string, request openbao.ControlGroupRequest) (bool, error) {
+func TestScanLoadsConfiguredApprovalContext(t *testing.T) {
+	t.Parallel()
+
+	bao := &fakeBao{
+		requests: map[string]openbao.ControlGroupRequest{
+			"pending": {Path: "github/token/project-authorizer", Operation: "read"},
+		},
+		readData: json.RawMessage(`{"repositories":["example-repo"]}`),
+	}
+	contexts, err := approvalcontext.New([]approvalcontext.Rule{{
+		Name: "github-token", MatchPath: "github/token/{name}", ReadPath: "github/permissionset/{name}",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &memorySink{}
+	requestScanner := New(bao, sink, nil, contexts, 1)
+	if err := requestScanner.Scan(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	stored := sink.records["pending"]
+	if bao.readPath != "github/permissionset/project-authorizer" {
+		t.Fatalf("read path = %q", bao.readPath)
+	}
+
+	if stored.ApprovalContext == nil || !stored.ApprovalContext.Available || string(stored.ApprovalContext.Data) != string(bao.readData) {
+		t.Fatalf("approval context = %#v", stored.ApprovalContext)
+	}
+}
+
+func (s *memorySink) Upsert(_ context.Context, accessor string, request openbao.ControlGroupRequest, _ store.UpsertOptions) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.records == nil {
@@ -62,7 +131,7 @@ func TestScanContinuesPastOrdinaryAccessorsAndNotifiesOnce(t *testing.T) {
 	}}
 	sink := &memorySink{}
 	notifier := &collectingNotifier{}
-	scanner := New(bao, sink, notifier, 2)
+	scanner := New(bao, sink, notifier, nil, 2)
 
 	if err := scanner.Scan(t.Context()); err != nil {
 		t.Fatal(err)
@@ -90,7 +159,7 @@ func (*failingBao) ListAccessors(context.Context) ([]string, error) {
 func TestScanReturnsListFailure(t *testing.T) {
 	t.Parallel()
 
-	scanner := New(&failingBao{}, &memorySink{}, &collectingNotifier{}, 1)
+	scanner := New(&failingBao{}, &memorySink{}, &collectingNotifier{}, nil, 1)
 	if err := scanner.Scan(t.Context()); err == nil {
 		t.Fatal("expected error")
 	}

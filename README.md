@@ -8,12 +8,12 @@ A self-hosted approval inbox for [OpenBao control groups](https://openbao.org/co
 
 Two OpenBao credentials have deliberately different roles:
 
-- **Scanner token:** lists service-token accessors and calls `sys/control-group/request`. It cannot approve, unwrap, revoke, renew, or read secrets.
+- **Scanner token:** lists service-token accessors, calls `sys/control-group/request`, and may read explicitly configured non-secret approval metadata. It cannot approve, unwrap, revoke, or renew. Context-reader policies must expose only data safe for every approver to inspect.
 - **Human token:** obtained by exchanging username/password with OpenBao's `userpass` auth method, encrypted in the server-side SQLite session store, renewed while the 30-day app session is active, and used for `sys/control-group/authorize`. The password is discarded immediately. Login and every authenticated request require the configured `APPROVER_POLICY`; OpenBao—not this app—then decides whether that identity satisfies each request's control-group factor and prevents disallowed self-approval.
 
 The browser receives neither OpenBao token nor password after login. Its opaque 30-day session is an `HttpOnly`, `SameSite=Strict`, secure cookie; encrypted server-side sessions survive application restarts. Mutations require a session-bound CSRF token, JSON content type, and same-origin checks. Signing out revokes the human token. Wrapping tokens remain with requesters; the app never stores or unwraps them.
 
-Accessors, deferred request payloads, and push subscriptions are AES-256-GCM encrypted before SQLite persistence; the database is created with mode `0600`. Payloads are omitted from API responses unless `EXPOSE_REQUEST_DATA=true` is explicitly configured. Logs, SSE messages, push payloads, URLs, and browser storage do not contain accessors or tokens. Push notifications contain only a generic “approval pending” message, are sent only for an active eligible approver session, expire with that session, and are restricted to configured public push-service host suffixes.
+Accessors, deferred request payloads, and push subscriptions are AES-256-GCM encrypted before SQLite persistence; the database is created with mode `0600`. Payloads are omitted from API responses unless `requests.expose_data = true` is explicitly configured. Logs, SSE messages, push payloads, URLs, and browser storage do not contain accessors or tokens. Push notifications contain only a generic “approval pending” message, are sent only for an active eligible approver session, expire with that session, and are restricted to configured public push-service host suffixes.
 
 ## Architecture
 
@@ -62,8 +62,8 @@ Version tags publish one archive per supported platform containing both static
 `openbao-authorizer` and `bao-cred` binaries, plus a SHA-256 checksum. Linux,
 macOS, and Windows are available on amd64 and arm64.
 
-The image expects writable `DATABASE_PATH` storage and configuration through
-the environment described below. OpenBao itself and environment-specific
+The image expects writable storage plus a mounted HCL configuration and secret
+files. OpenBao itself and environment-specific
 GitHub App installations, permission sets, passwords, keys, DNS, and Compose
 configuration belong in a deployment repository. Generic local-development
 examples remain under [`deploy/local`](deploy/local/). The image also contains
@@ -74,11 +74,21 @@ same container image.
 
 Install [`config/scanner-policy.hcl`](config/scanner-policy.hcl) on a dedicated orphan machine token created **without the default policy**. Assign [`config/approver-policy.hcl`](config/approver-policy.hcl) to the human identity group that appears in your protected path's `control_group` factor.
 
-For example, after writing the scanner policy:
+For example, if the HCL configuration includes the GitHub approval-context rule,
+install a separate least-privilege metadata-reader policy:
+
+```hcl
+path "github/permissionset/*" {
+  capabilities = ["read"]
+}
+```
+
+Then create the scanner token with both policies:
 
 ```sh
 bao token create -orphan \
   -policy=openbao-authorizer-scanner \
+  -policy=openbao-authorizer-github-context \
   -no-default-policy \
   -renewable=false
 ```
@@ -114,19 +124,17 @@ Build first:
 make bin/openbao-authorizer bin/bao-cred
 ```
 
-Create an application encryption key and place the scanner token in a mode-`0400` file:
+Create mode-`0400` files for the application encryption key and scanner token,
+then copy and edit [`config/openbao-authorizer.example.hcl`](config/openbao-authorizer.example.hcl):
 
 ```sh
-export APP_ENCRYPTION_KEY="$(openssl rand -base64 32)"
-export OPENBAO_SCANNER_TOKEN_FILE=/run/secrets/openbao-scanner-token
-export OPENBAO_ADDRESS=https://openbao.example.com
-export OPENBAO_CA_FILE=/etc/ssl/certs/organization-openbao-ca.pem
-export APPROVER_POLICY=openbao-authorizer-approver
-export PUBLIC_ORIGIN=https://approvals.example.com
-./bin/openbao-authorizer
+openssl rand -base64 32 >/run/secrets/openbao-authorizer-key
+chmod 0400 /run/secrets/openbao-authorizer-key /run/secrets/openbao-scanner-token
+cp config/openbao-authorizer.example.hcl openbao-authorizer.hcl
+./bin/openbao-authorizer -config openbao-authorizer.hcl
 ```
 
-The default listener is `127.0.0.1:8080`; terminate TLS at a trusted reverse proxy. Do not set `INSECURE_COOKIES=true` outside loopback development or the E2E harness.
+Terminate TLS at a trusted reverse proxy. Do not set `insecure_cookies = true` outside loopback development or the E2E harness. Relative paths in the HCL file are resolved from the file's directory.
 
 ## Credential requester CLI
 
@@ -182,29 +190,26 @@ not log it.
 
 ### Configuration
 
-| Variable | Default | Purpose |
-|---|---:|---|
-| `APP_ENCRYPTION_KEY` | required | Base64-encoded 32-byte AES key; loss makes stored accessors unreadable |
-| `OPENBAO_SCANNER_TOKEN_FILE` | required* | Preferred file containing the scanner token |
-| `OPENBAO_SCANNER_TOKEN` | required* | Direct token fallback for local development |
-| `OPENBAO_ADDRESS` | `http://127.0.0.1:8200` | OpenBao API origin |
-| `OPENBAO_CA_FILE` | system trust | Additional PEM CA for OpenBao TLS |
-| `OPENBAO_NAMESPACE` | empty | Fixed server-side OpenBao namespace |
-| `APPROVER_POLICY` | required | Policy every interactive user must retain; normally the installed approver policy |
-| `EXPOSE_REQUEST_DATA` | `false` | Return encrypted deferred payloads to approvers; enable only after reviewing path data sensitivity |
-| `LISTEN_ADDRESS` | `127.0.0.1:8080` | HTTP listener |
-| `PUBLIC_ORIGIN` | required in secure mode | Exact public origin used for CSRF origin checks |
-| `INSECURE_COOKIES` | `false` | Local HTTP development only |
-| `DATABASE_PATH` | `openbao-authorizer.db` | SQLite state path |
-| `STATIC_DIRECTORY` | unset (embedded) | Explicit filesystem frontend override for development |
-| `SCAN_INTERVAL` | `15s` | Accessor polling period, minimum `1s` |
-| `SCAN_CONCURRENCY` | `8` | Concurrent accessor probes, range 1–64 |
-| `VAPID_PUBLIC_KEY` | unset | Web Push public key |
-| `VAPID_PRIVATE_KEY` | unset | Web Push private key |
-| `VAPID_SUBJECT` | unset | VAPID contact URI, such as `mailto:ops@example.com` |
-| `PUSH_ALLOWED_HOST_SUFFIXES` | required with VAPID | Comma-separated push-service DNS suffix allowlist; every resolution must remain public |
+The server accepts one HCL file through `-config`; environment variables are not
+used for server configuration. The example file documents every required block.
+Encryption keys, scanner tokens, and optional VAPID keys are read from files so
+secret values do not appear in HCL or the process environment.
 
-`*` Configure exactly one scanner-token source. VAPID variables are optional, but all three must be supplied together to enable push.
+An `approval_context` block maps a reviewed request path to a safe, read-only
+OpenBao endpoint. Placeholders capture complete path segments and are escaped
+before substitution:
+
+```hcl
+approval_context "github-token" {
+  match_path = "github/token/{name}"
+  read_path  = "github/permissionset/{name}"
+}
+```
+
+The scanner token must have `read` access to every configured `read_path`.
+Returned data is displayed opaquely; the authorizer contains no GitHub-specific
+schema or path logic. If a configured read fails, the UI warns the operator not
+to approve the request.
 
 ### Android Firefox/Fennec Web Push
 
@@ -231,14 +236,13 @@ application.
 
 When the browser does obtain a subscription, its HTTPS endpoint must also pass
 the backend's outbound SSRF policy. Add only the actual distributor's endpoint
-hostname to `PUSH_ALLOWED_HOST_SUFFIXES`. Common examples are:
+hostname to `web_push.allowed_host_suffixes`. Common examples are:
 
-```dotenv
-# Mozilla AutoPush / Sunup, standard FCM, Apple Web Push
-PUSH_ALLOWED_HOST_SUFFIXES=updates.push.services.mozilla.com,fcm.googleapis.com,web.push.apple.com
+```hcl
+allowed_host_suffixes = ["updates.push.services.mozilla.com", "fcm.googleapis.com", "web.push.apple.com"]
 
 # If Fennec returns an ntfy.sh endpoint:
-PUSH_ALLOWED_HOST_SUFFIXES=updates.push.services.mozilla.com,ntfy.sh
+allowed_host_suffixes = ["updates.push.services.mozilla.com", "ntfy.sh"]
 ```
 
 A `push endpoint is not allowed` response means subscription creation succeeded
@@ -285,4 +289,4 @@ The Vite dev server proxies `/api` to `http://127.0.0.1:8080`.
 - Discovery cost scales with all active service-token accessors because OpenBao has no pending-control-group list endpoint.
 - OpenBao currently provides authorize, review, and unwrap operations, not a durable reject operation.
 - Browser push is best-effort. The request list and SSE remain authoritative.
-- Deferred request payloads are encrypted at rest and redacted from the API by default. If `EXPOSE_REQUEST_DATA=true`, every app approver can view them; use that only where submitted fields are safe to disclose.
+- Deferred request payloads are encrypted at rest and redacted from the API by default. If `requests.expose_data = true`, every app approver can view them; use that only where submitted fields are safe to disclose.
