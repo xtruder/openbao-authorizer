@@ -20,7 +20,7 @@ build: bin/openbao-authorizer bin/bao-cred
 
 bin/openbao-authorizer: frontend
 	mkdir -p $(@D)
-	go build -o $@ ./cmd/server
+	go build -o $@ ./cmd/openbao-authorizer
 
 bin/bao-cred:
 	mkdir -p $(@D)

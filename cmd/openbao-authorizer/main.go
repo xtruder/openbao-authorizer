@@ -1,4 +1,4 @@
-// Command server runs the OpenBao control-group approval web application.
+// Command openbao-authorizer runs the OpenBao control-group approval web application.
 package main
 
 import (

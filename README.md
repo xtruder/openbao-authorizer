@@ -58,9 +58,9 @@ ghcr.io/xtruder/openbao-authorizer:latest
 ghcr.io/xtruder/openbao-authorizer:sha-<commit>
 ```
 
-Version tags also publish static `openbao-authorizer` and `bao-cred` archives
-with SHA-256 checksums to the GitHub Release for Linux, macOS, and Windows on
-amd64 and arm64.
+Version tags publish one archive per supported platform containing both static
+`openbao-authorizer` and `bao-cred` binaries, plus a SHA-256 checksum. Linux,
+macOS, and Windows are available on amd64 and arm64.
 
 The image expects writable `DATABASE_PATH` storage and configuration through
 the environment described below. OpenBao itself and environment-specific

@@ -17,7 +17,7 @@ ARG TARGETOS=linux
 ARG TARGETARCH
 RUN test -n "${TARGETARCH}" && \
     CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
-	go build -trimpath -ldflags='-s -w' -o /out/openbao-authorizer ./cmd/server && \
+	go build -trimpath -ldflags='-s -w' -o /out/openbao-authorizer ./cmd/openbao-authorizer && \
     CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
 	go build -trimpath -ldflags='-s -w' -o /out/bao-cred ./cmd/bao-cred
 

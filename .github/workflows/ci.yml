@@ -125,11 +125,6 @@ jobs:
       matrix:
         goos: [linux, darwin, windows]
         goarch: [amd64, arm64]
-        binary:
-          - name: openbao-authorizer
-            project: ./cmd/server
-          - name: bao-cred
-            project: ./cmd/bao-cred
     steps:
       - uses: actions/checkout@v7
 
@@ -145,17 +140,17 @@ jobs:
           goos: ${{ matrix.goos }}
           goarch: ${{ matrix.goarch }}
           goversion: go.mod
-          project_path: ${{ matrix.binary.project }}
-          binary_name: ${{ matrix.binary.name }}
+          project_path: ./cmd/openbao-authorizer ./cmd/bao-cred
+          binary_name: openbao-authorizer
           pre_command: export CGO_ENABLED=0
           build_flags: -trimpath
-          ldflags: -s -w
           md5sum: false
           sha256sum: true
           release_tag: ${{ github.ref_name }}
           overwrite: true
-          asset_name: ${{ matrix.binary.name }}_${{ github.ref_name }}_${{ matrix.goos }}_${{ matrix.goarch }}
+          asset_name: openbao-authorizer-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}
           compress_assets: auto
+          multi_binaries: true
 
   github-release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
