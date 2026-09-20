@@ -258,9 +258,9 @@ const statusIconClasses = {
   expired: 'border-zinc-200 bg-zinc-50 text-zinc-500',
 } as const
 
-function RequestRow({ request, onReview }: { request: ApprovalRequest; onReview: (trigger: HTMLButtonElement) => void }) {
+function RequestRow({ request, selected, onSelect }: { request: ApprovalRequest; selected: boolean; onSelect: (trigger: HTMLButtonElement) => void }) {
   return (
-    <article className="request-row group">
+    <button data-review-trigger type="button" onClick={(event) => onSelect(event.currentTarget)} className={`request-row ${selected ? 'selected' : ''}`} aria-label={`Open request ${request.path}`} aria-current={selected ? 'true' : undefined}>
       <div className="flex min-w-0 flex-1 gap-3.5 sm:gap-5">
         <div className={`mt-0.5 grid size-10 shrink-0 place-items-center rounded-sm border ${statusIconClasses[request.status]}`}>
           {request.status === 'approved' ? <CheckIcon className="size-5" /> : request.status === 'rejected' ? <CloseIcon className="size-5" /> : <ClockIcon className="size-5" />}
@@ -277,10 +277,7 @@ function RequestRow({ request, onReview }: { request: ApprovalRequest; onReview:
           </div>
         </div>
       </div>
-      <button data-review-trigger type="button" onClick={(event) => onReview(event.currentTarget)} className="review-button" aria-label={`Review request for ${request.path}`}>
-        <span className="hidden sm:inline">Review request</span><ChevronIcon className="size-4" />
-      </button>
-    </article>
+    </button>
   )
 }
 
@@ -764,7 +761,7 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
               </div>
             ) : visibleRequests.length ? (
               <div className="divide-y divide-zinc-100">
-                {visibleRequests.map((request) => <RequestRow key={request.id} request={request} onReview={(trigger) => { detailTriggerRef.current = trigger; setSelectedId(request.id) }} />)}
+                {visibleRequests.map((request) => <RequestRow key={request.id} request={request} selected={request.id === selectedId} onSelect={(trigger) => { detailTriggerRef.current = trigger; setSelectedId(request.id) }} />)}
               </div>
             ) : <EmptyState filter={filter} />}
           </section>

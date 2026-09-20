@@ -170,15 +170,16 @@ describe('OpenBao Authorizer user workflows', () => {
 
     render(<App />)
 
-    const reviewButton = await screen.findByRole('button', { name: /review request/i })
-    reviewButton.focus()
+    const requestRow = await screen.findByRole('button', { name: new RegExp(pendingRequest.path) })
+    requestRow.focus()
     await user.keyboard('{Enter}')
 
     const detailHeading = screen.getByRole('heading', { level: 2, name: pendingRequest.path })
     expect(detailHeading).toHaveFocus()
+    expect(requestRow).toHaveAttribute('aria-current', 'true')
 
     await user.click(screen.getByRole('button', { name: 'Back to requests' }))
-    await waitFor(() => expect(reviewButton).toHaveFocus())
+    await waitFor(() => expect(requestRow).toHaveFocus())
   })
 
   it('shows generic approval context before approval', async () => {
@@ -190,7 +191,7 @@ describe('OpenBao Authorizer user workflows', () => {
 
     render(<App />)
 
-    await user.click(await screen.findByRole('button', { name: /review request/i }))
+    await user.click(await screen.findByRole('button', { name: new RegExp(contextualRequest.path) }))
     expect(screen.getByRole('heading', { name: 'Approval context' })).toBeInTheDocument()
     expect(screen.getByText(/"org_name": "example-org"/)).toBeInTheDocument()
     expect(screen.getByText(/"example-repo"/)).toBeInTheDocument()
@@ -210,7 +211,7 @@ describe('OpenBao Authorizer user workflows', () => {
     render(<App />)
 
     expect(await screen.findByText('secret/data/production/payments')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: /review request/i }))
+    await user.click(screen.getByRole('button', { name: new RegExp(pendingRequest.path) }))
     expect(screen.getByText(/Emergency credential rotation/)).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Approve request' }))
@@ -236,7 +237,7 @@ describe('OpenBao Authorizer user workflows', () => {
 
     render(<App />)
 
-    await user.click(await screen.findByRole('button', { name: /review request/i }))
+    await user.click(await screen.findByRole('button', { name: new RegExp(pendingRequest.path) }))
     await user.click(screen.getByRole('button', { name: 'Reject request' }))
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))

@@ -418,15 +418,33 @@ button:disabled {
 
 .request-row {
   display: flex;
+  width: 100%;
   align-items: center;
   gap: 1rem;
+  border: 0;
   padding: 1.15rem 1rem;
+  color: inherit;
   background: #fff;
-  transition: background 150ms ease;
+  text-align: left;
+  cursor: pointer;
+  transition: background 150ms ease, box-shadow 150ms ease;
 }
 
 .request-row:hover {
   background: #fcfcfb;
+}
+
+.request-row:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid #a17d00;
+  outline-offset: -2px;
+}
+
+.request-row.selected,
+.request-row.selected:hover {
+  background: #fffbea;
+  box-shadow: inset 3px 0 #c49a00;
 }
 
 .status-pill,
@@ -467,30 +485,6 @@ button:disabled {
   border: 1px solid #e4e4e7;
   color: #52525b;
   background: #fafafa;
-}
-
-.review-button {
-  display: inline-flex;
-  min-height: 2.25rem;
-  flex: none;
-  align-items: center;
-  justify-content: center;
-  gap: 0.25rem;
-  border: 1px solid transparent;
-  border-radius: 2px;
-  padding: 0 0.4rem 0 0.65rem;
-  color: #71717a;
-  background: transparent;
-  font-size: 0.72rem;
-  font-weight: 650;
-  transition: color 150ms ease, border-color 150ms ease, background 150ms ease;
-}
-
-.request-row:hover .review-button,
-.review-button:hover {
-  border-color: #e4e4e7;
-  color: #18181b;
-  background: #fff;
 }
 
 .request-skeleton {
