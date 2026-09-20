@@ -7,7 +7,8 @@ require (
 	github.com/hashicorp/hcl/v2 v2.25.0
 	github.com/openbao/openbao/api/v2 v2.7.0
 	github.com/zclconf/go-cty v1.19.0
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.48.0
+	golang.org/x/term v0.46.0
 	modernc.org/sqlite v1.58.0
 )
 

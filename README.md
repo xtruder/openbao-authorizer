@@ -144,6 +144,18 @@ approval, then consumes the wrapping token. It uses the official OpenBao Go
 client and honors standard client variables such as `BAO_ADDR`, `BAO_NAMESPACE`,
 and `BAO_CACERT`.
 
+Log in interactively with the `userpass` auth method:
+
+```sh
+bao-cred login
+```
+
+The command prompts for the OpenBao address, username (default `agent`), and a
+hidden password. It saves the address and token under
+`~/.config/openbao-authorizer/` by default, so later credential requests need no
+address or token flags. Use `bao-cred logout` to remove the saved token. For
+automation, pass `-address`, `-username`, and `-password-stdin` explicitly.
+
 The request token is selected in this order: an explicit `-token-file`,
 `BAO_TOKEN`, then
 `$OPENBAO_CONTROL_GROUP_CONFIG_DIR/agent-token` (defaulting to

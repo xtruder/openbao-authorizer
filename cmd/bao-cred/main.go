@@ -2,11 +2,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -16,9 +18,13 @@ import (
 	"time"
 
 	openbao "github.com/openbao/openbao/api/v2"
+	"golang.org/x/term"
 )
 
-const usageText = `usage: bao-cred [flags] <openbao-path> [-- command [args...]]
+const usageText = `usage:
+  bao-cred login [flags]
+  bao-cred logout [flags]
+  bao-cred [flags] <openbao-path> [-- command [args...]]
 
 Reads credentials from OpenBao. If the response requires control-group approval,
 bao-cred waits for approval before unwrapping it.
@@ -81,6 +87,19 @@ func main() {
 }
 
 func run(arguments []string, stdout, stderr io.Writer) error {
+	return runWithInput(arguments, os.Stdin, stdout, stderr)
+}
+
+func runWithInput(arguments []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	if len(arguments) > 0 {
+		switch arguments[0] {
+		case "login":
+			return runLogin(arguments[1:], stdin, stdout, stderr)
+		case "logout":
+			return runLogout(arguments[1:], stdout, stderr)
+		}
+	}
+
 	opts, err := parseOptions(arguments, stderr)
 	if err != nil {
 		return err
@@ -91,8 +110,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	config := openbao.DefaultConfig()
-	client, err := openbao.NewClient(config)
+	client, err := newOpenBaoClient(opts.tokenFile, "")
 	if err != nil {
 		return fmt.Errorf("configure OpenBao client: %w", err)
 	}
@@ -133,6 +151,233 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 
 	_, err = stdout.Write(contents)
 	return err
+}
+
+func runLogin(arguments []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("bao-cred login", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	username := flags.String("username", "", "OpenBao userpass username")
+	address := flags.String("address", "", "OpenBao server address")
+	tokenFile := flags.String("token-file", "", "token destination")
+	passwordStdin := flags.Bool("password-stdin", false, "read the password from stdin")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+
+	if flags.NArg() != 0 {
+		return errors.New("login accepts no positional arguments")
+	}
+
+	tokenPath, err := resolveTokenPath(*tokenFile)
+	if err != nil {
+		return err
+	}
+
+	resolvedAddress, err := resolveLoginAddress(*address, tokenPath, stdin, stderr, *passwordStdin)
+	if err != nil {
+		return err
+	}
+
+	resolvedUsername, err := resolveLoginUsername(*username, stdin, stderr, *passwordStdin)
+	if err != nil {
+		return err
+	}
+
+	password, err := readLoginPassword(stdin, stderr, *passwordStdin)
+	if err != nil {
+		return err
+	}
+
+	client, err := newOpenBaoClient(*tokenFile, resolvedAddress)
+	if err != nil {
+		return fmt.Errorf("configure OpenBao client: %w", err)
+	}
+
+	secret, err := client.Logical().WriteWithContext(
+		context.Background(), "auth/userpass/login/"+url.PathEscape(resolvedUsername), map[string]any{"password": password},
+	)
+	if err != nil {
+		return fmt.Errorf("userpass login: %w", err)
+	}
+
+	if secret == nil || secret.Auth == nil || secret.Auth.ClientToken == "" {
+		return errors.New("OpenBao userpass login returned no token")
+	}
+
+	err = os.MkdirAll(filepath.Dir(tokenPath), 0o700)
+	if err != nil {
+		return fmt.Errorf("create token directory: %w", err)
+	}
+
+	err = writeFile(tokenPath, []byte(secret.Auth.ClientToken+"\n"))
+	if err != nil {
+		return fmt.Errorf("store token: %w", err)
+	}
+
+	err = writeFile(filepath.Join(filepath.Dir(tokenPath), "address"), []byte(resolvedAddress+"\n"))
+	if err != nil {
+		return fmt.Errorf("store address: %w", err)
+	}
+
+	_, err = fmt.Fprintf(stdout, "Logged in as %s.\n", resolvedUsername)
+	return err
+}
+
+func resolveLoginUsername(explicit string, stdin io.Reader, stderr io.Writer, passwordStdin bool) (string, error) {
+	username := strings.TrimSpace(explicit)
+	terminal, interactive := stdin.(*os.File)
+	interactive = interactive && term.IsTerminal(int(terminal.Fd())) && !passwordStdin
+	if username == "" && interactive {
+		_, _ = fmt.Fprint(stderr, "Username [agent]: ")
+		input, err := bufio.NewReader(stdin).ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", fmt.Errorf("read username: %w", err)
+		}
+
+		username = strings.TrimSpace(input)
+	}
+
+	if username == "" {
+		username = "agent"
+	}
+
+	if strings.ContainsAny(username, "/\\") {
+		return "", errors.New("invalid OpenBao username")
+	}
+
+	return username, nil
+}
+
+func resolveLoginAddress(explicit, tokenPath string, stdin io.Reader, stderr io.Writer, passwordStdin bool) (string, error) {
+	address := strings.TrimSpace(explicit)
+	if address == "" {
+		address = strings.TrimSpace(os.Getenv("BAO_ADDR"))
+	}
+
+	if address == "" {
+		contents, err := os.ReadFile(filepath.Join(filepath.Dir(tokenPath), "address"))
+		if err == nil {
+			address = strings.TrimSpace(string(contents))
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("read saved OpenBao address: %w", err)
+		}
+	}
+
+	terminal, interactive := stdin.(*os.File)
+	interactive = interactive && term.IsTerminal(int(terminal.Fd())) && !passwordStdin
+	if explicit == "" && interactive {
+		if address == "" {
+			_, _ = fmt.Fprint(stderr, "OpenBao address: ")
+		} else {
+			_, _ = fmt.Fprintf(stderr, "OpenBao address [%s]: ", address)
+		}
+
+		input, err := bufio.NewReader(stdin).ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", fmt.Errorf("read OpenBao address: %w", err)
+		}
+
+		if input = strings.TrimSpace(input); input != "" {
+			address = input
+		}
+	}
+
+	if address == "" {
+		return "", errors.New("OpenBao address is required; use -address or set BAO_ADDR")
+	}
+
+	parsed, err := url.Parse(address)
+	if err != nil || parsed.Host == "" || parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", errors.New("OpenBao address must be an absolute HTTP or HTTPS URL")
+	}
+
+	return strings.TrimSuffix(address, "/"), nil
+}
+
+func newOpenBaoClient(tokenFile, explicitAddress string) (*openbao.Client, error) {
+	config := openbao.DefaultConfig()
+	if explicitAddress != "" {
+		config.Address = explicitAddress
+	} else if os.Getenv("BAO_ADDR") == "" {
+		tokenPath, err := resolveTokenPath(tokenFile)
+		if err != nil {
+			return nil, err
+		}
+
+		contents, err := os.ReadFile(filepath.Join(filepath.Dir(tokenPath), "address"))
+		if err == nil {
+			config.Address = strings.TrimSpace(string(contents))
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("read saved OpenBao address: %w", err)
+		}
+	}
+
+	client, err := openbao.NewClient(config)
+	if err != nil {
+		return nil, fmt.Errorf("configure OpenBao client: %w", err)
+	}
+
+	return client, nil
+}
+
+func runLogout(arguments []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("bao-cred logout", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	tokenFile := flags.String("token-file", "", "token file to remove")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+
+	if flags.NArg() != 0 {
+		return errors.New("logout accepts no positional arguments")
+	}
+
+	path, err := resolveTokenPath(*tokenFile)
+	if err != nil {
+		return err
+	}
+
+	err = os.Remove(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove token file: %w", err)
+	}
+
+	_, err = fmt.Fprintln(stdout, "Logged out.")
+	return err
+}
+
+func readLoginPassword(stdin io.Reader, stderr io.Writer, fromStdin bool) (string, error) {
+	if fromStdin {
+		password, err := bufio.NewReader(stdin).ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", fmt.Errorf("read password: %w", err)
+		}
+
+		password = strings.TrimSuffix(strings.TrimSuffix(password, "\n"), "\r")
+		if password == "" {
+			return "", errors.New("password is empty")
+		}
+
+		return password, nil
+	}
+
+	terminal, ok := stdin.(*os.File)
+	if !ok || !term.IsTerminal(int(terminal.Fd())) {
+		return "", errors.New("password prompt requires a terminal; use -password-stdin")
+	}
+
+	_, _ = fmt.Fprint(stderr, "Password: ")
+	password, err := term.ReadPassword(int(terminal.Fd()))
+	_, _ = fmt.Fprintln(stderr)
+	if err != nil {
+		return "", fmt.Errorf("read password: %w", err)
+	}
+
+	if len(password) == 0 {
+		return "", errors.New("password is empty")
+	}
+
+	return string(password), nil
 }
 
 func parseOptions(arguments []string, stderr io.Writer) (options, error) {
@@ -338,6 +583,24 @@ func requestToken(tokenFile string) (string, error) {
 		return token, nil
 	}
 
+	defaultPath, err := resolveTokenPath("")
+	if err != nil {
+		return "", err
+	}
+
+	token, err := readTokenFile(defaultPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", errors.New("no request token: run bao-cred login, set BAO_TOKEN, or use -token-file")
+	}
+
+	return token, err
+}
+
+func resolveTokenPath(explicit string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+
 	configDirectory := os.Getenv("OPENBAO_CONTROL_GROUP_CONFIG_DIR")
 	if configDirectory == "" {
 		home, err := os.UserHomeDir()
@@ -348,13 +611,7 @@ func requestToken(tokenFile string) (string, error) {
 		configDirectory = filepath.Join(home, ".config", "openbao-authorizer")
 	}
 
-	defaultPath := filepath.Join(configDirectory, "agent-token")
-	token, err := readTokenFile(defaultPath)
-	if errors.Is(err, os.ErrNotExist) {
-		return "", errors.New("no request token: set BAO_TOKEN or use -token-file")
-	}
-
-	return token, err
+	return filepath.Join(configDirectory, "agent-token"), nil
 }
 
 func readTokenFile(path string) (string, error) {
