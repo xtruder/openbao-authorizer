@@ -192,9 +192,9 @@ type notificationFanout struct {
 	push   *push.Service
 }
 
-func (n *notificationFanout) NewRequest(ctx context.Context, _ string, request openbao.ControlGroupRequest) error {
+func (n *notificationFanout) NewRequest(ctx context.Context, id string, request openbao.ControlGroupRequest) error {
 	eventErr := n.events.Publish("new-request", map[string]string{"status": "pending"})
-	pushErr := n.push.NewRequest(ctx, "", request)
+	pushErr := n.push.NewRequest(ctx, id, request)
 	return errors.Join(eventErr, pushErr)
 }
 

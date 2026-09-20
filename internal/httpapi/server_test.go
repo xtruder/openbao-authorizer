@@ -122,7 +122,7 @@ func TestSessionListAndApproveWorkflow(t *testing.T) {
 			t.Error(closeErr)
 		}
 	})
-	_, err = database.Upsert(t.Context(), "wrapping-accessor", openbao.ControlGroupRequest{
+	_, _, err = database.Upsert(t.Context(), "wrapping-accessor", openbao.ControlGroupRequest{
 		Operation:       "read",
 		Path:            "github/token/project-authorizer",
 		ApprovalContext: &openbao.ApprovalContext{Available: true, Data: json.RawMessage(`{"repositories":["example-repo"]}`)},
@@ -325,7 +325,7 @@ func TestApproverRejectsPendingRequest(t *testing.T) {
 
 	t.Cleanup(func() { _ = database.Close() })
 
-	_, err = database.Upsert(t.Context(), "wrapping-accessor", openbao.ControlGroupRequest{
+	_, _, err = database.Upsert(t.Context(), "wrapping-accessor", openbao.ControlGroupRequest{
 		Operation: "read", Path: "github/token/project-authorizer", Entity: openbao.Entity{ID: "alice-id", Name: "Alice"},
 	}, store.UpsertOptions{})
 	if err != nil {
@@ -397,7 +397,7 @@ func TestRejectExposesOpenBaoFailure(t *testing.T) {
 	}
 
 	t.Cleanup(func() { _ = database.Close() })
-	_, err = database.Upsert(t.Context(), "wrapping-accessor", openbao.ControlGroupRequest{
+	_, _, err = database.Upsert(t.Context(), "wrapping-accessor", openbao.ControlGroupRequest{
 		Operation: "read", Path: "github/token/project-authorizer", Entity: openbao.Entity{ID: "alice-id", Name: "Alice"},
 	}, store.UpsertOptions{})
 	if err != nil {
@@ -507,7 +507,7 @@ func TestSessionRevalidatesPolicyAndRedactsPayload(t *testing.T) {
 	}
 
 	t.Cleanup(func() { _ = database.Close() })
-	_, err = database.Upsert(t.Context(), "accessor", openbao.ControlGroupRequest{
+	_, _, err = database.Upsert(t.Context(), "accessor", openbao.ControlGroupRequest{
 		Operation: "update", Path: "secret/data/payroll", Data: json.RawMessage(`{"password":"must-not-leak"}`),
 		Entity: openbao.Entity{ID: "alice-id", Name: "Alice"},
 	}, store.UpsertOptions{})

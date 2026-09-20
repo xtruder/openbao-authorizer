@@ -45,6 +45,19 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 describe('OpenBao Authorizer user workflows', () => {
+  it('opens the request linked by a notification', async () => {
+    window.history.replaceState({}, '', '/?request=req-7f31')
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ identity, csrfToken: 'csrf-notification' }))
+      .mockResolvedValueOnce(jsonResponse([pendingRequest]))
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<App />)
+
+    const detailHeading = await screen.findByRole('heading', { level: 2, name: pendingRequest.path })
+    expect(detailHeading).toHaveFocus()
+  })
+
   it('opens a fresh event stream when the current connection cannot recover', async () => {
     class TerminalEventSource {
       static instances: TerminalEventSource[] = []

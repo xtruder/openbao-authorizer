@@ -445,6 +445,7 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
     return Notification.permission === 'granted' ? 'idle' : 'idle'
   })
   const [notice, setNotice] = useState('')
+  const linkedRequestId = useRef(new URLSearchParams(window.location.search).get('request'))
 
   const loadRequests = useCallback(async (background = false) => {
     if (background) setRefreshing(true)
@@ -548,6 +549,15 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
   const visibleRequests = useMemo(() => requests.filter((request) => request.status === filter), [filter, requests])
   const selected = requests.find((request) => request.id === selectedId) ?? null
   const operatorName = identityName(session.identity)
+
+  useEffect(() => {
+    if (loading || !linkedRequestId.current) return
+    const linkedRequest = requests.find((request) => request.id === linkedRequestId.current)
+    if (!linkedRequest) return
+    setFilter(linkedRequest.status)
+    setSelectedId(linkedRequest.id)
+    linkedRequestId.current = null
+  }, [loading, requests])
 
   useEffect(() => {
     if (selectedId) {

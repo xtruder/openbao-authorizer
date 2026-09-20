@@ -203,7 +203,7 @@ var deniedPrefixes = []netip.Prefix{
 }
 
 // NewRequest sends a generic hint; sensitive request details remain in the authenticated app.
-func (s *Service) NewRequest(ctx context.Context, _ string, _ openbao.ControlGroupRequest) error {
+func (s *Service) NewRequest(ctx context.Context, id string, _ openbao.ControlGroupRequest) error {
 	if s.config.PublicKey == "" {
 		return nil
 	}
@@ -216,7 +216,7 @@ func (s *Service) NewRequest(ctx context.Context, _ string, _ openbao.ControlGro
 	payload, err := json.Marshal(map[string]string{
 		"title": "OpenBao approval pending",
 		"body":  "A new control-group request needs review.",
-		"url":   "/",
+		"url":   "/?request=" + url.QueryEscape(id),
 	})
 	if err != nil {
 		return fmt.Errorf("encode push payload: %w", err)

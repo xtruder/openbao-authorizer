@@ -33,7 +33,7 @@ func TestUpsertDeduplicatesAndEncryptsAccessor(t *testing.T) {
 		ApprovalContext: &openbao.ApprovalContext{Available: true, Data: []byte(`{"role":"restricted-role"}`)},
 		Entity:          openbao.Entity{ID: "requester-1", Name: "Alice"},
 	}
-	isNew, err := db.Upsert(t.Context(), "very-sensitive-accessor", request, UpsertOptions{ApprovalContext: ReplaceApprovalContext})
+	id, isNew, err := db.Upsert(t.Context(), "very-sensitive-accessor", request, UpsertOptions{ApprovalContext: ReplaceApprovalContext})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,13 +45,16 @@ func TestUpsertDeduplicatesAndEncryptsAccessor(t *testing.T) {
 	updated := request
 	updated.Approved = true
 	updated.ApprovalContext = nil
-	isNew, err = db.Upsert(t.Context(), "very-sensitive-accessor", updated, UpsertOptions{ApprovalContext: PreserveApprovalContext})
+	updatedID, isNew, err := db.Upsert(t.Context(), "very-sensitive-accessor", updated, UpsertOptions{ApprovalContext: PreserveApprovalContext})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	if isNew {
 		t.Fatal("second upsert must update existing request")
+	}
+	if id == "" || updatedID != id {
+		t.Fatalf("IDs = %q, %q", id, updatedID)
 	}
 
 	records, err := db.List(t.Context())
@@ -114,7 +117,7 @@ func TestExpireMissingOnlyTransitionsPendingRequests(t *testing.T) {
 	t.Cleanup(func() { _ = database.Close() })
 
 	for _, accessor := range []string{"present", "missing", "rejected"} {
-		_, upsertErr := database.Upsert(t.Context(), accessor, openbao.ControlGroupRequest{Path: "secret/data/" + accessor}, UpsertOptions{})
+		_, _, upsertErr := database.Upsert(t.Context(), accessor, openbao.ControlGroupRequest{Path: "secret/data/" + accessor}, UpsertOptions{})
 		if upsertErr != nil {
 			t.Fatal(upsertErr)
 		}

@@ -33,6 +33,7 @@ afterEach(() => {
   cleanup()
   localStorage.clear()
   sessionStorage.clear()
+  window.history.replaceState({}, '', '/')
   vi.restoreAllMocks()
   MockEventSource.instances = []
 })

@@ -49,12 +49,15 @@ func TestNotificationIsGenericAndRemovesGoneSubscription(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := service.NewRequest(t.Context(), "must-not-leak", openbao.ControlGroupRequest{Path: "secret/data/payroll", Entity: openbao.Entity{Name: "Alice"}}); err != nil {
+	if err := service.NewRequest(t.Context(), "opaque-request-id", openbao.ControlGroupRequest{Path: "secret/data/payroll", Entity: openbao.Entity{Name: "Alice"}}); err != nil {
 		t.Fatal(err)
 	}
 
-	if strings.Contains(payload, "must-not-leak") || strings.Contains(payload, "payroll") || strings.Contains(payload, "Alice") {
+	if strings.Contains(payload, "payroll") || strings.Contains(payload, "Alice") {
 		t.Fatalf("sensitive push payload: %s", payload)
+	}
+	if !strings.Contains(payload, `"url":"/?request=opaque-request-id"`) {
+		t.Fatalf("push payload URL = %s", payload)
 	}
 
 	if len(storage.deleted) != 1 || storage.deleted[0] != "https://push.example/sub" {

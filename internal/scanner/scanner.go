@@ -22,7 +22,7 @@ type OpenBao interface {
 
 // Sink persists discovered requests and reports whether they are new.
 type Sink interface {
-	Upsert(context.Context, string, openbao.ControlGroupRequest, store.UpsertOptions) (bool, error)
+	Upsert(context.Context, string, openbao.ControlGroupRequest, store.UpsertOptions) (string, bool, error)
 	ExpireMissing(context.Context, []string) ([]string, error)
 }
 
@@ -93,7 +93,7 @@ func (s *Scanner) Scan(ctx context.Context) error {
 				}
 			}
 
-			isNew, sinkErr := s.sink.Upsert(ctx, accessor, request, options)
+			id, isNew, sinkErr := s.sink.Upsert(ctx, accessor, request, options)
 			if sinkErr != nil {
 				errorMu.Lock()
 				scanErrors = append(scanErrors, fmt.Errorf("store request: %w", sinkErr))
@@ -102,7 +102,7 @@ func (s *Scanner) Scan(ctx context.Context) error {
 			}
 
 			if isNew && s.notifier != nil {
-				if notifyErr := s.notifier.NewRequest(ctx, accessor, request); notifyErr != nil {
+				if notifyErr := s.notifier.NewRequest(ctx, id, request); notifyErr != nil {
 					errorMu.Lock()
 					scanErrors = append(scanErrors, fmt.Errorf("notify request: %w", notifyErr))
 					errorMu.Unlock()

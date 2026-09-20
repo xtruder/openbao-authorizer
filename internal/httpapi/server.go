@@ -44,7 +44,7 @@ type OpenBao interface {
 type Store interface {
 	List(context.Context) ([]store.Request, error)
 	Accessor(context.Context, string) (string, error)
-	Upsert(context.Context, string, openbao.ControlGroupRequest, store.UpsertOptions) (bool, error)
+	Upsert(context.Context, string, openbao.ControlGroupRequest, store.UpsertOptions) (string, bool, error)
 	SetApproved(context.Context, string, bool) error
 	TransitionStatus(context.Context, string, store.RequestStatus, store.RequestStatus) (bool, error)
 	PutSession(context.Context, store.Session) error
@@ -436,7 +436,7 @@ func (s *server) approve(w http.ResponseWriter, r *http.Request, value session) 
 			Approved: stored.Approved, Operation: stored.Operation, Path: stored.Path, Data: stored.Data,
 			ApprovalContext: currentContext, Entity: stored.Entity, Authorizations: stored.Authorizations,
 		}
-		if _, upsertErr := s.store.Upsert(r.Context(), accessor, request, store.UpsertOptions{ApprovalContext: store.ReplaceApprovalContext}); upsertErr != nil {
+		if _, _, upsertErr := s.store.Upsert(r.Context(), accessor, request, store.UpsertOptions{ApprovalContext: store.ReplaceApprovalContext}); upsertErr != nil {
 			s.internalError(w, upsertErr)
 			return
 		}
@@ -469,7 +469,7 @@ func (s *server) approve(w http.ResponseWriter, r *http.Request, value session) 
 			fresh.ApprovalContext = currentContext
 		}
 
-		_, err = s.store.Upsert(r.Context(), accessor, fresh, store.UpsertOptions{ApprovalContext: store.ReplaceApprovalContext})
+		_, _, err = s.store.Upsert(r.Context(), accessor, fresh, store.UpsertOptions{ApprovalContext: store.ReplaceApprovalContext})
 	} else {
 		err = s.store.SetApproved(r.Context(), r.PathValue("id"), approved)
 	}

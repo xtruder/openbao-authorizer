@@ -240,8 +240,8 @@ func (d *DB) addColumn(ctx context.Context, table, column, definition string) er
 // Close closes the SQLite database.
 func (d *DB) Close() error { return d.db.Close() }
 
-// Upsert stores current OpenBao state and reports whether this accessor was first observed.
-func (d *DB) Upsert(ctx context.Context, accessor string, request openbao.ControlGroupRequest, options UpsertOptions) (bool, error) {
+// Upsert stores current OpenBao state and reports its ID and whether this accessor was first observed.
+func (d *DB) Upsert(ctx context.Context, accessor string, request openbao.ControlGroupRequest, options UpsertOptions) (string, bool, error) {
 	fingerprint := d.fingerprint(accessor)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
@@ -249,39 +249,39 @@ func (d *DB) Upsert(ctx context.Context, accessor string, request openbao.Contro
 	err := d.db.QueryRowContext(ctx, "SELECT id FROM requests WHERE fingerprint = ?", fingerprint).Scan(&id)
 	isNew := errors.Is(err, sql.ErrNoRows)
 	if err != nil && !isNew {
-		return false, fmt.Errorf("find request: %w", err)
+		return "", false, fmt.Errorf("find request: %w", err)
 	}
 
 	if isNew {
 		id, err = randomID()
 		if err != nil {
-			return false, err
+			return "", false, err
 		}
 	}
 
 	accessorNonce, accessorCiphertext, err := d.encrypt([]byte(accessor), []byte(id+":accessor"))
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 
 	dataNonce, dataCiphertext, err := d.encrypt(request.Data, []byte(id+":data"))
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 
 	authorizations, err := json.Marshal(request.Authorizations)
 	if err != nil {
-		return false, fmt.Errorf("encode authorizations: %w", err)
+		return "", false, fmt.Errorf("encode authorizations: %w", err)
 	}
 
 	approvalContext, err := json.Marshal(request.ApprovalContext)
 	if err != nil {
-		return false, fmt.Errorf("encode approval context: %w", err)
+		return "", false, fmt.Errorf("encode approval context: %w", err)
 	}
 
 	approvalContextNonce, approvalContextCiphertext, err := d.encrypt(approvalContext, []byte(id+":approval-context"))
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 
 	status := RequestPending
@@ -310,10 +310,10 @@ WHERE id = ?`, accessorNonce, accessorCiphertext, request.Approved, status, requ
 	}
 
 	if err != nil {
-		return false, fmt.Errorf("upsert request: %w", err)
+		return "", false, fmt.Errorf("upsert request: %w", err)
 	}
 
-	return isNew, nil
+	return id, isNew, nil
 }
 
 // List returns all discovered requests, newest first.

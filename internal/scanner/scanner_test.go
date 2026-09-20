@@ -122,7 +122,7 @@ func TestScanLoadsConfiguredApprovalContext(t *testing.T) {
 	}
 }
 
-func (s *memorySink) Upsert(_ context.Context, accessor string, request openbao.ControlGroupRequest, _ store.UpsertOptions) (bool, error) {
+func (s *memorySink) Upsert(_ context.Context, accessor string, request openbao.ControlGroupRequest, _ store.UpsertOptions) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.records == nil {
@@ -131,13 +131,13 @@ func (s *memorySink) Upsert(_ context.Context, accessor string, request openbao.
 
 	_, exists := s.records[accessor]
 	s.records[accessor] = request
-	return !exists, nil
+	return "request-" + accessor, !exists, nil
 }
 
 type collectingNotifier struct {
-	mu        sync.Mutex
-	accessors []string
-	statuses  map[string]store.RequestStatus
+	mu         sync.Mutex
+	requestIDs []string
+	statuses   map[string]store.RequestStatus
 }
 
 func (n *collectingNotifier) StatusChanged(_ context.Context, id string, status store.RequestStatus) error {
@@ -151,10 +151,10 @@ func (n *collectingNotifier) StatusChanged(_ context.Context, id string, status 
 	return nil
 }
 
-func (n *collectingNotifier) NewRequest(_ context.Context, accessor string, _ openbao.ControlGroupRequest) error {
+func (n *collectingNotifier) NewRequest(_ context.Context, id string, _ openbao.ControlGroupRequest) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.accessors = append(n.accessors, accessor)
+	n.requestIDs = append(n.requestIDs, id)
 	return nil
 }
 
@@ -176,8 +176,11 @@ func TestScanContinuesPastOrdinaryAccessorsAndNotifiesOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := len(notifier.accessors); got != 1 {
+	if got := len(notifier.requestIDs); got != 1 {
 		t.Fatalf("notifications = %d, want 1", got)
+	}
+	if notifier.requestIDs[0] != "request-pending" {
+		t.Fatalf("notification request ID = %q", notifier.requestIDs[0])
 	}
 
 	if _, ok := sink.records["pending"]; !ok {
