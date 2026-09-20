@@ -9,11 +9,11 @@ describe('service worker routing', () => {
   it('keeps same-origin API requests network-only using the Workbox URL callback', () => {
     expect(apiNetworkOnlyUrlPattern({
       sameOrigin: true,
-      url: new URL('https://control.example/api/v1/requests?filter=pending'),
+      url: new URL('https://control.example/api/v1/request-groups'),
     })).toBe(true)
     expect(apiNetworkOnlyUrlPattern({
       sameOrigin: false,
-      url: new URL('https://api.example/api/v1/requests'),
+      url: new URL('https://api.example/api/v1/request-groups'),
     })).toBe(false)
     expect(apiNetworkOnlyUrlPattern({
       sameOrigin: true,

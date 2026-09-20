@@ -14,17 +14,17 @@ openbao {
   address            = "https://openbao.example.com"
   namespace          = ""
   ca_file            = "/etc/ssl/certs/organization-openbao-ca.pem"
-  scanner_token_file = "/run/secrets/openbao-scanner-token"
+  service_token_file = "/run/secrets/openbao-authorizer-service-token"
   approver_policy    = "openbao-authorizer-approver"
 }
 
-scanner {
-  interval    = "15s"
-  concurrency = 8
+reconciliation {
+  interval = "15s"
 }
 
 requests {
-  expose_data = false
+  expose_data    = false
+  require_reason = false
 }
 
 approval_context "github-token" {

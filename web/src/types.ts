@@ -33,8 +33,25 @@ export interface ApprovalRequest {
   authorizations: unknown[]
   firstSeen: string
   lastSeen: string
+  position: number
+  groupId: string
 }
 
 export type RequestStatus = 'pending' | 'approved' | 'rejected' | 'expired'
-export type RequestFilter = RequestStatus
+
+export interface RequestGroup {
+  id: string
+  reason?: string
+  status: GroupStatus
+  entity: {
+    id: string
+    name: string
+  }
+  requests: ApprovalRequest[]
+  createdAt: string
+  updatedAt: string
+}
+
+export type GroupStatus = RequestStatus | 'approval_failed' | 'rejection_failed'
+export type GroupFilter = RequestStatus
 export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'offline'

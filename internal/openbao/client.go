@@ -26,7 +26,7 @@ func IsNotControlGroup(err error) bool { return errors.Is(err, ErrNotControlGrou
 // Config configures an OpenBao API client.
 type Config struct {
 	Address      string
-	ScannerToken string
+	ServiceToken string
 	Namespace    string
 	HTTPClient   *http.Client
 }
@@ -34,7 +34,7 @@ type Config struct {
 // Client is a minimal, testable OpenBao API client.
 type Client struct {
 	baseURL      *url.URL
-	scannerToken string
+	serviceToken string
 	namespace    string
 	httpClient   *http.Client
 }
@@ -145,7 +145,7 @@ func New(config Config) (*Client, error) {
 
 	return &Client{
 		baseURL:      baseURL,
-		scannerToken: config.ScannerToken,
+		serviceToken: config.ServiceToken,
 		namespace:    config.Namespace,
 		httpClient:   client,
 	}, nil
@@ -211,31 +211,17 @@ func (c *Client) RevokeSelf(ctx context.Context, token string) error {
 	return c.call(ctx, http.MethodPost, "/v1/auth/token/revoke-self", token, map[string]string{}, nil, "")
 }
 
-// RevokeAccessor revokes a control-group wrapping token using the scanner token.
+// RevokeAccessor revokes a control-group wrapping token using the service token.
 func (c *Client) RevokeAccessor(ctx context.Context, accessor string) error {
-	return c.call(ctx, http.MethodPost, "/v1/auth/token/revoke-accessor", c.scannerToken, map[string]string{"accessor": accessor}, nil, "")
+	return c.call(ctx, http.MethodPost, "/v1/auth/token/revoke-accessor", c.serviceToken, map[string]string{"accessor": accessor}, nil, "")
 }
 
-// ListAccessors lists all service-token accessors using the dedicated scanner token.
-func (c *Client) ListAccessors(ctx context.Context) ([]string, error) {
-	var envelope struct {
-		Data struct {
-			Keys []string `json:"keys"`
-		} `json:"data"`
-	}
-	if err := c.call(ctx, http.MethodGet, "/v1/auth/token/accessors", c.scannerToken, nil, &envelope, "LIST"); err != nil {
-		return nil, err
-	}
-
-	return envelope.Data.Keys, nil
-}
-
-// ControlGroupRequest reviews a candidate accessor with the scanner token.
+// ControlGroupRequest reviews a candidate accessor with the service token.
 func (c *Client) ControlGroupRequest(ctx context.Context, accessor string) (ControlGroupRequest, error) {
 	var envelope struct {
 		Data ControlGroupRequest `json:"data"`
 	}
-	err := c.call(ctx, http.MethodPost, "/v1/sys/control-group/request", c.scannerToken, map[string]string{"accessor": accessor}, &envelope, "")
+	err := c.call(ctx, http.MethodPost, "/v1/sys/control-group/request", c.serviceToken, map[string]string{"accessor": accessor}, &envelope, "")
 	if err != nil {
 		var httpErr *HTTPError
 		if errors.As(err, &httpErr) && (httpErr.StatusCode == http.StatusBadRequest || httpErr.StatusCode == http.StatusNotFound) {
@@ -248,12 +234,12 @@ func (c *Client) ControlGroupRequest(ctx context.Context, accessor string) (Cont
 	return envelope.Data, nil
 }
 
-// Read fetches configured approval context using the scanner credential.
+// Read fetches configured approval context using the service credential.
 func (c *Client) Read(ctx context.Context, path string) (json.RawMessage, error) {
 	var envelope struct {
 		Data json.RawMessage `json:"data"`
 	}
-	if err := c.call(ctx, http.MethodGet, "/v1/"+path, c.scannerToken, nil, &envelope, ""); err != nil {
+	if err := c.call(ctx, http.MethodGet, "/v1/"+path, c.serviceToken, nil, &envelope, ""); err != nil {
 		return nil, err
 	}
 

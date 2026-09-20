@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,68 +25,214 @@ type progressFunc func(string)
 
 var errRequestClosed = errors.New("request rejected or expired")
 
-func readCredentials(ctx context.Context, client *openbao.Client, path string, pollInterval time.Duration, progress progressFunc) (map[string]any, error) {
-	secret, err := client.Logical().ReadWithContext(ctx, path)
-	if err != nil {
-		return nil, fmt.Errorf("read %q: %w", path, err)
+type credentialRequest struct {
+	spec      requestSpec
+	wrapToken string
+	accessor  string
+	done      bool
+}
+
+func readCredentialRequests(ctx context.Context, client *openbao.Client, requesterToken string, specs []requestSpec, authorizerAddress, reason string, allowPartial bool, pollInterval time.Duration, progress progressFunc) (map[string]any, []error) {
+	data := make(map[string]any, len(specs))
+	pending := make([]credentialRequest, 0, len(specs))
+	var requestErrors []error
+	for _, spec := range specs {
+		secret, err := client.Logical().ReadWithContext(ctx, spec.Path)
+		if err != nil {
+			requestErrors = append(requestErrors, fmt.Errorf("read %q: %w", spec.Path, err))
+			continue
+		}
+
+		if secret == nil {
+			requestErrors = append(requestErrors, fmt.Errorf("read %q: empty response", spec.Path))
+			continue
+		}
+
+		if secret.WrapInfo == nil || secret.WrapInfo.Token == "" {
+			data[spec.Alias] = secret.Data
+			continue
+		}
+
+		if secret.WrapInfo.Accessor == "" {
+			requestErrors = append(requestErrors, fmt.Errorf("read %q: wrapped response has no accessor", spec.Path))
+			continue
+		}
+
+		pending = append(pending, credentialRequest{spec: spec, wrapToken: secret.WrapInfo.Token, accessor: secret.WrapInfo.Accessor})
 	}
 
-	if secret == nil {
-		return nil, fmt.Errorf("read %q: empty response", path)
+	if len(requestErrors) > 0 && !allowPartial {
+		return data, requestErrors
 	}
 
-	if secret.WrapInfo == nil || secret.WrapInfo.Token == "" {
-		return secret.Data, nil
+	if len(pending) == 0 {
+		return data, requestErrors
 	}
 
-	if secret.WrapInfo.Accessor == "" {
-		return nil, errors.New("wrapped response has no accessor")
+	if authorizerAddress == "" {
+		return data, append(requestErrors, errors.New("-authorizer-address or BAO_AUTHORIZER_ADDR is required for approval requests"))
+	}
+
+	accessors := make([]string, len(pending))
+	for index := range pending {
+		accessors[index] = pending[index].accessor
+	}
+
+	if err := submitApprovalGroup(ctx, http.DefaultClient, authorizerAddress, requesterToken, reason, accessors); err != nil {
+		return data, append(requestErrors, err)
 	}
 
 	if progress != nil {
-		progress("approval requested; waiting")
+		progress(fmt.Sprintf("approval requested for %d credential request(s); waiting", len(pending)))
 	}
 
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	attempt := 0
-	for {
+	remaining := len(pending)
+	for remaining > 0 {
 		attempt++
-		approved, statusErr := controlGroupStatus(ctx, client, secret.WrapInfo.Accessor)
-		if statusErr != nil {
-			if errors.Is(statusErr, errRequestClosed) {
-				return nil, errRequestClosed
+		for index := range pending {
+			item := &pending[index]
+			if item.done {
+				continue
 			}
 
-			return nil, fmt.Errorf("check approval: %w", statusErr)
-		}
+			approved, err := controlGroupStatus(ctx, client, item.accessor)
+			if err != nil {
+				item.done = true
+				remaining--
+				requestErrors = append(requestErrors, fmt.Errorf("request %q: %w", item.spec.Path, err))
+				if !allowPartial {
+					return data, requestErrors
+				}
 
-		if approved {
-			unwrapped, unwrapErr := client.Logical().UnwrapWithContext(ctx, secret.WrapInfo.Token)
-			if unwrapErr != nil {
-				return nil, fmt.Errorf("unwrap approved response: %w", unwrapErr)
+				continue
+			}
+
+			if !approved {
+				continue
+			}
+
+			unwrapped, err := client.Logical().UnwrapWithContext(ctx, item.wrapToken)
+			item.wrapToken = ""
+			item.done = true
+			remaining--
+			if err != nil {
+				requestErrors = append(requestErrors, fmt.Errorf("unwrap %q: %w", item.spec.Path, err))
+				if !allowPartial {
+					return data, requestErrors
+				}
+
+				continue
 			}
 
 			if unwrapped == nil {
-				return nil, errors.New("unwrap approved response: empty response")
+				requestErrors = append(requestErrors, fmt.Errorf("unwrap %q: empty response", item.spec.Path))
+				continue
 			}
 
-			if progress != nil {
-				progress("approved")
-			}
+			data[item.spec.Alias] = unwrapped.Data
+		}
 
-			return unwrapped.Data, nil
+		if remaining == 0 {
+			break
 		}
 
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return data, append(requestErrors, ctx.Err())
 		case <-ticker.C:
 			if progress != nil && attempt%12 == 0 {
 				progress("still waiting for approval")
 			}
 		}
 	}
+
+	if progress != nil {
+		progress("approved")
+	}
+
+	return data, requestErrors
+}
+
+func submitApprovalGroup(ctx context.Context, client *http.Client, address, requesterToken, reason string, accessors []string) error {
+	baseURL, err := url.Parse(address)
+	if err != nil || (baseURL.Scheme != "http" && baseURL.Scheme != "https") || baseURL.Host == "" {
+		return errors.New("authorizer address must be an absolute HTTP or HTTPS URL")
+	}
+
+	idempotency := make([]byte, 16)
+	if _, randomErr := rand.Read(idempotency); randomErr != nil {
+		return fmt.Errorf("generate submission idempotency key: %w", randomErr)
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"idempotencyKey": hex.EncodeToString(idempotency),
+		"reason":         reason,
+		"accessors":      accessors,
+	})
+	if err != nil {
+		return fmt.Errorf("encode approval group: %w", err)
+	}
+
+	var submissionErr error
+	for range 3 {
+		retry, attemptErr := submitApprovalGroupAttempt(ctx, client, baseURL, requesterToken, payload)
+		if attemptErr == nil {
+			return nil
+		}
+
+		submissionErr = attemptErr
+		if !retry || ctx.Err() != nil {
+			return attemptErr
+		}
+	}
+
+	return submissionErr
+}
+
+func submitApprovalGroupAttempt(ctx context.Context, client *http.Client, baseURL *url.URL, requesterToken string, payload []byte) (bool, error) {
+	endpoint := baseURL.ResolveReference(&url.URL{Path: "/api/v1/request-groups"})
+	//nolint:gosec // The authorizer URL is an explicit CLI/deployment setting.
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(payload))
+	if err != nil {
+		return false, fmt.Errorf("create approval group request: %w", err)
+	}
+
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("X-Vault-Token", requesterToken)
+	//nolint:gosec // Requests are intentionally sent to the configured authorizer.
+	response, err := client.Do(request)
+	if err != nil {
+		return true, fmt.Errorf("submit approval group: %w", err)
+	}
+
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode == http.StatusOK || response.StatusCode == http.StatusCreated {
+		return false, nil
+	}
+
+	var failure struct {
+		Error string `json:"error"`
+	}
+	_ = json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&failure)
+	if failure.Error == "" {
+		failure.Error = http.StatusText(response.StatusCode)
+	}
+
+	return response.StatusCode >= http.StatusInternalServerError, fmt.Errorf("submit approval group: HTTP %d: %s", response.StatusCode, failure.Error)
+}
+
+func readCredentials(ctx context.Context, client *openbao.Client, path string, pollInterval time.Duration, progress progressFunc) (map[string]any, error) {
+	data, errs := readCredentialRequests(ctx, client, client.Token(), []requestSpec{{Path: path}}, os.Getenv("BAO_AUTHORIZER_ADDR"), "", false, pollInterval, progress)
+	if len(errs) > 0 {
+		return nil, errors.Join(errs...)
+	}
+
+	result, _ := data[""].(map[string]any)
+	return result, nil
 }
 
 func controlGroupStatus(ctx context.Context, client *openbao.Client, accessor string) (bool, error) {

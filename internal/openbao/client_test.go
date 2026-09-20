@@ -9,23 +9,16 @@ import (
 	"time"
 )
 
-func TestClientListsAndInspectsControlGroupRequests(t *testing.T) {
+func TestClientInspectsControlGroupRequests(t *testing.T) {
 	t.Parallel()
 
-	var sawList, sawRequest bool
+	var sawRequest bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("X-Vault-Token"); got != "scanner" {
 			t.Fatalf("token header = %q", got)
 		}
 
 		switch r.URL.Path {
-		case "/v1/auth/token/accessors":
-			sawList = true
-			if r.Method != "LIST" {
-				t.Fatalf("method = %s", r.Method)
-			}
-
-			_, _ = w.Write([]byte(`{"data":{"keys":["ordinary","pending"]}}`))
 		case "/v1/sys/control-group/request":
 			sawRequest = true
 			_, _ = w.Write([]byte(`{"data":{"approved":false,"request_operation":"update","request_path":"secret/data/payroll","request_data":{"ttl":"1h"},"request_entity":{"ID":"entity-1","name":"Alice"},"authorizations":[]}}`))
@@ -35,18 +28,9 @@ func TestClientListsAndInspectsControlGroupRequests(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(Config{Address: server.URL, ScannerToken: "scanner", HTTPClient: server.Client()})
+	client, err := New(Config{Address: server.URL, ServiceToken: "scanner", HTTPClient: server.Client()})
 	if err != nil {
 		t.Fatal(err)
-	}
-
-	accessors, err := client.ListAccessors(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if len(accessors) != 2 || accessors[1] != "pending" {
-		t.Fatalf("accessors = %#v", accessors)
 	}
 
 	request, err := client.ControlGroupRequest(t.Context(), "pending")
@@ -58,8 +42,8 @@ func TestClientListsAndInspectsControlGroupRequests(t *testing.T) {
 		t.Fatalf("request = %#v", request)
 	}
 
-	if !sawList || !sawRequest {
-		t.Fatalf("sawList=%v sawRequest=%v", sawList, sawRequest)
+	if !sawRequest {
+		t.Fatal("control-group request was not inspected")
 	}
 }
 
@@ -72,7 +56,7 @@ func TestClientClassifiesNonControlGroupAccessor(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(Config{Address: server.URL, ScannerToken: "scanner", HTTPClient: server.Client()})
+	client, err := New(Config{Address: server.URL, ServiceToken: "scanner", HTTPClient: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +146,7 @@ func TestRenewAndRevokeSelfUseHumanToken(t *testing.T) {
 	}
 }
 
-func TestReadUsesScannerToken(t *testing.T) {
+func TestReadUsesServiceToken(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -178,7 +162,7 @@ func TestReadUsesScannerToken(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(Config{Address: server.URL, ScannerToken: "scanner", HTTPClient: server.Client()})
+	client, err := New(Config{Address: server.URL, ServiceToken: "scanner", HTTPClient: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +189,7 @@ func TestAuthorizeUsesHumanToken(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(Config{Address: server.URL, ScannerToken: "scanner", HTTPClient: server.Client()})
+	client, err := New(Config{Address: server.URL, ServiceToken: "scanner", HTTPClient: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +204,7 @@ func TestAuthorizeUsesHumanToken(t *testing.T) {
 	}
 }
 
-func TestRevokeAccessorUsesScannerToken(t *testing.T) {
+func TestRevokeAccessorUsesServiceToken(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -245,7 +229,7 @@ func TestRevokeAccessorUsesScannerToken(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(Config{Address: server.URL, ScannerToken: "scanner", HTTPClient: server.Client()})
+	client, err := New(Config{Address: server.URL, ServiceToken: "scanner", HTTPClient: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
