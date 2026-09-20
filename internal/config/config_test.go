@@ -11,7 +11,7 @@ func TestLoadHCLConfigurationAndSecretFiles(t *testing.T) {
 	directory := t.TempDir()
 	t.Setenv("AUTHORIZER_ORIGIN", "https://authorizer.example.test")
 	writeTestFile(t, directory, "encryption-key", base64.StdEncoding.EncodeToString(make([]byte, 32)))
-	writeTestFile(t, directory, "scanner-token", "scanner-secret")
+	writeTestFile(t, directory, "service-token", "service-secret")
 	configPath := writeTestFile(t, directory, "app.hcl", `
 server {
   listen_address    = "127.0.0.1:9090"
@@ -27,15 +27,15 @@ openbao {
   address            = "https://bao.example.test"
   namespace          = "engineering"
   ca_file            = ""
-  scanner_token_file = "scanner-token"
+  service_token_file = "service-token"
   approver_policy    = "approver"
 }
-scanner {
-  interval    = "5s"
-  concurrency = 4
+reconciliation {
+  interval = "5s"
 }
 requests {
-  expose_data = false
+  expose_data    = false
+  require_reason = true
 }
 approval_context "github-token" {
   match_path = "github/token/{name}"
@@ -48,7 +48,7 @@ approval_context "github-token" {
 		t.Fatal(err)
 	}
 
-	if configuration.OpenBaoScannerToken != "scanner-secret" || configuration.ScanConcurrency != 4 {
+	if configuration.OpenBaoServiceToken != "service-secret" || configuration.ReconcileInterval.String() != "5s" || !configuration.RequireReason {
 		t.Fatalf("configuration = %#v", configuration)
 	}
 
@@ -68,7 +68,7 @@ approval_context "github-token" {
 func TestLoadRejectsInvalidEncryptionKey(t *testing.T) {
 	directory := t.TempDir()
 	writeTestFile(t, directory, "encryption-key", "short")
-	writeTestFile(t, directory, "scanner-token", "scanner-secret")
+	writeTestFile(t, directory, "service-token", "service-secret")
 	configPath := writeTestFile(t, directory, "app.hcl", `
 server {
   listen_address = "127.0.0.1:8080"
@@ -84,15 +84,15 @@ openbao {
   address = "http://127.0.0.1:8200"
   namespace = ""
   ca_file = ""
-  scanner_token_file = "scanner-token"
+  service_token_file = "service-token"
   approver_policy = "approver"
 }
-scanner {
+reconciliation {
   interval = "15s"
-  concurrency = 8
 }
 requests {
-  expose_data = false
+  expose_data    = false
+  require_reason = false
 }
 `)
 	_, err := Load(configPath)

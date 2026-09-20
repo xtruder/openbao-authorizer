@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -38,6 +39,7 @@ func TestReadReturnsImmediateSecret(t *testing.T) {
 }
 
 func TestReadWaitsForApproval(t *testing.T) {
+	t.Setenv("BAO_AUTHORIZER_ADDR", acceptingAuthorizer(t).URL)
 	var statusCalls atomic.Int32
 	client := testAPIClient(t, func(response http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
@@ -63,6 +65,7 @@ func TestReadWaitsForApproval(t *testing.T) {
 }
 
 func TestReadHonorsCancellation(t *testing.T) {
+	t.Setenv("BAO_AUTHORIZER_ADDR", acceptingAuthorizer(t).URL)
 	ctx, cancel := context.WithTimeout(t.Context(), time.Millisecond)
 	defer cancel()
 	client := testAPIClient(t, func(response http.ResponseWriter, request *http.Request) {
@@ -80,6 +83,7 @@ func TestReadHonorsCancellation(t *testing.T) {
 }
 
 func TestReadStopsWhenRequestIsRejectedOrExpired(t *testing.T) {
+	t.Setenv("BAO_AUTHORIZER_ADDR", acceptingAuthorizer(t).URL)
 	var statusCalls atomic.Int32
 	client := testAPIClient(t, func(response http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
@@ -105,6 +109,88 @@ func TestReadStopsWhenRequestIsRejectedOrExpired(t *testing.T) {
 	}
 }
 
+func TestBatchSubmitsOrderedAccessorsBeforePolling(t *testing.T) {
+	var reads atomic.Int32
+	var statusCalls atomic.Int32
+	authorizer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if reads.Load() != 2 || statusCalls.Load() != 0 {
+			t.Fatalf("submission happened after %d reads and %d status calls", reads.Load(), statusCalls.Load())
+		}
+
+		if request.Header.Get("X-Vault-Token") != "request-token" {
+			t.Fatalf("requester token = %q", request.Header.Get("X-Vault-Token"))
+		}
+
+		var payload struct {
+			Reason    string   `json:"reason"`
+			Accessors []string `json:"accessors"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+
+		if payload.Reason != "local development" || !reflect.DeepEqual(payload.Accessors, []string{"accessor-a", "accessor-b"}) {
+			t.Fatalf("submission = %#v", payload)
+		}
+
+		response.WriteHeader(http.StatusCreated)
+	}))
+	t.Cleanup(authorizer.Close)
+
+	client := testAPIClient(t, func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/v1/secret/a":
+			reads.Add(1)
+			_, _ = fmt.Fprint(response, `{"wrap_info":{"token":"wrap-a","accessor":"accessor-a"}}`)
+		case "/v1/secret/b":
+			reads.Add(1)
+			_, _ = fmt.Fprint(response, `{"wrap_info":{"token":"wrap-b","accessor":"accessor-b"}}`)
+		case "/v1/sys/control-group/request":
+			statusCalls.Add(1)
+			_, _ = fmt.Fprint(response, `{"data":{"approved":true}}`)
+		case "/v1/sys/wrapping/unwrap":
+			_, _ = fmt.Fprint(response, `{"data":{"value":"ready"}}`)
+		default:
+			http.NotFound(response, request)
+		}
+	})
+	data, errs := readCredentialRequests(t.Context(), client, "request-token", []requestSpec{{Alias: "a", Path: "secret/a"}, {Alias: "b", Path: "secret/b"}}, authorizer.URL, "local development", false, time.Millisecond, nil)
+	if len(errs) > 0 || len(data) != 2 {
+		t.Fatalf("data = %#v, errors = %v", data, errs)
+	}
+}
+
+func TestSubmitApprovalGroupRetriesWithSameIdempotencyKey(t *testing.T) {
+	var keys []string
+	authorizer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		var payload struct {
+			IdempotencyKey string `json:"idempotencyKey"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+
+		keys = append(keys, payload.IdempotencyKey)
+		if len(keys) == 1 {
+			response.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = fmt.Fprint(response, `{"error":"temporarily unavailable"}`)
+			return
+		}
+
+		response.WriteHeader(http.StatusCreated)
+	}))
+	t.Cleanup(authorizer.Close)
+
+	err := submitApprovalGroup(t.Context(), authorizer.Client(), authorizer.URL, "request-token", "reason", []string{"accessor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(keys) != 2 || keys[0] == "" || keys[0] != keys[1] {
+		t.Fatalf("idempotency keys = %#v", keys)
+	}
+}
+
 func testAPIClient(t *testing.T, handler http.HandlerFunc) *openbao.Client {
 	t.Helper()
 	server := httptest.NewServer(handler)
@@ -119,6 +205,19 @@ func testAPIClient(t *testing.T, handler http.HandlerFunc) *openbao.Client {
 
 	client.SetToken("request-token")
 	return client
+}
+
+func acceptingAuthorizer(t *testing.T) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.URL.Path != "/api/v1/request-groups" {
+			t.Fatalf("authorizer request = %s %s", request.Method, request.URL.Path)
+		}
+
+		response.WriteHeader(http.StatusCreated)
+	}))
+	t.Cleanup(server.Close)
+	return server
 }
 
 func TestSelectSupportsIndexesAndEscapedDots(t *testing.T) {

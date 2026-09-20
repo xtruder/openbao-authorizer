@@ -26,12 +26,12 @@ type Config struct {
 	EncryptionKey       []byte
 	OpenBaoAddress      string
 	OpenBaoNamespace    string
-	OpenBaoScannerToken string
+	OpenBaoServiceToken string
 	OpenBaoCAFile       string
 	ApproverPolicy      string
 	ExposeRequestData   bool
-	ScanInterval        time.Duration
-	ScanConcurrency     int
+	RequireReason       bool
+	ReconcileInterval   time.Duration
 	StaticDirectory     string
 	VAPIDPublicKey      string
 	VAPIDPrivateKey     string
@@ -44,7 +44,7 @@ type fileConfig struct {
 	Server           serverConfig           `hcl:"server,block"`
 	Storage          storageConfig          `hcl:"storage,block"`
 	OpenBao          openBaoConfig          `hcl:"openbao,block"`
-	Scanner          scannerConfig          `hcl:"scanner,block"`
+	Reconciliation   reconciliationConfig   `hcl:"reconciliation,block"`
 	Requests         requestsConfig         `hcl:"requests,block"`
 	WebPush          []webPushConfig        `hcl:"web_push,block"`
 	ApprovalContexts []approvalcontext.Rule `hcl:"approval_context,block"`
@@ -66,17 +66,17 @@ type openBaoConfig struct {
 	Address          string `hcl:"address"`
 	Namespace        string `hcl:"namespace"`
 	CAFile           string `hcl:"ca_file"`
-	ScannerTokenFile string `hcl:"scanner_token_file"`
+	ServiceTokenFile string `hcl:"service_token_file"`
 	ApproverPolicy   string `hcl:"approver_policy"`
 }
 
-type scannerConfig struct {
-	Interval    string `hcl:"interval"`
-	Concurrency int    `hcl:"concurrency"`
+type reconciliationConfig struct {
+	Interval string `hcl:"interval"`
 }
 
 type requestsConfig struct {
-	ExposeData bool `hcl:"expose_data"`
+	ExposeData    bool `hcl:"expose_data"`
+	RequireReason bool `hcl:"require_reason"`
 }
 
 type webPushConfig struct {
@@ -126,18 +126,14 @@ func Load(path string) (Config, error) {
 		return Config{}, errors.New("storage.encryption_key_file must contain base64 encoding of exactly 32 bytes")
 	}
 
-	scannerToken, err := readFile(resolvePath(raw.OpenBao.ScannerTokenFile), "openbao.scanner_token_file")
+	serviceToken, err := readFile(resolvePath(raw.OpenBao.ServiceTokenFile), "openbao.service_token_file")
 	if err != nil {
 		return Config{}, err
 	}
 
-	scanInterval, err := time.ParseDuration(raw.Scanner.Interval)
-	if err != nil || scanInterval < time.Second {
-		return Config{}, errors.New("scanner.interval must be a duration of at least one second")
-	}
-
-	if raw.Scanner.Concurrency < 1 || raw.Scanner.Concurrency > 64 {
-		return Config{}, errors.New("scanner.concurrency must be between 1 and 64")
+	reconcileInterval, err := time.ParseDuration(raw.Reconciliation.Interval)
+	if err != nil || reconcileInterval < time.Second {
+		return Config{}, errors.New("reconciliation.interval must be a duration of at least one second")
 	}
 
 	if strings.TrimSpace(raw.OpenBao.ApproverPolicy) == "" {
@@ -161,12 +157,12 @@ func Load(path string) (Config, error) {
 		EncryptionKey:       encryptionKey,
 		OpenBaoAddress:      raw.OpenBao.Address,
 		OpenBaoNamespace:    raw.OpenBao.Namespace,
-		OpenBaoScannerToken: scannerToken,
+		OpenBaoServiceToken: serviceToken,
 		OpenBaoCAFile:       resolvePath(raw.OpenBao.CAFile),
 		ApproverPolicy:      strings.TrimSpace(raw.OpenBao.ApproverPolicy),
 		ExposeRequestData:   raw.Requests.ExposeData,
-		ScanInterval:        scanInterval,
-		ScanConcurrency:     raw.Scanner.Concurrency,
+		RequireReason:       raw.Requests.RequireReason,
+		ReconcileInterval:   reconcileInterval,
 		StaticDirectory:     resolvePath(raw.Server.StaticDirectory),
 		ApprovalContext:     contextResolver,
 	}

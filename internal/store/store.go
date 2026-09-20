@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/xtruder/openbao-authorizer/internal/openbao"
@@ -62,6 +63,8 @@ const (
 // Request is a stored control-group request. The raw accessor is intentionally absent.
 type Request struct {
 	ID              string                   `json:"id"`
+	GroupID         string                   `json:"groupId"`
+	Position        int                      `json:"position"`
 	Approved        bool                     `json:"approved"`
 	Status          RequestStatus            `json:"status"`
 	Operation       string                   `json:"operation"`
@@ -72,6 +75,55 @@ type Request struct {
 	Authorizations  []openbao.Authorization  `json:"authorizations"`
 	FirstSeen       time.Time                `json:"firstSeen"`
 	LastSeen        time.Time                `json:"lastSeen"`
+}
+
+// GroupStatus is the durable lifecycle state of an approval group.
+type GroupStatus string
+
+const (
+	// GroupPending can still be approved or rejected.
+	GroupPending GroupStatus = "pending"
+	// GroupApproved has every member approved by the control group.
+	GroupApproved GroupStatus = "approved"
+	// GroupRejected had every member revoked by an approver.
+	GroupRejected GroupStatus = "rejected"
+	// GroupExpired contains a member that expired before a decision.
+	GroupExpired GroupStatus = "expired"
+	// GroupApprovalFailed encountered an error while approving a member.
+	GroupApprovalFailed GroupStatus = "approval_failed"
+	// GroupRejectionFailed encountered an error while rejecting a member.
+	GroupRejectionFailed GroupStatus = "rejection_failed"
+)
+
+// Group is one immutable requester submission and its ordered native requests.
+type Group struct {
+	ID        string         `json:"id"`
+	Reason    string         `json:"reason,omitempty"`
+	Status    GroupStatus    `json:"status"`
+	Entity    openbao.Entity `json:"entity"`
+	Requests  []Request      `json:"requests"`
+	CreatedAt time.Time      `json:"createdAt"`
+	UpdatedAt time.Time      `json:"updatedAt"`
+}
+
+// SubmittedRequest binds one accessor to its verified OpenBao request snapshot.
+type SubmittedRequest struct {
+	Accessor string
+	Request  openbao.ControlGroupRequest
+}
+
+// CreateGroupInput contains one complete immutable submission.
+type CreateGroupInput struct {
+	IdempotencyKey string
+	Reason         string
+	Entity         openbao.Entity
+	Requests       []SubmittedRequest
+}
+
+// RequestAccessor is a decrypted accessor paired with its stored request ID.
+type RequestAccessor struct {
+	ID       string
+	Accessor string
 }
 
 // Session is an encrypted durable application session. Passwords are never stored.
@@ -147,8 +199,22 @@ func Open(path string, key []byte) (*DB, error) {
 
 func (d *DB) migrate(ctx context.Context) error {
 	const schema = `
+CREATE TABLE IF NOT EXISTS request_groups (
+  id TEXT PRIMARY KEY,
+  idempotency_fingerprint BLOB UNIQUE,
+  payload_fingerprint BLOB,
+  reason_nonce BLOB NOT NULL,
+  reason_ciphertext BLOB NOT NULL,
+  status TEXT NOT NULL,
+  requester_id TEXT NOT NULL,
+  requester_name TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS requests (
   id TEXT PRIMARY KEY,
+  group_id TEXT,
+  member_position INTEGER,
   fingerprint BLOB NOT NULL UNIQUE,
   accessor_nonce BLOB NOT NULL,
   accessor_ciphertext BLOB NOT NULL,
@@ -197,8 +263,24 @@ CREATE TABLE IF NOT EXISTS sessions (
 		return err
 	}
 
+	if err := d.addColumn(ctx, "requests", "group_id", "TEXT"); err != nil {
+		return err
+	}
+
+	if err := d.addColumn(ctx, "requests", "member_position", "INTEGER"); err != nil {
+		return err
+	}
+
+	if _, err := d.db.ExecContext(ctx, "CREATE UNIQUE INDEX IF NOT EXISTS requests_group_position ON requests(group_id, member_position) WHERE group_id IS NOT NULL"); err != nil {
+		return fmt.Errorf("create request group position index: %w", err)
+	}
+
 	if _, err := d.db.ExecContext(ctx, "UPDATE requests SET status = 'approved' WHERE approved = 1 AND status = 'pending'"); err != nil {
 		return fmt.Errorf("migrate request statuses: %w", err)
+	}
+
+	if _, err := d.db.ExecContext(ctx, "DELETE FROM requests WHERE group_id IS NULL"); err != nil {
+		return fmt.Errorf("remove legacy discovered requests: %w", err)
 	}
 
 	return nil
@@ -237,91 +319,271 @@ func (d *DB) addColumn(ctx context.Context, table, column, definition string) er
 	return nil
 }
 
-// Close closes the SQLite database.
-func (d *DB) Close() error { return d.db.Close() }
+// CreateGroup atomically stores one verified immutable submission.
+func (d *DB) CreateGroup(ctx context.Context, input CreateGroupInput) (Group, bool, error) {
+	if input.IdempotencyKey == "" || input.Entity.ID == "" || len(input.Requests) == 0 {
+		return Group{}, false, errors.New("approval group is incomplete")
+	}
 
-// Upsert stores current OpenBao state and reports its ID and whether this accessor was first observed.
-func (d *DB) Upsert(ctx context.Context, accessor string, request openbao.ControlGroupRequest, options UpsertOptions) (string, bool, error) {
-	fingerprint := d.fingerprint(accessor)
+	accessors := make([]string, len(input.Requests))
+	for index, request := range input.Requests {
+		if request.Accessor == "" || request.Request.Entity.ID != input.Entity.ID {
+			return Group{}, false, errors.New("approval group request is incomplete")
+		}
+
+		accessors[index] = request.Accessor
+	}
+
+	idempotencyFingerprint, payloadFingerprint, err := d.groupFingerprints(input.Entity.ID, input.IdempotencyKey, input.Reason, accessors)
+	if err != nil {
+		return Group{}, false, err
+	}
+
+	var existingID string
+	var existingPayload []byte
+	err = d.db.QueryRowContext(ctx, "SELECT id, payload_fingerprint FROM request_groups WHERE idempotency_fingerprint = ?", idempotencyFingerprint).Scan(&existingID, &existingPayload)
+	if err == nil {
+		if !hmac.Equal(existingPayload, payloadFingerprint) {
+			return Group{}, false, ErrIdempotencyConflict
+		}
+
+		group, getErr := d.Group(ctx, existingID)
+		return group, false, getErr
+	}
+
+	if !errors.Is(err, sql.ErrNoRows) {
+		return Group{}, false, fmt.Errorf("find idempotent approval group: %w", err)
+	}
+
+	groupID, err := randomID()
+	if err != nil {
+		return Group{}, false, err
+	}
+
+	reasonNonce, reasonCiphertext, err := d.encrypt([]byte(input.Reason), []byte(groupID+":reason"))
+	if err != nil {
+		return Group{}, false, err
+	}
+
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-
-	var id string
-	err := d.db.QueryRowContext(ctx, "SELECT id FROM requests WHERE fingerprint = ?", fingerprint).Scan(&id)
-	isNew := errors.Is(err, sql.ErrNoRows)
-	if err != nil && !isNew {
-		return "", false, fmt.Errorf("find request: %w", err)
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Group{}, false, fmt.Errorf("begin approval group: %w", err)
 	}
 
-	if isNew {
-		id, err = randomID()
+	defer func() { _ = tx.Rollback() }()
+
+	_, err = tx.ExecContext(ctx, `INSERT INTO request_groups
+(id, idempotency_fingerprint, payload_fingerprint, reason_nonce, reason_ciphertext, status, requester_id, requester_name, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, groupID, idempotencyFingerprint, payloadFingerprint, reasonNonce, reasonCiphertext,
+		GroupPending, input.Entity.ID, input.Entity.Name, now, now)
+	if err != nil {
+		if strings.Contains(err.Error(), "request_groups.idempotency_fingerprint") {
+			if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+				return Group{}, false, fmt.Errorf("roll back concurrent approval group: %w", rollbackErr)
+			}
+
+			existing, found, existingErr := d.ExistingGroup(ctx, input.Entity.ID, input.IdempotencyKey, input.Reason, accessors)
+			if existingErr != nil {
+				return Group{}, false, existingErr
+			}
+
+			if found {
+				return existing, false, nil
+			}
+		}
+
+		return Group{}, false, fmt.Errorf("insert approval group: %w", err)
+	}
+
+	for position, submitted := range input.Requests {
+		requestID, requestIDErr := randomID()
+		if requestIDErr != nil {
+			return Group{}, false, requestIDErr
+		}
+
+		accessorNonce, accessorCiphertext, accessorEncryptErr := d.encrypt([]byte(submitted.Accessor), []byte(requestID+":accessor"))
+		if accessorEncryptErr != nil {
+			return Group{}, false, accessorEncryptErr
+		}
+
+		dataNonce, dataCiphertext, dataEncryptErr := d.encrypt(submitted.Request.Data, []byte(requestID+":data"))
+		if dataEncryptErr != nil {
+			return Group{}, false, dataEncryptErr
+		}
+
+		contextJSON, contextEncodeErr := json.Marshal(submitted.Request.ApprovalContext)
+		if contextEncodeErr != nil {
+			return Group{}, false, fmt.Errorf("encode approval context: %w", contextEncodeErr)
+		}
+
+		contextNonce, contextCiphertext, contextEncryptErr := d.encrypt(contextJSON, []byte(requestID+":approval-context"))
+		if contextEncryptErr != nil {
+			return Group{}, false, contextEncryptErr
+		}
+
+		authorizations, authorizationErr := json.Marshal(submitted.Request.Authorizations)
+		if authorizationErr != nil {
+			return Group{}, false, fmt.Errorf("encode authorizations: %w", authorizationErr)
+		}
+
+		status := RequestPending
+		if submitted.Request.Approved {
+			status = RequestApproved
+		}
+
+		_, err = tx.ExecContext(ctx, `INSERT INTO requests
+(id, group_id, member_position, fingerprint, accessor_nonce, accessor_ciphertext, approved, status, operation, path, data_nonce, data_ciphertext, approval_context_nonce, approval_context_ciphertext, requester_id, requester_name, authorizations, first_seen, last_seen)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, requestID, groupID, position, d.fingerprint(submitted.Accessor), accessorNonce, accessorCiphertext,
+			submitted.Request.Approved, status, submitted.Request.Operation, submitted.Request.Path, dataNonce, dataCiphertext,
+			contextNonce, contextCiphertext, submitted.Request.Entity.ID, submitted.Request.Entity.Name, authorizations, now, now)
 		if err != nil {
-			return "", false, err
+			if strings.Contains(err.Error(), "requests.fingerprint") {
+				return Group{}, false, ErrAccessorRegistered
+			}
+
+			return Group{}, false, fmt.Errorf("insert approval group request: %w", err)
 		}
 	}
 
-	accessorNonce, accessorCiphertext, err := d.encrypt([]byte(accessor), []byte(id+":accessor"))
-	if err != nil {
-		return "", false, err
+	if commitErr := tx.Commit(); commitErr != nil {
+		return Group{}, false, fmt.Errorf("commit approval group: %w", commitErr)
 	}
 
-	dataNonce, dataCiphertext, err := d.encrypt(request.Data, []byte(id+":data"))
-	if err != nil {
-		return "", false, err
-	}
-
-	authorizations, err := json.Marshal(request.Authorizations)
-	if err != nil {
-		return "", false, fmt.Errorf("encode authorizations: %w", err)
-	}
-
-	approvalContext, err := json.Marshal(request.ApprovalContext)
-	if err != nil {
-		return "", false, fmt.Errorf("encode approval context: %w", err)
-	}
-
-	approvalContextNonce, approvalContextCiphertext, err := d.encrypt(approvalContext, []byte(id+":approval-context"))
-	if err != nil {
-		return "", false, err
-	}
-
-	status := RequestPending
-	if request.Approved {
-		status = RequestApproved
-	}
-
-	if isNew {
-		_, err = d.db.ExecContext(ctx, `INSERT INTO requests
-(id, fingerprint, accessor_nonce, accessor_ciphertext, approved, status, operation, path, data_nonce, data_ciphertext, approval_context_nonce, approval_context_ciphertext, requester_id, requester_name, authorizations, first_seen, last_seen)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, fingerprint, accessorNonce, accessorCiphertext, request.Approved, status, request.Operation, request.Path,
-			dataNonce, dataCiphertext, approvalContextNonce, approvalContextCiphertext, request.Entity.ID, request.Entity.Name, authorizations, now, now)
-	} else {
-		if options.ApprovalContext == ReplaceApprovalContext {
-			_, err = d.db.ExecContext(ctx, `UPDATE requests SET
-accessor_nonce = ?, accessor_ciphertext = ?, approved = CASE WHEN status IN ('rejected', 'expired') THEN approved ELSE ? END, status = CASE WHEN status IN ('rejected', 'expired') THEN status ELSE ? END, operation = ?, path = ?, data_nonce = ?, data_ciphertext = ?, approval_context_nonce = ?, approval_context_ciphertext = ?, requester_id = ?, requester_name = ?, authorizations = ?, last_seen = ?
-WHERE id = ?`, accessorNonce, accessorCiphertext, request.Approved, status, request.Operation, request.Path,
-				dataNonce, dataCiphertext, approvalContextNonce, approvalContextCiphertext, request.Entity.ID, request.Entity.Name, authorizations, now, id)
-		} else {
-			_, err = d.db.ExecContext(ctx, `UPDATE requests SET
-accessor_nonce = ?, accessor_ciphertext = ?, approved = CASE WHEN status IN ('rejected', 'expired') THEN approved ELSE ? END, status = CASE WHEN status IN ('rejected', 'expired') THEN status ELSE ? END, operation = ?, path = ?, data_nonce = ?, data_ciphertext = ?, requester_id = ?, requester_name = ?, authorizations = ?, last_seen = ?
-WHERE id = ?`, accessorNonce, accessorCiphertext, request.Approved, status, request.Operation, request.Path,
-				dataNonce, dataCiphertext, request.Entity.ID, request.Entity.Name, authorizations, now, id)
-		}
-	}
-
-	if err != nil {
-		return "", false, fmt.Errorf("upsert request: %w", err)
-	}
-
-	return id, isNew, nil
+	group, err := d.Group(ctx, groupID)
+	return group, true, err
 }
 
-// List returns all discovered requests, newest first.
-func (d *DB) List(ctx context.Context) ([]Request, error) {
-	rows, err := d.db.QueryContext(ctx, `SELECT id, approved, status, operation, path, data_nonce, data_ciphertext, approval_context_nonce, approval_context_ciphertext,
-requester_id, requester_name, authorizations, first_seen, last_seen FROM requests ORDER BY first_seen DESC`)
+// ExistingGroup resolves a prior entity-scoped submission before accessors are revalidated.
+func (d *DB) ExistingGroup(ctx context.Context, entityID, idempotencyKey, reason string, accessors []string) (Group, bool, error) {
+	idempotencyFingerprint, payloadFingerprint, err := d.groupFingerprints(entityID, idempotencyKey, reason, accessors)
 	if err != nil {
-		return nil, fmt.Errorf("list requests: %w", err)
+		return Group{}, false, err
+	}
+
+	var id string
+	var storedPayload []byte
+	err = d.db.QueryRowContext(ctx, "SELECT id, payload_fingerprint FROM request_groups WHERE idempotency_fingerprint = ?", idempotencyFingerprint).Scan(&id, &storedPayload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Group{}, false, nil
+	}
+
+	if err != nil {
+		return Group{}, false, fmt.Errorf("find idempotent approval group: %w", err)
+	}
+
+	if !hmac.Equal(storedPayload, payloadFingerprint) {
+		return Group{}, false, ErrIdempotencyConflict
+	}
+
+	group, err := d.Group(ctx, id)
+	return group, true, err
+}
+
+func (d *DB) groupFingerprints(entityID, idempotencyKey, reason string, accessors []string) ([]byte, []byte, error) {
+	payload, err := json.Marshal(struct {
+		Reason    string
+		Accessors []string
+	}{Reason: reason, Accessors: accessors})
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode approval group payload: %w", err)
+	}
+
+	return d.fingerprint("idempotency\x00" + entityID + "\x00" + idempotencyKey), d.fingerprint("payload\x00" + string(payload)), nil
+}
+
+// Groups returns approval groups newest first.
+func (d *DB) Groups(ctx context.Context) ([]Group, error) {
+	rows, err := d.db.QueryContext(ctx, `SELECT id, reason_nonce, reason_ciphertext, status, requester_id, requester_name, created_at, updated_at
+FROM request_groups ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("list approval groups: %w", err)
+	}
+
+	groups := make([]Group, 0)
+	for rows.Next() {
+		group, scanErr := d.scanGroup(rows.Scan)
+		if scanErr != nil {
+			_ = rows.Close()
+			return nil, scanErr
+		}
+
+		groups = append(groups, group)
+	}
+
+	if rowsErr := rows.Err(); rowsErr != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("iterate approval groups: %w", rowsErr)
+	}
+
+	if closeErr := rows.Close(); closeErr != nil {
+		return nil, fmt.Errorf("close approval groups: %w", closeErr)
+	}
+
+	for index := range groups {
+		groups[index].Requests, err = d.requestsForGroup(ctx, groups[index].ID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return groups, nil
+}
+
+// Group returns one approval group by opaque ID.
+func (d *DB) Group(ctx context.Context, id string) (Group, error) {
+	row := d.db.QueryRowContext(ctx, `SELECT id, reason_nonce, reason_ciphertext, status, requester_id, requester_name, created_at, updated_at
+FROM request_groups WHERE id = ?`, id)
+	group, err := d.scanGroup(row.Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Group{}, ErrNotFound
+	}
+
+	if err != nil {
+		return Group{}, err
+	}
+
+	group.Requests, err = d.requestsForGroup(ctx, id)
+	return group, err
+}
+
+func (d *DB) scanGroup(scan func(...any) error) (Group, error) {
+	var group Group
+	var reasonNonce, reasonCiphertext []byte
+	var createdAt, updatedAt string
+	if err := scan(&group.ID, &reasonNonce, &reasonCiphertext, &group.Status, &group.Entity.ID, &group.Entity.Name, &createdAt, &updatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Group{}, err
+		}
+
+		return Group{}, fmt.Errorf("scan approval group: %w", err)
+	}
+
+	reason, err := d.decrypt(reasonNonce, reasonCiphertext, []byte(group.ID+":reason"))
+	if err != nil {
+		return Group{}, err
+	}
+
+	group.Reason = string(reason)
+	group.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt)
+	if err != nil {
+		return Group{}, fmt.Errorf("parse approval group creation time: %w", err)
+	}
+
+	group.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedAt)
+	if err != nil {
+		return Group{}, fmt.Errorf("parse approval group update time: %w", err)
+	}
+
+	return group, nil
+}
+
+func (d *DB) requestsForGroup(ctx context.Context, groupID string) ([]Request, error) {
+	rows, err := d.db.QueryContext(ctx, `SELECT id, group_id, member_position, approved, status, operation, path, data_nonce, data_ciphertext,
+approval_context_nonce, approval_context_ciphertext, requester_id, requester_name, authorizations, first_seen, last_seen
+FROM requests WHERE group_id = ? ORDER BY member_position`, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("list approval group requests: %w", err)
 	}
 
 	defer func() { _ = rows.Close() }()
@@ -329,35 +591,33 @@ requester_id, requester_name, authorizations, first_seen, last_seen FROM request
 	requests := make([]Request, 0)
 	for rows.Next() {
 		var request Request
-		var dataNonce, dataCiphertext, approvalContextNonce, approvalContextCiphertext, authorizations []byte
+		var dataNonce, dataCiphertext, contextNonce, contextCiphertext, authorizations []byte
 		var firstSeen, lastSeen string
-		if err := rows.Scan(&request.ID, &request.Approved, &request.Status, &request.Operation, &request.Path, &dataNonce, &dataCiphertext, &approvalContextNonce, &approvalContextCiphertext,
-			&request.Entity.ID, &request.Entity.Name, &authorizations, &firstSeen, &lastSeen); err != nil {
-			return nil, fmt.Errorf("scan request: %w", err)
+		if scanErr := rows.Scan(&request.ID, &request.GroupID, &request.Position, &request.Approved, &request.Status, &request.Operation, &request.Path,
+			&dataNonce, &dataCiphertext, &contextNonce, &contextCiphertext, &request.Entity.ID, &request.Entity.Name, &authorizations, &firstSeen, &lastSeen); scanErr != nil {
+			return nil, fmt.Errorf("scan approval group request: %w", scanErr)
 		}
 
-		data, err := d.decrypt(dataNonce, dataCiphertext, []byte(request.ID+":data"))
+		request.Data, err = d.decrypt(dataNonce, dataCiphertext, []byte(request.ID+":data"))
 		if err != nil {
 			return nil, err
 		}
 
-		request.Data = data
-		if len(approvalContextCiphertext) > 0 {
-			approvalContext, decryptErr := d.decrypt(approvalContextNonce, approvalContextCiphertext, []byte(request.ID+":approval-context"))
+		if len(contextCiphertext) > 0 {
+			contextJSON, decryptErr := d.decrypt(contextNonce, contextCiphertext, []byte(request.ID+":approval-context"))
 			if decryptErr != nil {
 				return nil, decryptErr
 			}
 
-			if string(approvalContext) != "null" {
-				if decodeErr := json.Unmarshal(approvalContext, &request.ApprovalContext); decodeErr != nil {
+			if string(contextJSON) != "null" {
+				if decodeErr := json.Unmarshal(contextJSON, &request.ApprovalContext); decodeErr != nil {
 					return nil, fmt.Errorf("decode approval context: %w", decodeErr)
 				}
 			}
 		}
 
-		authorizationErr := json.Unmarshal(authorizations, &request.Authorizations)
-		if authorizationErr != nil {
-			return nil, fmt.Errorf("decode authorizations: %w", authorizationErr)
+		if decodeErr := json.Unmarshal(authorizations, &request.Authorizations); decodeErr != nil {
+			return nil, fmt.Errorf("decode authorizations: %w", decodeErr)
 		}
 
 		request.FirstSeen, err = time.Parse(time.RFC3339Nano, firstSeen)
@@ -374,54 +634,132 @@ requester_id, requester_name, authorizations, first_seen, last_seen FROM request
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate requests: %w", err)
+		return nil, fmt.Errorf("iterate approval group requests: %w", err)
 	}
 
 	return requests, nil
 }
 
-// Accessor decrypts the accessor for a server-side OpenBao call.
-func (d *DB) Accessor(ctx context.Context, id string) (string, error) {
-	var nonce, ciphertext []byte
-	if err := d.db.QueryRowContext(ctx, "SELECT accessor_nonce, accessor_ciphertext FROM requests WHERE id = ?", id).Scan(&nonce, &ciphertext); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return "", ErrNotFound
+// GroupAccessors decrypts a group's accessors in submission order.
+func (d *DB) GroupAccessors(ctx context.Context, groupID string) ([]RequestAccessor, error) {
+	rows, err := d.db.QueryContext(ctx, `SELECT id, accessor_nonce, accessor_ciphertext FROM requests WHERE group_id = ? ORDER BY member_position`, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("list approval group accessors: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	result := make([]RequestAccessor, 0)
+	for rows.Next() {
+		var value RequestAccessor
+		var nonce, ciphertext []byte
+		if err := rows.Scan(&value.ID, &nonce, &ciphertext); err != nil {
+			return nil, fmt.Errorf("scan approval group accessor: %w", err)
 		}
 
-		return "", fmt.Errorf("find accessor: %w", err)
+		plaintext, err := d.decrypt(nonce, ciphertext, []byte(value.ID+":accessor"))
+		if err != nil {
+			return nil, err
+		}
+
+		value.Accessor = string(plaintext)
+		result = append(result, value)
 	}
 
-	plaintext, err := d.decrypt(nonce, ciphertext, []byte(id+":accessor"))
-	if err != nil {
-		return "", err
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate approval group accessors: %w", err)
 	}
 
-	return string(plaintext), nil
+	if len(result) == 0 {
+		return nil, ErrNotFound
+	}
+
+	return result, nil
 }
 
-// SetApproved updates the locally cached approval status.
-func (d *DB) SetApproved(ctx context.Context, id string, approved bool) error {
+// UpdateRequest stores a fresh native snapshot for an existing group member.
+func (d *DB) UpdateRequest(ctx context.Context, id string, request openbao.ControlGroupRequest, options UpsertOptions) error {
+	dataNonce, dataCiphertext, err := d.encrypt(request.Data, []byte(id+":data"))
+	if err != nil {
+		return err
+	}
+
+	authorizations, err := json.Marshal(request.Authorizations)
+	if err != nil {
+		return fmt.Errorf("encode authorizations: %w", err)
+	}
+
+	contextJSON, err := json.Marshal(request.ApprovalContext)
+	if err != nil {
+		return fmt.Errorf("encode approval context: %w", err)
+	}
+
+	contextNonce, contextCiphertext, err := d.encrypt(contextJSON, []byte(id+":approval-context"))
+	if err != nil {
+		return err
+	}
+
 	status := RequestPending
-	if approved {
+	if request.Approved {
 		status = RequestApproved
 	}
 
-	result, err := d.db.ExecContext(ctx, "UPDATE requests SET approved = ?, status = ?, last_seen = ? WHERE id = ? AND status = ?", approved, status, time.Now().UTC().Format(time.RFC3339Nano), id, RequestPending)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	var result sql.Result
+	if options.ApprovalContext == ReplaceApprovalContext {
+		result, err = d.db.ExecContext(ctx, `UPDATE requests SET approved = ?, status = CASE WHEN status IN ('rejected', 'expired') THEN status ELSE ? END,
+operation = ?, path = ?, data_nonce = ?, data_ciphertext = ?, approval_context_nonce = ?, approval_context_ciphertext = ?, requester_id = ?, requester_name = ?, authorizations = ?, last_seen = ? WHERE id = ?`,
+			request.Approved, status, request.Operation, request.Path, dataNonce, dataCiphertext, contextNonce, contextCiphertext,
+			request.Entity.ID, request.Entity.Name, authorizations, now, id)
+	} else {
+		result, err = d.db.ExecContext(ctx, `UPDATE requests SET approved = ?, status = CASE WHEN status IN ('rejected', 'expired') THEN status ELSE ? END,
+operation = ?, path = ?, data_nonce = ?, data_ciphertext = ?, requester_id = ?, requester_name = ?, authorizations = ?, last_seen = ? WHERE id = ?`,
+			request.Approved, status, request.Operation, request.Path, dataNonce, dataCiphertext,
+			request.Entity.ID, request.Entity.Name, authorizations, now, id)
+	}
+
 	if err != nil {
-		return fmt.Errorf("update request: %w", err)
+		return fmt.Errorf("update approval group request: %w", err)
 	}
 
 	rows, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("read update result: %w", err)
+		return fmt.Errorf("read request update result: %w", err)
 	}
 
 	if rows == 0 {
-		return ErrStatusChanged
+		return ErrNotFound
 	}
 
 	return nil
 }
+
+// SetGroupStatus records the current aggregate outcome of a group operation.
+func (d *DB) SetGroupStatus(ctx context.Context, id string, status GroupStatus) error {
+	if !validGroupStatus(status) {
+		return fmt.Errorf("invalid approval group status %q", status)
+	}
+
+	result, err := d.db.ExecContext(ctx, "UPDATE request_groups SET status = ?, updated_at = ? WHERE id = ?", status, time.Now().UTC().Format(time.RFC3339Nano), id)
+	if err != nil {
+		return fmt.Errorf("update approval group status: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read approval group update result: %w", err)
+	}
+
+	if rows == 0 {
+		return ErrNotFound
+	}
+
+	return nil
+}
+
+// Close closes the SQLite database.
+func (d *DB) Close() error { return d.db.Close() }
 
 // TransitionStatus atomically changes a request from one lifecycle state to another.
 func (d *DB) TransitionStatus(ctx context.Context, id string, from, to RequestStatus) (bool, error) {
@@ -446,59 +784,8 @@ func validRequestStatus(status RequestStatus) bool {
 	return status == RequestPending || status == RequestApproved || status == RequestRejected || status == RequestExpired
 }
 
-// ExpireMissing marks pending requests absent from a complete accessor snapshot.
-func (d *DB) ExpireMissing(ctx context.Context, accessors []string) ([]string, error) {
-	present := make(map[string]struct{}, len(accessors))
-	for _, accessor := range accessors {
-		present[hex.EncodeToString(d.fingerprint(accessor))] = struct{}{}
-	}
-
-	rows, err := d.db.QueryContext(ctx, "SELECT id, fingerprint FROM requests WHERE status = ?", RequestPending)
-	if err != nil {
-		return nil, fmt.Errorf("list pending request fingerprints: %w", err)
-	}
-
-	var expired []string
-	for rows.Next() {
-		var id string
-		var fingerprint []byte
-		if err := rows.Scan(&id, &fingerprint); err != nil {
-			_ = rows.Close()
-			return nil, fmt.Errorf("scan pending request fingerprint: %w", err)
-		}
-
-		if _, ok := present[hex.EncodeToString(fingerprint)]; !ok {
-			expired = append(expired, id)
-		}
-	}
-
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return nil, fmt.Errorf("iterate pending request fingerprints: %w", err)
-	}
-
-	if err := rows.Close(); err != nil {
-		return nil, fmt.Errorf("close pending request fingerprints: %w", err)
-	}
-
-	changed := make([]string, 0, len(expired))
-	for _, id := range expired {
-		result, err := d.db.ExecContext(ctx, "UPDATE requests SET status = ?, approved = 0 WHERE id = ? AND status = ?", RequestExpired, id, RequestPending)
-		if err != nil {
-			return nil, fmt.Errorf("expire missing request: %w", err)
-		}
-
-		rows, err := result.RowsAffected()
-		if err != nil {
-			return nil, fmt.Errorf("read expiration result: %w", err)
-		}
-
-		if rows == 1 {
-			changed = append(changed, id)
-		}
-	}
-
-	return changed, nil
+func validGroupStatus(status GroupStatus) bool {
+	return status == GroupPending || status == GroupApproved || status == GroupRejected || status == GroupExpired || status == GroupApprovalFailed || status == GroupRejectionFailed
 }
 
 // PutSession creates or replaces an encrypted durable application session.
@@ -683,8 +970,11 @@ func (d *DB) DeleteSubscriptionsByEntity(ctx context.Context, entityID string) e
 // ErrNotFound marks an unknown opaque application request ID.
 var ErrNotFound = errors.New("request not found")
 
-// ErrStatusChanged marks a request that left pending before a decision completed.
-var ErrStatusChanged = errors.New("request status changed")
+// ErrIdempotencyConflict marks reuse of an idempotency key with another payload.
+var ErrIdempotencyConflict = errors.New("idempotency key already used for another approval group")
+
+// ErrAccessorRegistered marks an accessor already assigned to an approval group.
+var ErrAccessorRegistered = errors.New("request accessor is already registered")
 
 func (d *DB) fingerprint(value string) []byte {
 	mac := hmac.New(sha256.New, d.key)

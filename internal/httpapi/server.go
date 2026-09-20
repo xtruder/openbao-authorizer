@@ -26,6 +26,7 @@ import (
 const (
 	maxBodyBytes      = 1 << 20
 	defaultSessionTTL = 30 * 24 * time.Hour
+	maxReasonLength   = 500
 )
 
 // OpenBao is the API surface needed by authenticated handlers.
@@ -42,10 +43,13 @@ type OpenBao interface {
 
 // Store is the persistence surface needed by the HTTP API.
 type Store interface {
-	List(context.Context) ([]store.Request, error)
-	Accessor(context.Context, string) (string, error)
-	Upsert(context.Context, string, openbao.ControlGroupRequest, store.UpsertOptions) (string, bool, error)
-	SetApproved(context.Context, string, bool) error
+	CreateGroup(context.Context, store.CreateGroupInput) (store.Group, bool, error)
+	ExistingGroup(context.Context, string, string, string, []string) (store.Group, bool, error)
+	Groups(context.Context) ([]store.Group, error)
+	Group(context.Context, string) (store.Group, error)
+	GroupAccessors(context.Context, string) ([]store.RequestAccessor, error)
+	UpdateRequest(context.Context, string, openbao.ControlGroupRequest, store.UpsertOptions) error
+	SetGroupStatus(context.Context, string, store.GroupStatus) error
 	TransitionStatus(context.Context, string, store.RequestStatus, store.RequestStatus) (bool, error)
 	PutSession(context.Context, store.Session) error
 	DeleteSession(context.Context, string) error
@@ -64,10 +68,13 @@ type Options struct {
 	VAPIDPublicKey       string
 	ApproverPolicy       string
 	ExposeRequestData    bool
+	RequireReason        bool
 	ApprovalContext      *approvalcontext.Resolver
 	InsecureCookies      bool
 	Sessions             *Sessions
 	ValidatePushEndpoint func(context.Context, string) error
+	NotifyNewGroup       func(context.Context, store.Group) error
+	DecisionMutex        *sync.Mutex
 }
 
 type server struct {
@@ -79,12 +86,14 @@ type server struct {
 	vapidPublicKey       string
 	approverPolicy       string
 	exposeRequestData    bool
+	requireReason        bool
 	approvalContext      *approvalcontext.Resolver
 	insecureCookies      bool
 	sessions             *Sessions
 	validatePushEndpoint func(context.Context, string) error
+	notifyNewGroup       func(context.Context, store.Group) error
 	// OpenBao decisions are externally stateful and must not race each other.
-	decisionMu sync.Mutex
+	decisionMu *sync.Mutex
 }
 
 type session struct {
@@ -227,18 +236,27 @@ func New(options Options) http.Handler {
 		vapidPublicKey:       options.VAPIDPublicKey,
 		approverPolicy:       options.ApproverPolicy,
 		exposeRequestData:    options.ExposeRequestData,
+		requireReason:        options.RequireReason,
 		approvalContext:      contexts,
 		insecureCookies:      options.InsecureCookies,
 		sessions:             sessions,
 		validatePushEndpoint: options.ValidatePushEndpoint,
+		notifyNewGroup:       options.NotifyNewGroup,
+		decisionMu:           options.DecisionMutex,
 	}
+	if s.decisionMu == nil {
+		s.decisionMu = &sync.Mutex{}
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/session", s.login)
 	mux.HandleFunc("GET /api/v1/session", s.authenticated(s.currentSession))
 	mux.HandleFunc("DELETE /api/v1/session", s.authenticated(s.logout))
-	mux.HandleFunc("GET /api/v1/requests", s.authenticated(s.listRequests))
-	mux.HandleFunc("POST /api/v1/requests/{id}/approve", s.authenticated(s.approve))
-	mux.HandleFunc("POST /api/v1/requests/{id}/reject", s.authenticated(s.reject))
+	mux.HandleFunc("POST /api/v1/request-groups", s.submitGroup)
+	mux.HandleFunc("GET /api/v1/request-groups", s.authenticated(s.listGroups))
+	mux.HandleFunc("GET /api/v1/request-groups/{id}", s.authenticated(s.getGroup))
+	mux.HandleFunc("POST /api/v1/request-groups/{id}/approve", s.authenticated(s.approveGroup))
+	mux.HandleFunc("POST /api/v1/request-groups/{id}/reject", s.authenticated(s.rejectGroup))
 	mux.HandleFunc("GET /api/v1/events", s.authenticated(s.streamEvents))
 	mux.HandleFunc("GET /api/v1/push/public-key", s.authenticated(s.pushPublicKey))
 	mux.HandleFunc("POST /api/v1/push/subscriptions", s.authenticated(s.putSubscription))
@@ -368,23 +386,179 @@ func (s *server) logout(w http.ResponseWriter, r *http.Request, value session) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *server) listRequests(w http.ResponseWriter, r *http.Request, _ session) {
-	requests, err := s.store.List(r.Context())
+func (s *server) submitGroup(w http.ResponseWriter, r *http.Request) {
+	if !s.validMutation(w, r, true) {
+		return
+	}
+
+	var payload struct {
+		IdempotencyKey string   `json:"idempotencyKey"`
+		Reason         string   `json:"reason"`
+		Accessors      []string `json:"accessors"`
+	}
+	if !decodeJSON(w, r, &payload) {
+		return
+	}
+
+	payload.IdempotencyKey = strings.TrimSpace(payload.IdempotencyKey)
+	payload.Reason = strings.TrimSpace(payload.Reason)
+	if payload.IdempotencyKey == "" || len(payload.Accessors) == 0 {
+		writeError(w, http.StatusBadRequest, "idempotencyKey and at least one accessor are required")
+		return
+	}
+
+	if len([]rune(payload.Reason)) > maxReasonLength || (s.requireReason && payload.Reason == "") {
+		writeError(w, http.StatusBadRequest, "reason must be non-empty and at most 500 characters")
+		return
+	}
+
+	requesterToken := strings.TrimSpace(r.Header.Get("X-Vault-Token"))
+	if requesterToken == "" {
+		writeError(w, http.StatusUnauthorized, "X-Vault-Token is required")
+		return
+	}
+
+	identity, err := s.bao.LookupSelf(r.Context(), requesterToken)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "OpenBao token is invalid")
+		return
+	}
+
+	if identity.EntityID == "" {
+		writeError(w, http.StatusForbidden, "OpenBao token is not associated with an identity entity")
+		return
+	}
+
+	seen := make(map[string]struct{}, len(payload.Accessors))
+	accessors := make([]string, 0, len(payload.Accessors))
+	for _, rawAccessor := range payload.Accessors {
+		accessor := strings.TrimSpace(rawAccessor)
+		if accessor == "" {
+			writeError(w, http.StatusBadRequest, "accessors must be non-empty")
+			return
+		}
+
+		if _, duplicate := seen[accessor]; duplicate {
+			writeError(w, http.StatusBadRequest, "duplicate accessors are not allowed")
+			return
+		}
+
+		seen[accessor] = struct{}{}
+		accessors = append(accessors, accessor)
+	}
+
+	existing, found, err := s.store.ExistingGroup(r.Context(), identity.EntityID, payload.IdempotencyKey, payload.Reason, accessors)
+	if errors.Is(err, store.ErrIdempotencyConflict) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+
 	if err != nil {
 		s.internalError(w, err)
 		return
 	}
 
-	for index := range requests {
-		if !s.exposeRequestData {
-			requests[index].Data = nil
+	if found {
+		sanitizeGroup(&existing, s.exposeRequestData)
+		writeJSON(w, http.StatusOK, existing)
+		return
+	}
+
+	submitted := make([]store.SubmittedRequest, 0, len(accessors))
+	for _, accessor := range accessors {
+		request, requestErr := s.bao.ControlGroupRequest(r.Context(), accessor)
+		if requestErr != nil {
+			if openbao.IsNotControlGroup(requestErr) {
+				writeError(w, http.StatusBadRequest, "an accessor is not a pending control-group request")
+				return
+			}
+
+			if s.writeOpenBaoError(w, "request verification", requestErr) {
+				return
+			}
+
+			s.internalError(w, requestErr)
+			return
+		}
+
+		if request.Entity.ID != identity.EntityID {
+			writeError(w, http.StatusForbidden, "every accessor must belong to the authenticated identity")
+			return
+		}
+
+		if contextPath, matched := s.approvalContext.Resolve(request.Path); matched {
+			contextData, contextErr := s.bao.Read(r.Context(), contextPath)
+			request.ApprovalContext = &openbao.ApprovalContext{Available: contextErr == nil, Data: contextData}
+		}
+
+		submitted = append(submitted, store.SubmittedRequest{Accessor: accessor, Request: request})
+	}
+
+	group, created, err := s.store.CreateGroup(r.Context(), store.CreateGroupInput{
+		IdempotencyKey: payload.IdempotencyKey,
+		Reason:         payload.Reason,
+		Entity:         openbao.Entity{ID: identity.EntityID, Name: identity.DisplayName},
+		Requests:       submitted,
+	})
+	if errors.Is(err, store.ErrIdempotencyConflict) || errors.Is(err, store.ErrAccessorRegistered) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
+
+	if created {
+		_ = s.events.Publish("new-request", map[string]any{"id": group.ID, "status": group.Status})
+		if s.notifyNewGroup != nil {
+			if err := s.notifyNewGroup(r.Context(), group); err != nil {
+				s.logger.Warn("notify new approval group", "group_id", group.ID, "error", err)
+			}
 		}
 	}
 
-	writeJSON(w, http.StatusOK, requests)
+	sanitizeGroup(&group, s.exposeRequestData)
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+
+	writeJSON(w, status, group)
 }
 
-func (s *server) approve(w http.ResponseWriter, r *http.Request, value session) {
+func (s *server) listGroups(w http.ResponseWriter, r *http.Request, _ session) {
+	groups, err := s.store.Groups(r.Context())
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
+
+	for index := range groups {
+		sanitizeGroup(&groups[index], s.exposeRequestData)
+	}
+
+	writeJSON(w, http.StatusOK, groups)
+}
+
+func (s *server) getGroup(w http.ResponseWriter, r *http.Request, _ session) {
+	group, err := s.store.Group(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "approval group not found")
+		return
+	}
+
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
+
+	sanitizeGroup(&group, s.exposeRequestData)
+	writeJSON(w, http.StatusOK, group)
+}
+
+func (s *server) approveGroup(w http.ResponseWriter, r *http.Request, value session) {
 	if !s.validMutationWithCSRF(w, r, value) {
 		return
 	}
@@ -392,217 +566,273 @@ func (s *server) approve(w http.ResponseWriter, r *http.Request, value session) 
 	s.decisionMu.Lock()
 	defer s.decisionMu.Unlock()
 
-	accessor, err := s.store.Accessor(r.Context(), r.PathValue("id"))
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "request not found")
+	group, accessors, ok := s.decisionGroup(w, r)
+	if !ok {
 		return
 	}
 
-	if err != nil {
-		s.internalError(w, err)
+	if group.Status != store.GroupPending && group.Status != store.GroupApprovalFailed {
+		writeError(w, http.StatusConflict, "approval group is no longer pending")
 		return
 	}
 
-	requests, err := s.store.List(r.Context())
-	if err != nil {
-		s.internalError(w, err)
-		return
+	type candidate struct {
+		stored   store.Request
+		accessor string
+		fresh    openbao.ControlGroupRequest
 	}
-
-	var stored *store.Request
-	for index := range requests {
-		if requests[index].ID == r.PathValue("id") {
-			stored = &requests[index]
-			break
-		}
-	}
-
-	if stored == nil {
-		writeError(w, http.StatusNotFound, "request not found")
-		return
-	}
-
-	if stored.Status != store.RequestPending {
-		writeError(w, http.StatusConflict, "request is no longer pending")
-		return
-	}
-
-	currentContext := stored.ApprovalContext
-	contextPath, hasContext := s.approvalContext.Resolve(stored.Path)
-	if hasContext {
-		contextData, contextErr := s.bao.Read(r.Context(), contextPath)
-		currentContext = &openbao.ApprovalContext{Available: contextErr == nil, Data: contextData}
-		request := openbao.ControlGroupRequest{
-			Approved: stored.Approved, Operation: stored.Operation, Path: stored.Path, Data: stored.Data,
-			ApprovalContext: currentContext, Entity: stored.Entity, Authorizations: stored.Authorizations,
-		}
-		if _, _, upsertErr := s.store.Upsert(r.Context(), accessor, request, store.UpsertOptions{ApprovalContext: store.ReplaceApprovalContext}); upsertErr != nil {
-			s.internalError(w, upsertErr)
-			return
+	candidates := make([]candidate, 0, len(group.Requests))
+	for index, stored := range group.Requests {
+		if stored.Status == store.RequestApproved {
+			continue
 		}
 
-		if contextErr != nil {
-			s.logger.Warn("refresh approval context", "path", stored.Path, "error", contextErr)
-			writeError(w, http.StatusConflict, "approval context could not be refreshed; review the request again")
-			return
-		}
-
-		if !sameApprovalContext(stored.ApprovalContext, currentContext) {
-			writeError(w, http.StatusConflict, "approval context changed; review the request again")
-			return
-		}
-	}
-
-	approved, err := s.bao.Authorize(r.Context(), value.Token, accessor)
-	if err != nil {
-		if s.writeOpenBaoError(w, "approval", err) {
-			return
-		}
-
-		s.internalError(w, err)
-		return
-	}
-
-	fresh, err := s.bao.ControlGroupRequest(r.Context(), accessor)
-	if err == nil {
-		if fresh.ApprovalContext == nil {
-			fresh.ApprovalContext = currentContext
-		}
-
-		_, _, err = s.store.Upsert(r.Context(), accessor, fresh, store.UpsertOptions{ApprovalContext: store.ReplaceApprovalContext})
-	} else {
-		err = s.store.SetApproved(r.Context(), r.PathValue("id"), approved)
-	}
-
-	if errors.Is(err, store.ErrStatusChanged) {
-		writeError(w, http.StatusConflict, "request is no longer pending")
-		return
-	}
-
-	if err != nil {
-		s.internalError(w, err)
-		return
-	}
-
-	requests, err = s.store.List(r.Context())
-	if err != nil {
-		s.internalError(w, err)
-		return
-	}
-
-	for _, request := range requests {
-		if request.ID == r.PathValue("id") {
-			if request.Status == store.RequestRejected || request.Status == store.RequestExpired {
-				writeError(w, http.StatusConflict, "request is no longer pending")
-				return
-			}
-
-			_ = s.events.Publish("status", map[string]any{"id": request.ID, "status": request.Status})
-			if !s.exposeRequestData {
-				request.Data = nil
-			}
-
-			writeJSON(w, http.StatusOK, request)
-			return
-		}
-	}
-
-	writeError(w, http.StatusNotFound, "request not found")
-}
-
-func (s *server) reject(w http.ResponseWriter, r *http.Request, value session) {
-	if !s.validMutationWithCSRF(w, r, value) {
-		return
-	}
-
-	s.decisionMu.Lock()
-	defer s.decisionMu.Unlock()
-
-	id := r.PathValue("id")
-	accessor, err := s.store.Accessor(r.Context(), id)
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "request not found")
-		return
-	}
-
-	if err != nil {
-		s.internalError(w, err)
-		return
-	}
-
-	requests, err := s.store.List(r.Context())
-	if err != nil {
-		s.internalError(w, err)
-		return
-	}
-
-	var rejected *store.Request
-	for index := range requests {
-		if requests[index].ID == id {
-			rejected = &requests[index]
-			break
-		}
-	}
-
-	if rejected == nil {
-		writeError(w, http.StatusNotFound, "request not found")
-		return
-	}
-
-	if rejected.Status != store.RequestPending {
-		writeError(w, http.StatusConflict, "request is no longer pending")
-		return
-	}
-
-	status := store.RequestRejected
-	revokeErr := s.bao.RevokeAccessor(r.Context(), accessor)
-	if revokeErr != nil {
-		var httpErr *openbao.HTTPError
-		if errors.As(revokeErr, &httpErr) && (httpErr.StatusCode == http.StatusBadRequest || httpErr.StatusCode == http.StatusNotFound) {
-			status = store.RequestExpired
-		} else {
-			if s.writeOpenBaoError(w, "request revocation", revokeErr) {
-				return
-			}
-
-			s.internalError(w, revokeErr)
-			return
-		}
-	}
-
-	changed, err := s.store.TransitionStatus(r.Context(), id, store.RequestPending, status)
-	if err != nil {
-		s.internalError(w, err)
-		return
-	}
-
-	if !changed && status == store.RequestRejected {
-		// The scanner can observe successful revocation before this handler records it.
-		changed, err = s.store.TransitionStatus(r.Context(), id, store.RequestExpired, store.RequestRejected)
+		fresh, err := s.bao.ControlGroupRequest(r.Context(), accessors[index].Accessor)
 		if err != nil {
+			if openbao.IsNotControlGroup(err) {
+				if _, transitionErr := s.store.TransitionStatus(r.Context(), stored.ID, stored.Status, store.RequestExpired); transitionErr != nil {
+					s.internalError(w, transitionErr)
+					return
+				}
+
+				if statusErr := s.store.SetGroupStatus(r.Context(), group.ID, store.GroupExpired); statusErr != nil {
+					s.internalError(w, statusErr)
+					return
+				}
+
+				_ = s.events.Publish("status", map[string]any{"id": group.ID, "status": store.GroupExpired})
+
+				writeError(w, http.StatusConflict, "an approval group request has expired")
+				return
+			}
+
+			if s.writeOpenBaoError(w, "request verification", err) {
+				return
+			}
+
 			s.internalError(w, err)
 			return
 		}
+
+		if fresh.Entity.ID != group.Entity.ID || fresh.Operation != stored.Operation || fresh.Path != stored.Path {
+			if statusErr := s.store.SetGroupStatus(r.Context(), group.ID, store.GroupApprovalFailed); statusErr != nil {
+				s.internalError(w, statusErr)
+				return
+			}
+
+			_ = s.events.Publish("status", map[string]any{"id": group.ID, "status": store.GroupApprovalFailed})
+
+			writeError(w, http.StatusConflict, "an approval group request changed identity, operation, or path")
+			return
+		}
+
+		currentContext := stored.ApprovalContext
+		if contextPath, matched := s.approvalContext.Resolve(stored.Path); matched {
+			contextData, contextErr := s.bao.Read(r.Context(), contextPath)
+			currentContext = &openbao.ApprovalContext{Available: contextErr == nil, Data: contextData}
+			if contextErr != nil {
+				writeError(w, http.StatusConflict, "approval context could not be refreshed; review the group again")
+				return
+			}
+
+			if !sameApprovalContext(stored.ApprovalContext, currentContext) {
+				fresh.ApprovalContext = currentContext
+				if updateErr := s.store.UpdateRequest(r.Context(), stored.ID, fresh, store.UpsertOptions{ApprovalContext: store.ReplaceApprovalContext}); updateErr != nil {
+					s.internalError(w, updateErr)
+					return
+				}
+
+				writeError(w, http.StatusConflict, "approval context changed; review the group again")
+				return
+			}
+		}
+
+		fresh.ApprovalContext = currentContext
+		candidates = append(candidates, candidate{stored: stored, accessor: accessors[index].Accessor, fresh: fresh})
 	}
 
-	if !changed {
-		writeError(w, http.StatusConflict, "request is no longer pending")
+	allApproved := true
+	for _, candidate := range candidates {
+		fresh := candidate.fresh
+		if !fresh.Approved && !hasAuthorization(fresh.Authorizations, value.Identity.EntityID) {
+			approved, err := s.bao.Authorize(r.Context(), value.Token, candidate.accessor)
+			if err != nil {
+				if statusErr := s.store.SetGroupStatus(r.Context(), group.ID, store.GroupApprovalFailed); statusErr != nil {
+					s.internalError(w, errors.Join(err, statusErr))
+					return
+				}
+
+				_ = s.events.Publish("status", map[string]any{"id": group.ID, "status": store.GroupApprovalFailed})
+
+				if s.writeOpenBaoError(w, "group approval", err) {
+					return
+				}
+
+				s.internalError(w, err)
+				return
+			}
+
+			fresh, err = s.bao.ControlGroupRequest(r.Context(), candidate.accessor)
+			if err != nil {
+				if approved && openbao.IsNotControlGroup(err) {
+					fresh = candidate.fresh
+					fresh.Approved = true
+					fresh.Authorizations = append(fresh.Authorizations, openbao.Authorization{EntityID: value.Identity.EntityID, EntityName: value.Identity.DisplayName})
+				} else {
+					if statusErr := s.store.SetGroupStatus(r.Context(), group.ID, store.GroupApprovalFailed); statusErr != nil {
+						s.internalError(w, errors.Join(err, statusErr))
+						return
+					}
+
+					_ = s.events.Publish("status", map[string]any{"id": group.ID, "status": store.GroupApprovalFailed})
+
+					s.internalError(w, err)
+					return
+				}
+			}
+
+			fresh.ApprovalContext = candidate.fresh.ApprovalContext
+		}
+
+		if err := s.store.UpdateRequest(r.Context(), candidate.stored.ID, fresh, store.UpsertOptions{ApprovalContext: store.ReplaceApprovalContext}); err != nil {
+			s.internalError(w, err)
+			return
+		}
+
+		allApproved = allApproved && fresh.Approved
+	}
+
+	status := store.GroupPending
+	if allApproved {
+		status = store.GroupApproved
+	}
+
+	if err := s.store.SetGroupStatus(r.Context(), group.ID, status); err != nil {
+		s.internalError(w, err)
 		return
 	}
 
-	rejected.Status = status
-	rejected.Approved = false
-	_ = s.events.Publish("status", map[string]any{"id": id, "status": status})
-	if status == store.RequestExpired {
-		writeError(w, http.StatusConflict, "request has expired")
+	s.respondWithGroup(w, r, group.ID)
+}
+
+func (s *server) rejectGroup(w http.ResponseWriter, r *http.Request, value session) {
+	if !s.validMutationWithCSRF(w, r, value) {
 		return
 	}
 
-	if !s.exposeRequestData {
-		rejected.Data = nil
+	s.decisionMu.Lock()
+	defer s.decisionMu.Unlock()
+
+	group, accessors, ok := s.decisionGroup(w, r)
+	if !ok {
+		return
 	}
 
-	writeJSON(w, http.StatusOK, rejected)
+	if group.Status != store.GroupPending && group.Status != store.GroupApprovalFailed && group.Status != store.GroupRejectionFailed {
+		writeError(w, http.StatusConflict, "approval group is no longer pending")
+		return
+	}
+
+	var revokeErrors []error
+	hadExpired := false
+	for index, request := range group.Requests {
+		if request.Status == store.RequestRejected {
+			continue
+		}
+
+		status := store.RequestRejected
+		if err := s.bao.RevokeAccessor(r.Context(), accessors[index].Accessor); err != nil {
+			var httpErr *openbao.HTTPError
+			if errors.As(err, &httpErr) && (httpErr.StatusCode == http.StatusBadRequest || httpErr.StatusCode == http.StatusNotFound) {
+				status = store.RequestExpired
+				hadExpired = true
+			} else {
+				revokeErrors = append(revokeErrors, err)
+				continue
+			}
+		}
+
+		_, err := s.store.TransitionStatus(r.Context(), request.ID, request.Status, status)
+		if err != nil {
+			revokeErrors = append(revokeErrors, err)
+		}
+	}
+
+	if len(revokeErrors) > 0 {
+		if statusErr := s.store.SetGroupStatus(r.Context(), group.ID, store.GroupRejectionFailed); statusErr != nil {
+			revokeErrors = append(revokeErrors, statusErr)
+		} else {
+			_ = s.events.Publish("status", map[string]any{"id": group.ID, "status": store.GroupRejectionFailed})
+		}
+
+		s.internalError(w, errors.Join(revokeErrors...))
+		return
+	}
+
+	status := store.GroupRejected
+	if hadExpired {
+		status = store.GroupExpired
+	}
+
+	if err := s.store.SetGroupStatus(r.Context(), group.ID, status); err != nil {
+		s.internalError(w, err)
+		return
+	}
+
+	s.respondWithGroup(w, r, group.ID)
+}
+
+func (s *server) decisionGroup(w http.ResponseWriter, r *http.Request) (store.Group, []store.RequestAccessor, bool) {
+	group, err := s.store.Group(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "approval group not found")
+		return store.Group{}, nil, false
+	}
+
+	if err != nil {
+		s.internalError(w, err)
+		return store.Group{}, nil, false
+	}
+
+	accessors, err := s.store.GroupAccessors(r.Context(), group.ID)
+	if err != nil || len(accessors) != len(group.Requests) {
+		s.internalError(w, errors.New("approval group membership is inconsistent"))
+		return store.Group{}, nil, false
+	}
+
+	return group, accessors, true
+}
+
+func (s *server) respondWithGroup(w http.ResponseWriter, r *http.Request, id string) {
+	group, err := s.store.Group(r.Context(), id)
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
+
+	_ = s.events.Publish("status", map[string]any{"id": id, "status": group.Status})
+	sanitizeGroup(&group, s.exposeRequestData)
+	writeJSON(w, http.StatusOK, group)
+}
+
+func sanitizeGroup(group *store.Group, exposeRequestData bool) {
+	if exposeRequestData {
+		return
+	}
+
+	for index := range group.Requests {
+		group.Requests[index].Data = nil
+	}
+}
+
+func hasAuthorization(authorizations []openbao.Authorization, entityID string) bool {
+	for _, authorization := range authorizations {
+		if authorization.EntityID == entityID {
+			return true
+		}
+	}
+
+	return false
 }
 
 func sameApprovalContext(left, right *openbao.ApprovalContext) bool {

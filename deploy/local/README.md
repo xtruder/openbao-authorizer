@@ -26,7 +26,7 @@ empty so the service does not need a frontend directory at runtime.
 
 `bootstrap-openbao.sh` creates:
 
-- scanner policy/token for the app;
+- service policy/token for the app;
 - `approver` user and the `local-approvers` identity group;
 - `requester` user and a protected `kv/data/controlled` path;
 - `agent` user restricted to approved `github/token/project-*` permission sets;
@@ -38,7 +38,7 @@ Generated login material remains local:
 ~/.config/openbao-authorizer/approver-password
 ~/.config/openbao-authorizer/app.hcl
 ~/.config/openbao-authorizer/encryption-key
-~/.config/openbao-authorizer/scanner-token
+~/.config/openbao-authorizer/service-token
 ~/.config/openbao-authorizer/requester-password
 ~/.config/openbao-authorizer/requester-token
 ~/.config/openbao-authorizer/agent-token
@@ -58,7 +58,7 @@ journalctl --user -u openbao-authorizer-openbao.service -u openbao-authorizer.se
 ```
 
 Restarting the OpenBao unit also reprovisions it. Because the app is bound to
-that unit, systemd restarts the app with the newly generated scanner token.
+that unit, systemd restarts the app with the newly generated service token.
 
 ## Updating the application
 
@@ -168,9 +168,11 @@ the fixed project permission set, waits for a control-group approval, unwraps
 the GitHub token only in memory, and exports it only to the child `gh` process:
 
 ```sh
-bao-cred -map GH_TOKEN=token github/token/project-project-name -- \
+BAO_AUTHORIZER_ADDR=https://authorizer.example.com \
+bao-cred -reason 'Inspect project repository' -map GH_TOKEN=token github/token/project-project-name -- \
   gh repo view example-org/example-repo
-bao-cred -map GH_TOKEN=token github/token/project-project-name -- \
+BAO_AUTHORIZER_ADDR=https://authorizer.example.com \
+bao-cred -reason 'Review project pull requests' -map GH_TOKEN=token github/token/project-project-name -- \
   gh pr list --repo example-org/example-repo
 ```
 

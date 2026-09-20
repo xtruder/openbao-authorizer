@@ -25,6 +25,7 @@ const usageText = `usage:
   bao-cred login [flags]
   bao-cred logout [flags]
   bao-cred [flags] <openbao-path> [-- command [args...]]
+  bao-cred [flags] -request ALIAS=PATH [-request ...] [-- command [args...]]
 
 Reads credentials from OpenBao. If the response requires control-group approval,
 bao-cred waits for approval before unwrapping it.
@@ -34,10 +35,14 @@ Output flags:
   -field path          print one scalar field with no trailing newline
   -template string     render the data object with a Go template
   -map NAME=path       map a field for dotenv, shell, or command execution; repeatable
+	-request ALIAS=PATH   request an aliased path; repeatable
   -output path         atomically overwrite a file with mode 0600 instead of stdout
 
 Request flags:
   -token-file path     read the request token from a file
+	-authorizer-address  approval service URL (or BAO_AUTHORIZER_ADDR)
+	-reason string        shared approval reason
+	-allow-partial        return available values when some requests fail
   -timeout duration    approval timeout (default 15m)
   -poll-interval duration
                        approval polling interval (default 5s)
@@ -47,10 +52,13 @@ Examples:
 	bao-cred -field token github/token/project-example
   bao-cred -format dotenv -map DB_USER=username -map DB_PASSWORD=password database/creds/app
   bao-cred -map GH_TOKEN=token github/token/project-example -- gh repo view org/repo
+	bao-cred -request db=database/creds/app -request gh=github/token/project-example \
+	  -map DB_USER=db.username -map GH_TOKEN=gh.token -format dotenv
 `
 
 type options struct {
 	path         string
+	requests     []requestSpec
 	format       string
 	field        string
 	template     string
@@ -59,6 +67,9 @@ type options struct {
 	timeout      time.Duration
 	pollInterval time.Duration
 	quiet        bool
+	authorizer   string
+	reason       string
+	allowPartial bool
 	mappings     []mapping
 	command      []string
 }
@@ -69,6 +80,11 @@ func (m *mappingFlags) String() string { return strings.Join(*m, ",") }
 func (m *mappingFlags) Set(value string) error {
 	*m = append(*m, value)
 	return nil
+}
+
+type requestSpec struct {
+	Alias string
+	Path  string
 }
 
 type exitError struct{ code int }
@@ -126,18 +142,46 @@ func runWithInput(arguments []string, stdin io.Reader, stdout, stderr io.Writer)
 		progress = func(message string) { _, _ = fmt.Fprintln(stderr, message) }
 	}
 
-	data, err := readCredentials(approvalCtx, client, opts.path, opts.pollInterval, progress)
+	requests := opts.requests
+	aliased := len(requests) > 0
+	if !aliased {
+		requests = []requestSpec{{Path: opts.path}}
+	}
+
+	data, requestErrors := readCredentialRequests(approvalCtx, client, token, requests, opts.authorizer, opts.reason, opts.allowPartial, opts.pollInterval, progress)
 	cancel()
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
+	if len(requestErrors) > 0 {
+		for _, requestErr := range requestErrors {
+			if !opts.allowPartial {
+				if errors.Is(requestErr, context.DeadlineExceeded) {
+					return fmt.Errorf("approval did not arrive within %s", opts.timeout)
+				}
+
+				return requestErr
+			}
+
+			_, _ = fmt.Fprintln(stderr, "bao-cred: warning:", requestErr)
+		}
+
+		if len(data) == 0 {
+			return errors.Join(requestErrors...)
+		}
+	}
+
+	if !aliased {
+		data = data[""].(map[string]any)
+	}
+
+	if approvalErr := approvalCtx.Err(); approvalErr != nil && !opts.allowPartial {
+		if errors.Is(approvalErr, context.DeadlineExceeded) {
 			return fmt.Errorf("approval did not arrive within %s", opts.timeout)
 		}
 
-		return err
+		return approvalErr
 	}
 
 	if len(opts.command) > 0 {
-		return execute(rootCtx, opts.command, data, opts.mappings, stdout, stderr)
+		return execute(rootCtx, opts.command, data, availableMappings(opts, data), stdout, stderr)
 	}
 
 	contents, err := render(opts, data)
@@ -382,6 +426,7 @@ func readLoginPassword(stdin io.Reader, stderr io.Writer, fromStdin bool) (strin
 
 func parseOptions(arguments []string, stderr io.Writer) (options, error) {
 	var rawMappings mappingFlags
+	var rawRequests mappingFlags
 	separator := len(arguments)
 	for index, argument := range arguments {
 		if argument == "--" {
@@ -410,14 +455,18 @@ func parseOptions(arguments []string, stderr io.Writer) (options, error) {
 	timeout := flags.Duration("timeout", 15*time.Minute, "approval timeout")
 	pollInterval := flags.Duration("poll-interval", 5*time.Second, "approval polling interval")
 	quiet := flags.Bool("quiet", false, "suppress progress")
+	authorizer := flags.String("authorizer-address", os.Getenv("BAO_AUTHORIZER_ADDR"), "approval service URL")
+	reason := flags.String("reason", "", "shared approval reason")
+	allowPartial := flags.Bool("allow-partial", false, "return available values when some requests fail")
 	flags.Var(&rawMappings, "map", "NAME=dot.path mapping")
+	flags.Var(&rawRequests, "request", "ALIAS=OpenBao path")
 	if err := flags.Parse(flagArguments); err != nil {
 		return options{}, err
 	}
 
-	if flags.NArg() != 1 {
+	if (len(rawRequests) == 0 && flags.NArg() != 1) || (len(rawRequests) > 0 && flags.NArg() != 0) {
 		flags.Usage()
-		return options{}, errors.New("exactly one OpenBao path is required")
+		return options{}, errors.New("provide exactly one OpenBao path or one or more -request values")
 	}
 
 	if *timeout <= 0 || *pollInterval <= 0 {
@@ -434,10 +483,27 @@ func parseOptions(arguments []string, stderr io.Writer) (options, error) {
 		mappings = append(mappings, parsedMapping)
 	}
 
+	requests := make([]requestSpec, 0, len(rawRequests))
+	seenAliases := make(map[string]struct{}, len(rawRequests))
+	for _, raw := range rawRequests {
+		alias, path, ok := strings.Cut(raw, "=")
+		if !ok || !validName(alias) || strings.TrimSpace(path) == "" {
+			return options{}, fmt.Errorf("request must be ALIAS=PATH with a valid alias: %q", raw)
+		}
+
+		if _, duplicate := seenAliases[alias]; duplicate {
+			return options{}, fmt.Errorf("duplicate request alias %q", alias)
+		}
+
+		seenAliases[alias] = struct{}{}
+		requests = append(requests, requestSpec{Alias: alias, Path: path})
+	}
+
 	parsed := options{
 		path: flags.Arg(0), format: *format, field: *field, template: *templateSource,
 		output: *output, tokenFile: *tokenFile, timeout: *timeout, pollInterval: *pollInterval,
-		quiet: *quiet, mappings: mappings, command: command,
+		quiet: *quiet, mappings: mappings, command: command, requests: requests,
+		authorizer: strings.TrimSuffix(*authorizer, "/"), reason: *reason, allowPartial: *allowPartial,
 	}
 	if err := validateOptions(parsed); err != nil {
 		return options{}, err
@@ -521,7 +587,7 @@ func render(options options, data map[string]any) ([]byte, error) {
 		return renderJSON(data)
 	}
 
-	values, err := resolveMappings(data, options.mappings)
+	values, err := resolveMappings(data, availableMappings(options, data))
 	if err != nil {
 		return nil, err
 	}
@@ -531,6 +597,26 @@ func render(options options, data map[string]any) ([]byte, error) {
 	}
 
 	return renderShell(values), nil
+}
+
+func availableMappings(options options, data map[string]any) []mapping {
+	if !options.allowPartial || len(options.requests) == 0 {
+		return options.mappings
+	}
+
+	available := make([]mapping, 0, len(options.mappings))
+	for _, mapping := range options.mappings {
+		segments, err := splitPath(mapping.Path)
+		if err == nil {
+			if _, ok := data[segments[0]]; !ok {
+				continue
+			}
+		}
+
+		available = append(available, mapping)
+	}
+
+	return available
 }
 
 func execute(ctx context.Context, arguments []string, data map[string]any, mappings []mapping, stdout, stderr io.Writer) error {

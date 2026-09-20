@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,7 +24,7 @@ import (
 	"github.com/xtruder/openbao-authorizer/internal/httpapi"
 	"github.com/xtruder/openbao-authorizer/internal/openbao"
 	"github.com/xtruder/openbao-authorizer/internal/push"
-	"github.com/xtruder/openbao-authorizer/internal/scanner"
+	"github.com/xtruder/openbao-authorizer/internal/reconciler"
 	"github.com/xtruder/openbao-authorizer/internal/store"
 	frontend "github.com/xtruder/openbao-authorizer/web"
 )
@@ -51,7 +52,7 @@ func run(configPath string) error {
 
 	bao, err := openbao.New(openbao.Config{
 		Address:      cfg.OpenBaoAddress,
-		ScannerToken: cfg.OpenBaoScannerToken,
+		ServiceToken: cfg.OpenBaoServiceToken,
 		Namespace:    cfg.OpenBaoNamespace,
 		HTTPClient:   httpClient,
 	})
@@ -128,11 +129,12 @@ func run(configPath string) error {
 	}
 
 	notifier := &notificationFanout{events: events, push: pushService}
-	accessorScanner := scanner.New(bao, database, notifier, cfg.ApprovalContext, cfg.ScanConcurrency)
+	decisions := &sync.Mutex{}
+	requestReconciler := reconciler.New(bao, database, notifier, decisions)
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	go scanLoop(rootCtx, logger, accessorScanner, cfg.ScanInterval)
+	go reconcileLoop(rootCtx, logger, requestReconciler, cfg.ReconcileInterval)
 	go apiSweeper(rootCtx, logger, sessions, database)
 	go sessionRenewalLoop(rootCtx, logger, sessions, bao, database)
 
@@ -145,10 +147,13 @@ func run(configPath string) error {
 		VAPIDPublicKey:       cfg.VAPIDPublicKey,
 		ApproverPolicy:       cfg.ApproverPolicy,
 		ExposeRequestData:    cfg.ExposeRequestData,
+		RequireReason:        cfg.RequireReason,
 		ApprovalContext:      cfg.ApprovalContext,
 		InsecureCookies:      cfg.InsecureCookies,
 		Sessions:             sessions,
 		ValidatePushEndpoint: pushService.ValidateEndpoint,
+		NotifyNewGroup:       notifier.NewGroup,
+		DecisionMutex:        decisions,
 	})
 	mux := http.NewServeMux()
 	mux.Handle("/api/", api)
@@ -192,25 +197,27 @@ type notificationFanout struct {
 	push   *push.Service
 }
 
-func (n *notificationFanout) NewRequest(ctx context.Context, id string, request openbao.ControlGroupRequest) error {
-	eventErr := n.events.Publish("new-request", map[string]string{"status": "pending"})
-	pushErr := n.push.NewRequest(ctx, id, request)
-	return errors.Join(eventErr, pushErr)
+func (n *notificationFanout) NewGroup(ctx context.Context, group store.Group) error {
+	return n.push.NewRequest(ctx, group.ID, openbao.ControlGroupRequest{})
 }
 
-func (n *notificationFanout) StatusChanged(_ context.Context, id string, status store.RequestStatus) error {
+func (n *notificationFanout) StatusChanged(_ context.Context, id string, status store.GroupStatus) error {
 	return n.events.Publish("status", map[string]any{"id": id, "status": status})
 }
 
-func scanLoop(ctx context.Context, logger *slog.Logger, accessorScanner *scanner.Scanner, interval time.Duration) {
+type requestReconciler interface {
+	Reconcile(context.Context) error
+}
+
+func reconcileLoop(ctx context.Context, logger *slog.Logger, reconciler requestReconciler, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		scanCtx, cancel := context.WithTimeout(ctx, interval)
-		err := accessorScanner.Scan(scanCtx)
+		reconcileCtx, cancel := context.WithTimeout(ctx, interval)
+		err := reconciler.Reconcile(reconcileCtx)
 		cancel()
 		if err != nil && !errors.Is(err, context.Canceled) {
-			logger.Error("accessor scan failed", "error", err)
+			logger.Error("request reconciliation failed", "error", err)
 		}
 
 		select {

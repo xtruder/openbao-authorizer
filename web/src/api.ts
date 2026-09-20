@@ -1,4 +1,4 @@
-import type { ApprovalRequest, Session } from './types'
+import type { RequestGroup, Session } from './types'
 
 export class ApiError extends Error {
   readonly status: number
@@ -48,17 +48,17 @@ export const api = {
     headers: { 'X-CSRF-Token': csrfToken },
     body: JSON.stringify({}),
   }),
-  getRequests: () => apiFetch<ApprovalRequest[]>('/api/v1/requests'),
-  approveRequest: (id: string, csrfToken: string) => apiFetch<ApprovalRequest>(
-    `/api/v1/requests/${encodeURIComponent(id)}/approve`,
+  getRequestGroups: () => apiFetch<RequestGroup[]>('/api/v1/request-groups'),
+  approveRequestGroup: (id: string, csrfToken: string) => apiFetch<RequestGroup>(
+    `/api/v1/request-groups/${encodeURIComponent(id)}/approve`,
     {
       method: 'POST',
       headers: { 'X-CSRF-Token': csrfToken },
       body: JSON.stringify({}),
     },
   ),
-  rejectRequest: (id: string, csrfToken: string) => apiFetch<ApprovalRequest>(
-    `/api/v1/requests/${encodeURIComponent(id)}/reject`,
+  rejectRequestGroup: (id: string, csrfToken: string) => apiFetch<RequestGroup>(
+    `/api/v1/request-groups/${encodeURIComponent(id)}/reject`,
     {
       method: 'POST',
       headers: { 'X-CSRF-Token': csrfToken },

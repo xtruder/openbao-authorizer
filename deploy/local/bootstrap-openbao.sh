@@ -33,7 +33,7 @@ if ! "${OPENBAO_BIN}" secrets list -format=json | jq -e 'has("kv/")' >/dev/null;
   "${OPENBAO_BIN}" secrets enable -path=kv -version=2 kv >/dev/null
 fi
 
-"${OPENBAO_BIN}" policy write openbao-authorizer-scanner "${PROJECT_DIR}/config/scanner-policy.hcl" >/dev/null
+"${OPENBAO_BIN}" policy write openbao-authorizer-service "${PROJECT_DIR}/config/service-policy.hcl" >/dev/null
 "${OPENBAO_BIN}" policy write openbao-authorizer-github-context "${PROJECT_DIR}/deploy/local/github-context-reader-policy.hcl" >/dev/null
 "${OPENBAO_BIN}" policy write openbao-authorizer-approver "${PROJECT_DIR}/config/approver-policy.hcl" >/dev/null
 "${OPENBAO_BIN}" policy write openbao-authorizer-requester "${PROJECT_DIR}/deploy/local/requester-policy.hcl" >/dev/null
@@ -106,15 +106,15 @@ if [[ -n "${GITHUB_APP_ID:-}" || -e "${GITHUB_APP_PRIVATE_KEY_FILE}" ]]; then
   fi
 fi
 
-scanner_response="$("${OPENBAO_BIN}" write -format=json auth/token/create-orphan \
-  policies=openbao-authorizer-scanner,openbao-authorizer-github-context no_default_policy=true ttl=24h renewable=false)"
-scanner_token="$(jq -er '.auth.client_token' <<<"${scanner_response}")"
+service_response="$("${OPENBAO_BIN}" write -format=json auth/token/create-orphan \
+  policies=openbao-authorizer-service,openbao-authorizer-github-context no_default_policy=true ttl=24h renewable=false)"
+service_token="$(jq -er '.auth.client_token' <<<"${service_response}")"
 
 config_directory="$(dirname "${APP_CONFIG_FILE}")"
 install -d -m 0700 "${config_directory}"
 printf '%s\n' "${APP_ENCRYPTION_KEY}" >"${config_directory}/encryption-key"
-printf '%s\n' "${scanner_token}" >"${config_directory}/scanner-token"
-chmod 0600 "${config_directory}/encryption-key" "${config_directory}/scanner-token"
+printf '%s\n' "${service_token}" >"${config_directory}/service-token"
+chmod 0600 "${config_directory}/encryption-key" "${config_directory}/service-token"
 
 temporary="${APP_CONFIG_FILE}.tmp.$$"
 cat >"${temporary}" <<EOF
@@ -132,15 +132,15 @@ openbao {
   address            = $(jq -Rn --arg value "${BAO_ADDR}" '$value')
   namespace          = ""
   ca_file            = ""
-  scanner_token_file = "scanner-token"
+  service_token_file = "service-token"
   approver_policy    = "openbao-authorizer-approver"
 }
-scanner {
-  interval    = "5s"
-  concurrency = 8
+reconciliation {
+  interval = "5s"
 }
 requests {
-  expose_data = false
+  expose_data    = false
+  require_reason = false
 }
 approval_context "github-token" {
   match_path = "github/token/{name}"

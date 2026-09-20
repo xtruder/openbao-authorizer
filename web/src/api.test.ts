@@ -28,8 +28,13 @@ describe('push subscription API', () => {
     ))
     vi.stubGlobal('fetch', fetchMock)
 
-    await expect(api.rejectRequest('request-id', 'csrf-token')).rejects.toEqual(
+    await expect(api.rejectRequestGroup('group-id', 'csrf-token')).rejects.toEqual(
       new ApiError(message, 502),
     )
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/request-groups/group-id/reject', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({}),
+    }))
   })
 })

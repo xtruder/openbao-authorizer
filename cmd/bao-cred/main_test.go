@@ -46,6 +46,40 @@ func TestParseRejectsDuplicateMappings(t *testing.T) {
 	}
 }
 
+func TestParseAliasedRequests(t *testing.T) {
+	parsed, err := parseOptions([]string{
+		"-request", "db=database/creds/app",
+		"-request", "gh=github/token/dev",
+		"-map", "DB_PASSWORD=db.password",
+		"-map", "GH_TOKEN=gh.token",
+		"-format", "dotenv",
+		"-reason", "local development",
+		"-authorizer-address", "https://approvals.example.test/",
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(parsed.requests) != 2 || parsed.requests[0].Alias != "db" || parsed.requests[1].Path != "github/token/dev" {
+		t.Fatalf("requests = %#v", parsed.requests)
+	}
+
+	if parsed.reason != "local development" || parsed.authorizer != "https://approvals.example.test" {
+		t.Fatalf("options = %#v", parsed)
+	}
+}
+
+func TestParseRejectsDuplicateRequestAliasesAndMixedPositionalPath(t *testing.T) {
+	for _, arguments := range [][]string{
+		{"-request", "db=one", "-request", "db=two"},
+		{"-request", "db=one", "legacy/path"},
+	} {
+		if _, err := parseOptions(arguments, &bytes.Buffer{}); err == nil {
+			t.Fatalf("arguments %#v unexpectedly succeeded", arguments)
+		}
+	}
+}
+
 func TestRequestTokenPriority(t *testing.T) {
 	directory := t.TempDir()
 	explicit := filepath.Join(directory, "explicit")

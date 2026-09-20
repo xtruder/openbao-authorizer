@@ -28,7 +28,7 @@ const (
 	bobPassword     = "bob-e2e-password"
 	requesterPolicy = "e2e-requester"
 	approverPolicy  = "e2e-approver"
-	scannerPolicy   = "e2e-scanner"
+	servicePolicy   = "e2e-service"
 )
 
 func TestOpenBaoControlGroupWorkflow(t *testing.T) {
@@ -121,7 +121,7 @@ func TestOpenBaoControlGroupWorkflow(t *testing.T) {
 	mustCall(t, ctx, bao, rootToken, http.MethodPost, "sys/auth/userpass", map[string]string{"type": "userpass"}, http.StatusOK, http.StatusNoContent)
 	writePolicy(ctx, t, bao, repositoryRoot, requesterPolicy, "requester.hcl")
 	writePolicy(ctx, t, bao, repositoryRoot, approverPolicy, "approver.hcl")
-	writePolicy(ctx, t, bao, repositoryRoot, scannerPolicy, "scanner.hcl")
+	writePolicy(ctx, t, bao, repositoryRoot, servicePolicy, "service.hcl")
 
 	authResponse := mustCall(t, ctx, bao, rootToken, http.MethodGet, "sys/auth", nil, http.StatusOK)
 	var authMounts struct {
@@ -150,72 +150,56 @@ func TestOpenBaoControlGroupWorkflow(t *testing.T) {
 	bob := loginUserpass(ctx, t, bao, "bob", bobPassword)
 	assertIdentityLogin(t, "Bob", bob, bobEntityID, approverPolicy)
 
-	scannerCreate := mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/token/create-orphan", map[string]any{
-		"policies": []string{scannerPolicy}, "no_default_policy": true, "ttl": "20m",
+	serviceCreate := mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/token/create-orphan", map[string]any{
+		"policies": []string{servicePolicy}, "no_default_policy": true, "ttl": "20m",
 	}, http.StatusOK)
-	var scannerEnvelope loginEnvelope
-	decodeResponse(t, scannerCreate, &scannerEnvelope)
-	scannerToken := scannerEnvelope.Auth.ClientToken
-	if scannerToken == "" {
-		t.Fatal("scanner token creation returned an empty token")
+	var serviceEnvelope loginEnvelope
+	decodeResponse(t, serviceCreate, &serviceEnvelope)
+	serviceToken := serviceEnvelope.Auth.ClientToken
+	if serviceToken == "" {
+		t.Fatal("service token creation returned an empty token")
 	}
 
-	lookup := mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/token/lookup", map[string]string{"token": scannerToken}, http.StatusOK)
+	lookup := mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/token/lookup", map[string]string{"token": serviceToken}, http.StatusOK)
 	var lookupEnvelope struct {
 		Data struct {
 			Policies []string `json:"policies"`
 		} `json:"data"`
 	}
 	decodeResponse(t, lookup, &lookupEnvelope)
-	if len(lookupEnvelope.Data.Policies) != 1 || lookupEnvelope.Data.Policies[0] != scannerPolicy {
-		t.Fatalf("scanner policies = %v, want only %q", lookupEnvelope.Data.Policies, scannerPolicy)
+	if len(lookupEnvelope.Data.Policies) != 1 || lookupEnvelope.Data.Policies[0] != servicePolicy {
+		t.Fatalf("service policies = %v, want only %q", lookupEnvelope.Data.Policies, servicePolicy)
 	}
 
-	marker := fmt.Sprintf("marker-%d", time.Now().UnixNano())
-	deferredWrite := mustCall(t, ctx, bao, alice.Auth.ClientToken, http.MethodPost, "kv/data/payroll", map[string]any{
-		"data": map[string]string{"status": "approved", "marker": marker},
-	}, http.StatusOK)
-	var wrapping struct {
-		WrapInfo struct {
-			Token    string `json:"token"`
-			Accessor string `json:"accessor"`
-		} `json:"wrap_info"`
-	}
-	decodeResponse(t, deferredWrite, &wrapping)
-	if wrapping.WrapInfo.Token == "" || wrapping.WrapInfo.Accessor == "" {
-		t.Fatal("protected write did not return a wrapping token and accessor")
+	firstMarker := fmt.Sprintf("first-%d", time.Now().UnixNano())
+	secondMarker := fmt.Sprintf("second-%d", time.Now().UnixNano())
+	approvedWrappings := []wrappingInfo{
+		issueProtectedWrite(ctx, t, bao, alice.Auth.ClientToken, "approved-first", firstMarker),
+		issueProtectedWrite(ctx, t, bao, alice.Auth.ClientToken, "approved-second", secondMarker),
 	}
 
 	mustCall(t, ctx, bao, rootToken, http.MethodGet, "kv/data/payroll", nil, http.StatusNotFound)
 
-	accessorList := mustCall(t, ctx, bao, scannerToken, "LIST", "auth/token/accessors", nil, http.StatusOK)
-	var accessors struct {
-		Data struct {
-			Keys []string `json:"keys"`
-		} `json:"data"`
-	}
-	decodeResponse(t, accessorList, &accessors)
-	if !slices.Contains(accessors.Data.Keys, wrapping.WrapInfo.Accessor) {
-		t.Fatal("scanner LIST did not include the control-group wrapping accessor")
-	}
-
-	accessorPayload := map[string]string{"accessor": wrapping.WrapInfo.Accessor}
-	pending := inspectControlGroup(ctx, t, bao, scannerToken, accessorPayload)
+	accessorPayload := map[string]string{"accessor": approvedWrappings[0].Accessor}
+	pending := inspectControlGroup(ctx, t, bao, serviceToken, accessorPayload)
 	if pending.Approved || pending.RequestPath != "kv/data/payroll" || pending.RequestOperation != "create" || pending.RequestEntity.Name != "Alice" {
 		t.Fatalf("unexpected pending request: %+v", pending)
 	}
 
-	if pending.RequestData.Data.Marker != marker {
-		t.Fatalf("scanner request marker = %q, want %q", pending.RequestData.Data.Marker, marker)
+	if pending.RequestData.Data.Marker != firstMarker {
+		t.Fatalf("service request marker = %q, want %q", pending.RequestData.Data.Marker, firstMarker)
 	}
 
-	mustCall(t, ctx, bao, scannerToken, http.MethodPost, "sys/control-group/authorize", accessorPayload, http.StatusForbidden)
-	unchanged := inspectControlGroup(ctx, t, bao, scannerToken, accessorPayload)
+	mustCall(t, ctx, bao, serviceToken, http.MethodPost, "sys/control-group/authorize", accessorPayload, http.StatusForbidden)
+	unchanged := inspectControlGroup(ctx, t, bao, serviceToken, accessorPayload)
 	if unchanged.Approved || len(unchanged.Authorizations) != 0 {
-		t.Fatalf("denied scanner authorization changed state: %+v", unchanged)
+		t.Fatalf("denied service authorization changed state: %+v", unchanged)
 	}
 
-	t.Log("least-privilege scanner listed and inspected the request but was denied authorization")
+	revocationProbe := issueProtectedWrite(ctx, t, bao, alice.Auth.ClientToken, "must-not-run", "service-revocation-probe")
+	mustCall(t, ctx, bao, serviceToken, http.MethodPost, "auth/token/revoke-accessor", map[string]string{"accessor": revocationProbe.Accessor}, http.StatusOK, http.StatusNoContent)
+	mustCall(t, ctx, bao, serviceToken, http.MethodPost, "sys/control-group/request", map[string]string{"accessor": revocationProbe.Accessor}, http.StatusBadRequest, http.StatusNotFound)
+	t.Log("least-privilege service token inspected and revoked requests but was denied authorization")
 
 	appLog := filepath.Join(runtimeDirectory, "app.log")
 	encryptionKey := make([]byte, 32)
@@ -233,9 +217,9 @@ func TestOpenBaoControlGroupWorkflow(t *testing.T) {
 		t.Fatalf("write encryption key: %v", writeErr)
 	}
 
-	scannerTokenFile := filepath.Join(runtimeDirectory, "scanner-token")
-	if writeErr := os.WriteFile(scannerTokenFile, []byte(scannerToken), 0o600); writeErr != nil {
-		t.Fatalf("write scanner token: %v", writeErr)
+	serviceTokenFile := filepath.Join(runtimeDirectory, "service-token")
+	if writeErr := os.WriteFile(serviceTokenFile, []byte(serviceToken), 0o600); writeErr != nil {
+		t.Fatalf("write service token: %v", writeErr)
 	}
 
 	appConfig := filepath.Join(runtimeDirectory, "app.hcl")
@@ -254,17 +238,17 @@ openbao {
   address            = %q
   namespace          = ""
   ca_file            = ""
-  scanner_token_file = %q
+  service_token_file = %q
   approver_policy    = %q
 }
-scanner {
-  interval    = "1s"
-  concurrency = 8
+reconciliation {
+  interval = "1s"
 }
 requests {
-  expose_data = false
+  expose_data    = false
+  require_reason = true
 }
-`, staticDirectory, filepath.Join(runtimeDirectory, "app.db"), encryptionKeyFile, strings.TrimSuffix(bao.baseURL, "/v1"), scannerTokenFile, approverPolicy)
+`, staticDirectory, filepath.Join(runtimeDirectory, "app.db"), encryptionKeyFile, strings.TrimSuffix(bao.baseURL, "/v1"), serviceTokenFile, approverPolicy)
 	if writeErr := os.WriteFile(appConfig, []byte(configuration), 0o600); writeErr != nil {
 		t.Fatalf("write application config: %v", writeErr)
 	}
@@ -294,6 +278,12 @@ requests {
 		port:    appPort,
 	}
 	mustCall(t, ctx, application, "", http.MethodGet, "healthz", nil, http.StatusOK)
+	select {
+	case <-time.After(1500 * time.Millisecond):
+	case <-ctx.Done():
+		t.Fatalf("wait beyond reconciliation interval: %v", ctx.Err())
+	}
+
 	loginResponse := mustCall(t, ctx, application, "", http.MethodPost, "api/v1/session", map[string]string{"username": "bob", "password": bobPassword}, http.StatusOK)
 	var appSession struct {
 		CSRFToken string `json:"csrfToken"`
@@ -306,68 +296,128 @@ requests {
 		t.Fatalf("application login returned unexpected session: %+v", appSession)
 	}
 
-	requestID := waitForApplicationRequest(t, ctx, application, "kv/data/payroll")
+	emptyList := mustCall(t, ctx, application, "", http.MethodGet, "api/v1/request-groups", nil, http.StatusOK)
+	var groups []applicationRequestGroup
+	decodeResponse(t, emptyList, &groups)
+	if len(groups) != 0 {
+		t.Fatalf("application discovered unsubmitted OpenBao requests: %+v", groups)
+	}
+
+	mustCallWithHeaders(t, ctx, application, "", http.MethodDelete, "api/v1/session", map[string]any{}, map[string]string{"X-CSRF-Token": appSession.CSRFToken}, http.StatusNoContent)
+
+	approvedReason := "Apply ordered payroll updates"
+	approvedSubmission := map[string]any{
+		"idempotencyKey": "e2e-approved-batch",
+		"reason":         approvedReason,
+		"accessors":      []string{approvedWrappings[0].Accessor, approvedWrappings[1].Accessor},
+	}
+	createdResponse := mustCall(t, ctx, application, alice.Auth.ClientToken, http.MethodPost, "api/v1/request-groups", approvedSubmission, http.StatusCreated)
+	var createdGroup applicationRequestGroup
+	decodeResponse(t, createdResponse, &createdGroup)
+	if createdGroup.ID == "" || len(createdGroup.Requests) != 2 {
+		t.Fatalf("unexpected explicit request-group submission: %+v", createdGroup)
+	}
+
+	retryResponse := mustCall(t, ctx, application, alice.Auth.ClientToken, http.MethodPost, "api/v1/request-groups", approvedSubmission, http.StatusOK)
+	var retriedGroup applicationRequestGroup
+	decodeResponse(t, retryResponse, &retriedGroup)
+	if retriedGroup.ID != createdGroup.ID {
+		t.Fatalf("idempotent resubmission group ID = %q, want %q", retriedGroup.ID, createdGroup.ID)
+	}
+
+	loginResponse = mustCall(t, ctx, application, "", http.MethodPost, "api/v1/session", map[string]string{"username": "bob", "password": bobPassword}, http.StatusOK)
+	decodeResponse(t, loginResponse, &appSession)
+	if appSession.CSRFToken == "" || appSession.Identity.EntityID != bobEntityID {
+		t.Fatalf("application approval login returned unexpected session: %+v", appSession)
+	}
+
+	groupsResponse := mustCall(t, ctx, application, "", http.MethodGet, "api/v1/request-groups", nil, http.StatusOK)
+	decodeResponse(t, groupsResponse, &groups)
+	if len(groups) != 1 {
+		t.Fatalf("listed request groups = %+v, want one", groups)
+	}
+
+	listedGroup := groups[0]
+	if listedGroup.ID != createdGroup.ID || listedGroup.Reason != approvedReason || listedGroup.Status != "pending" || listedGroup.Entity.Name != "userpass-alice" {
+		t.Fatalf("unexpected listed request group: %+v", listedGroup)
+	}
+
+	if len(listedGroup.Requests) != 2 || listedGroup.Requests[0].Position != 0 || listedGroup.Requests[1].Position != 1 {
+		t.Fatalf("listed request members are not in submission order: %+v", listedGroup.Requests)
+	}
+
+	if listedGroup.Requests[0].ID != createdGroup.Requests[0].ID || listedGroup.Requests[1].ID != createdGroup.Requests[1].ID {
+		t.Fatalf("listed request member order changed: created=%+v listed=%+v", createdGroup.Requests, listedGroup.Requests)
+	}
+
+	for _, request := range listedGroup.Requests {
+		if request.Path != "kv/data/payroll" || request.Operation != "create" || len(request.Data) != 0 {
+			t.Fatalf("unexpected listed request member: %+v", request)
+		}
+	}
+
 	approvalHeaders := map[string]string{"X-CSRF-Token": appSession.CSRFToken}
-	approval := mustCallWithHeaders(t, ctx, application, "", http.MethodPost, "api/v1/requests/"+url.PathEscape(requestID)+"/approve", map[string]any{}, approvalHeaders, http.StatusOK)
-	var approvedApplicationRequest struct {
-		Approved bool `json:"approved"`
-	}
-	decodeResponse(t, approval, &approvedApplicationRequest)
-	if !approvedApplicationRequest.Approved {
-		t.Fatal("application approval response was not approved")
+	approval := mustCallWithHeaders(t, ctx, application, "", http.MethodPost, "api/v1/request-groups/"+url.PathEscape(createdGroup.ID)+"/approve", map[string]any{}, approvalHeaders, http.StatusOK)
+	var approvedGroup applicationRequestGroup
+	decodeResponse(t, approval, &approvedGroup)
+	if approvedGroup.Status != "approved" || len(approvedGroup.Requests) != 2 {
+		t.Fatalf("application approval response was not approved: %+v", approvedGroup)
 	}
 
-	t.Log("application discovered the request, logged in Bob, and approved through its CSRF-protected API")
+	for _, request := range approvedGroup.Requests {
+		if !request.Approved || request.Status != "approved" {
+			t.Fatalf("application did not approve every group member: %+v", approvedGroup.Requests)
+		}
+	}
 
-	approved := inspectControlGroup(ctx, t, bao, scannerToken, accessorPayload)
-	if !approved.Approved || len(approved.Authorizations) != 1 {
-		t.Fatalf("expected one human authorization, got %+v", approved)
+	for _, wrapping := range approvedWrappings {
+		approved := inspectControlGroup(ctx, t, bao, serviceToken, map[string]string{"accessor": wrapping.Accessor})
+		if !approved.Approved || len(approved.Authorizations) != 1 {
+			t.Fatalf("expected one human authorization, got %+v", approved)
+		}
 	}
 
 	mustCall(t, ctx, bao, rootToken, http.MethodGet, "kv/data/payroll", nil, http.StatusNotFound)
-	mustCall(t, ctx, bao, wrapping.WrapInfo.Token, http.MethodPost, "sys/wrapping/unwrap", map[string]any{}, http.StatusOK, http.StatusNoContent)
+	mustCall(t, ctx, bao, approvedWrappings[0].Token, http.MethodPost, "sys/wrapping/unwrap", map[string]any{}, http.StatusOK, http.StatusNoContent)
+	assertPayrollSecret(ctx, t, bao, "approved-first", firstMarker)
+	mustCall(t, ctx, bao, approvedWrappings[1].Token, http.MethodPost, "sys/wrapping/unwrap", map[string]any{}, http.StatusOK, http.StatusNoContent)
+	assertPayrollSecret(ctx, t, bao, "approved-second", secondMarker)
+	t.Log("application approved an explicit ordered group through its CSRF-protected API")
 
-	secretResponse := mustCall(t, ctx, bao, rootToken, http.MethodGet, "kv/data/payroll", nil, http.StatusOK)
-	var secret struct {
-		Data struct {
-			Data struct {
-				Status string `json:"status"`
-				Marker string `json:"marker"`
-			} `json:"data"`
-		} `json:"data"`
+	rejectedWrappings := []wrappingInfo{
+		issueProtectedWrite(ctx, t, bao, alice.Auth.ClientToken, "must-not-run", "rejected-first"),
+		issueProtectedWrite(ctx, t, bao, alice.Auth.ClientToken, "must-not-run", "rejected-second"),
 	}
-	decodeResponse(t, secretResponse, &secret)
-	if secret.Data.Data.Status != "approved" || secret.Data.Data.Marker != marker {
-		t.Fatalf("resulting secret = %+v, want approved marker %q", secret.Data.Data, marker)
+	rejectedSubmission := map[string]any{
+		"idempotencyKey": "e2e-rejected-batch",
+		"reason":         "Reject ordered payroll updates",
+		"accessors":      []string{rejectedWrappings[0].Accessor, rejectedWrappings[1].Accessor},
 	}
-
-	rejectedWrite := mustCall(t, ctx, bao, alice.Auth.ClientToken, http.MethodPost, "kv/data/payroll", map[string]any{
-		"data": map[string]string{"status": "must-not-run", "marker": "rejected"},
-	}, http.StatusOK)
-	var rejectedWrapping struct {
-		WrapInfo struct {
-			Token    string `json:"token"`
-			Accessor string `json:"accessor"`
-		} `json:"wrap_info"`
-	}
-	decodeResponse(t, rejectedWrite, &rejectedWrapping)
-	if rejectedWrapping.WrapInfo.Token == "" || rejectedWrapping.WrapInfo.Accessor == "" {
-		t.Fatal("second protected write did not return wrapping details")
+	rejectedResponse := mustCall(t, ctx, application, alice.Auth.ClientToken, http.MethodPost, "api/v1/request-groups", rejectedSubmission, http.StatusCreated)
+	var rejectedGroup applicationRequestGroup
+	decodeResponse(t, rejectedResponse, &rejectedGroup)
+	if rejectedGroup.ID == "" || len(rejectedGroup.Requests) != 2 {
+		t.Fatalf("unexpected rejected-group submission: %+v", rejectedGroup)
 	}
 
-	rejectedID := waitForApplicationRequest(t, ctx, application, "kv/data/payroll")
-	rejection := mustCallWithHeaders(t, ctx, application, "", http.MethodPost, "api/v1/requests/"+url.PathEscape(rejectedID)+"/reject", map[string]any{}, approvalHeaders, http.StatusOK)
-	var rejectedApplicationRequest struct {
-		Status string `json:"status"`
-	}
-	decodeResponse(t, rejection, &rejectedApplicationRequest)
-	if rejectedApplicationRequest.Status != "rejected" {
-		t.Fatalf("application rejection status = %q", rejectedApplicationRequest.Status)
+	rejection := mustCallWithHeaders(t, ctx, application, "", http.MethodPost, "api/v1/request-groups/"+url.PathEscape(rejectedGroup.ID)+"/reject", map[string]any{}, approvalHeaders, http.StatusOK)
+	decodeResponse(t, rejection, &rejectedGroup)
+	if rejectedGroup.Status != "rejected" {
+		t.Fatalf("application rejection status = %q", rejectedGroup.Status)
 	}
 
-	mustCall(t, ctx, bao, scannerToken, http.MethodPost, "sys/control-group/request", map[string]string{"accessor": rejectedWrapping.WrapInfo.Accessor}, http.StatusBadRequest, http.StatusNotFound)
+	for _, request := range rejectedGroup.Requests {
+		if request.Status != "rejected" {
+			t.Fatalf("application did not reject every group member: %+v", rejectedGroup.Requests)
+		}
+	}
 
-	t.Log("application rejected a second request and revoked its wrapping token")
+	for _, wrapping := range rejectedWrappings {
+		mustCall(t, ctx, bao, serviceToken, http.MethodPost, "sys/control-group/request", map[string]string{"accessor": wrapping.Accessor}, http.StatusBadRequest, http.StatusNotFound)
+	}
+
+	assertPayrollSecret(ctx, t, bao, "approved-second", secondMarker)
+	t.Log("application rejected an explicit group and revoked every wrapping accessor")
 
 	t.Log("real OpenBao control-group workflow passed")
 }
@@ -400,6 +450,29 @@ type loginEnvelope struct {
 		EntityID         string   `json:"entity_id"`
 		IdentityPolicies []string `json:"identity_policies"`
 	} `json:"auth"`
+}
+
+type wrappingInfo struct {
+	Token    string `json:"token"`
+	Accessor string `json:"accessor"`
+}
+
+type applicationRequestGroup struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason"`
+	Status string `json:"status"`
+	Entity struct {
+		Name string `json:"name"`
+	} `json:"entity"`
+	Requests []struct {
+		ID        string          `json:"id"`
+		Position  int             `json:"position"`
+		Approved  bool            `json:"approved"`
+		Status    string          `json:"status"`
+		Operation string          `json:"operation"`
+		Path      string          `json:"path"`
+		Data      json.RawMessage `json:"data"`
+	} `json:"requests"`
 }
 
 type controlGroupEnvelope struct {
@@ -553,35 +626,37 @@ type controlGroupEnvelopeData = struct {
 	Authorizations []json.RawMessage `json:"authorizations"`
 }
 
-func waitForApplicationRequest(t *testing.T, ctx context.Context, application *liveAPI, path string) string { //nolint:revive // testing.T stays first in test helpers.
+func issueProtectedWrite(ctx context.Context, t *testing.T, api *liveAPI, token, status, marker string) wrappingInfo {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		response, status, err := callAPI(ctx, application, "", http.MethodGet, "api/v1/requests", nil, nil)
-		if err == nil && status == http.StatusOK {
-			var requests []struct {
-				ID     string `json:"id"`
-				Path   string `json:"path"`
-				Status string `json:"status"`
-			}
-			if json.Unmarshal(response, &requests) == nil {
-				for _, request := range requests {
-					if request.Path == path && request.ID != "" && request.Status == "pending" {
-						return request.ID
-					}
-				}
-			}
-		}
-
-		select {
-		case <-ctx.Done():
-			t.Fatalf("wait for application request: %v", ctx.Err())
-		case <-time.After(100 * time.Millisecond):
-		}
+	response := mustCall(t, ctx, api, token, http.MethodPost, "kv/data/payroll", map[string]any{
+		"data": map[string]string{"status": status, "marker": marker},
+	}, http.StatusOK)
+	var envelope struct {
+		WrapInfo wrappingInfo `json:"wrap_info"`
+	}
+	decodeResponse(t, response, &envelope)
+	if envelope.WrapInfo.Token == "" || envelope.WrapInfo.Accessor == "" {
+		t.Fatalf("protected write %q did not return wrapping details", marker)
 	}
 
-	t.Fatalf("application did not discover %s within 30 seconds", path)
-	return ""
+	return envelope.WrapInfo
+}
+
+func assertPayrollSecret(ctx context.Context, t *testing.T, api *liveAPI, status, marker string) {
+	t.Helper()
+	response := mustCall(t, ctx, api, rootToken, http.MethodGet, "kv/data/payroll", nil, http.StatusOK)
+	var secret struct {
+		Data struct {
+			Data struct {
+				Status string `json:"status"`
+				Marker string `json:"marker"`
+			} `json:"data"`
+		} `json:"data"`
+	}
+	decodeResponse(t, response, &secret)
+	if secret.Data.Data.Status != status || secret.Data.Data.Marker != marker {
+		t.Fatalf("resulting secret = %+v, want status %q marker %q", secret.Data.Data, status, marker)
+	}
 }
 
 func mustCall(t *testing.T, ctx context.Context, api *liveAPI, token, method, path string, payload any, expected ...int) []byte { //nolint:revive // testing.T stays first in test helpers.

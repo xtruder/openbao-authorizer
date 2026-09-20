@@ -45,15 +45,16 @@ All credentials, OpenBao state, and application state are disposable. The test v
 
 - userpass aliases bind Alice and Bob to explicit identity entities;
 - Alice belongs to `e2e-requesters`, Bob belongs to `e2e-approvers`, and both inherit policy through their identity groups;
-- Alice's write to `kv/data/payroll` is deferred by a factor with `approvals = 1` and `self_auth_allowed = false`;
-- the scanner token has only `e2e-scanner`, can list service-token accessors with `sudo`, inspect `sys/control-group/request`, and revoke a rejected wrapping token by accessor;
-- the scanner receives HTTP 403 from `sys/control-group/authorize`, and the denied call does not change request state;
-- the real application scanner discovers and persists the pending request;
+- Alice's writes to `kv/data/payroll` are deferred by a factor with `approvals = 1` and `self_auth_allowed = false`;
+- the service token has only `e2e-service`, can inspect explicitly supplied accessors and revoke rejected wrapping tokens, but cannot list all accessors;
+- the service token receives HTTP 403 from `sys/control-group/authorize`, and the denied call does not change request state;
+- unsubmitted requests do not appear in the application;
+- Alice submits an ordered two-member group with a shared reason and an idempotency key;
 - Bob logs in through `POST /api/v1/session`;
 - the application's CSRF-protected approval endpoint authorizes with Bob's human token;
-- exactly one human authorization is recorded;
+- exactly one human authorization is recorded on each member;
 - the secret does not exist before unwrap;
-- Alice's single-use wrapping token executes the approved deferred write; and
+- Alice's wrapping tokens execute the approved deferred writes; and
 - the resulting KV value matches the unique per-run marker.
 
 Policy fixtures are in [`policies/`](policies/).
