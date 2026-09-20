@@ -190,10 +190,13 @@ not log it.
 
 ### Configuration
 
-The server accepts one HCL file through `-config`; environment variables are not
-used for server configuration. The example file documents every required block.
-Encryption keys, scanner tokens, and optional VAPID keys are read from files so
-secret values do not appear in HCL or the process environment.
+The server accepts one HCL file through `-config`. String attributes may
+explicitly reference process environment variables through expressions such as
+`public_origin = "https://authorizer.${env.DOMAIN_NAME}"`; environment variables
+do not implicitly override HCL attributes. The example file documents every
+required block. Encryption keys, scanner tokens, and optional VAPID keys are
+read from files so secret values do not appear in HCL or the process
+environment.
 
 An `approval_context` block maps a reviewed request path to a safe, read-only
 OpenBao endpoint. Placeholders capture complete path segments and are escaped

@@ -6,6 +6,7 @@ require (
 	github.com/SherClockHolmes/webpush-go v1.4.0
 	github.com/hashicorp/hcl/v2 v2.25.0
 	github.com/openbao/openbao/api/v2 v2.7.0
+	github.com/zclconf/go-cty v1.19.0
 	golang.org/x/sys v0.47.0
 	modernc.org/sqlite v1.58.0
 )
@@ -35,7 +36,6 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/ryanuber/go-glob v1.0.0 // indirect
-	github.com/zclconf/go-cty v1.19.0 // indirect
 	golang.org/x/crypto v0.55.0 // indirect
 	golang.org/x/mod v0.38.0 // indirect
 	golang.org/x/net v0.58.0 // indirect

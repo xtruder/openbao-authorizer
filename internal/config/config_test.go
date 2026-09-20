@@ -9,13 +9,14 @@ import (
 
 func TestLoadHCLConfigurationAndSecretFiles(t *testing.T) {
 	directory := t.TempDir()
+	t.Setenv("AUTHORIZER_ORIGIN", "https://authorizer.example.test")
 	writeTestFile(t, directory, "encryption-key", base64.StdEncoding.EncodeToString(make([]byte, 32)))
 	writeTestFile(t, directory, "scanner-token", "scanner-secret")
 	configPath := writeTestFile(t, directory, "app.hcl", `
 server {
   listen_address    = "127.0.0.1:9090"
-  public_origin     = ""
-  insecure_cookies  = true
+  public_origin     = env.AUTHORIZER_ORIGIN
+  insecure_cookies  = false
   static_directory  = ""
 }
 storage {
@@ -49,6 +50,10 @@ approval_context "github-token" {
 
 	if configuration.OpenBaoScannerToken != "scanner-secret" || configuration.ScanConcurrency != 4 {
 		t.Fatalf("configuration = %#v", configuration)
+	}
+
+	if configuration.PublicOrigin != "https://authorizer.example.test" {
+		t.Fatalf("PublicOrigin = %q", configuration.PublicOrigin)
 	}
 
 	if configuration.DatabasePath != filepath.Join(directory, "state/app.db") {

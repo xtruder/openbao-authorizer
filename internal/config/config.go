@@ -10,9 +10,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/gohcl"
 	"github.com/hashicorp/hcl/v2/hclparse"
 	"github.com/xtruder/openbao-authorizer/internal/approvalcontext"
+	"github.com/zclconf/go-cty/cty"
 )
 
 // Config is the complete validated server configuration.
@@ -97,7 +99,7 @@ func Load(path string) (Config, error) {
 	}
 
 	var raw fileConfig
-	if diagnostics := gohcl.DecodeBody(file.Body, nil, &raw); diagnostics.HasErrors() {
+	if diagnostics := gohcl.DecodeBody(file.Body, environmentEvalContext(), &raw); diagnostics.HasErrors() {
 		return Config{}, fmt.Errorf("decode configuration: %s", diagnostics.Error())
 	}
 
@@ -193,6 +195,20 @@ func Load(path string) (Config, error) {
 	}
 
 	return result, nil
+}
+
+func environmentEvalContext() *hcl.EvalContext {
+	values := make(map[string]cty.Value)
+	for _, entry := range os.Environ() {
+		name, value, _ := strings.Cut(entry, "=")
+		values[name] = cty.StringVal(value)
+	}
+
+	return &hcl.EvalContext{
+		Variables: map[string]cty.Value{
+			"env": cty.ObjectVal(values),
+		},
+	}
 }
 
 func readFile(path, field string) (string, error) {
