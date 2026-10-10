@@ -1,4 +1,5 @@
-// Package store provides encrypted SQLite persistence for discovered requests.
+// Package store provides encrypted SQLite persistence for Grant Requests,
+// Grants, approver sessions and push subscriptions.
 package store
 
 import (
@@ -18,7 +19,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/xtruder/openbao-authorizer/internal/openbao"
 	// modernc.org/sqlite registers the database/sql driver.
 	_ "modernc.org/sqlite"
 )
@@ -30,57 +30,12 @@ type DB struct {
 	key  []byte
 }
 
-// ApprovalContextUpdate controls whether an upsert preserves or replaces stored context.
-type ApprovalContextUpdate uint8
-
-const (
-	// PreserveApprovalContext retains the existing context when updating a request.
-	PreserveApprovalContext ApprovalContextUpdate = iota
-	// ReplaceApprovalContext writes the request's context, including an explicit nil value.
-	ReplaceApprovalContext
-)
-
-// UpsertOptions controls fields whose absence has distinct preserve and clear meanings.
-type UpsertOptions struct {
-	ApprovalContext ApprovalContextUpdate
-}
-
-// RequestStatus is the durable lifecycle state of a control-group request.
-type RequestStatus string
-
-const (
-	// RequestPending can still be approved or rejected.
-	RequestPending RequestStatus = "pending"
-	// RequestApproved was authorized by the control group.
-	RequestApproved RequestStatus = "approved"
-	// RequestRejected was explicitly revoked by an approver.
-	RequestRejected RequestStatus = "rejected"
-	// RequestExpired disappeared before an approval decision.
-	RequestExpired RequestStatus = "expired"
-)
-
-// Request is a stored control-group request. The raw accessor is intentionally absent.
-type Request struct {
-	ID              string                   `json:"id"`
-	Approved        bool                     `json:"approved"`
-	Status          RequestStatus            `json:"status"`
-	Operation       string                   `json:"operation"`
-	Path            string                   `json:"path"`
-	Data            json.RawMessage          `json:"data,omitempty"`
-	ApprovalContext *openbao.ApprovalContext `json:"approvalContext,omitempty"`
-	Entity          openbao.Entity           `json:"entity"`
-	Authorizations  []openbao.Authorization  `json:"authorizations"`
-	FirstSeen       time.Time                `json:"firstSeen"`
-	LastSeen        time.Time                `json:"lastSeen"`
-}
-
-// Session is an encrypted durable application session. Passwords are never stored.
+// Session is an Approver's application session. It holds no OpenBao token.
 type Session struct {
-	ID        string           `json:"id"`
-	Token     string           `json:"token"`
-	CSRFToken string           `json:"csrfToken"`
-	Identity  openbao.Identity `json:"identity"`
-	ExpiresAt time.Time        `json:"expiresAt"`
+	ID          string
+	EntityID    string
+	DisplayName string
+	ExpiresAt   time.Time
 }
 
 // Subscription is a browser Web Push subscription associated with an OpenBao entity.
@@ -146,26 +101,41 @@ func Open(path string, key []byte) (*DB, error) {
 }
 
 func (d *DB) migrate(ctx context.Context) error {
+	// The control-group era `requests` table is dropped outright; its
+	// accessors and payloads have no meaning for session-scoped Grants. The
+	// old `sessions` table held OpenBao tokens; Approvers simply log in again.
 	const schema = `
-CREATE TABLE IF NOT EXISTS requests (
+DROP TABLE IF EXISTS requests;
+DROP TABLE IF EXISTS sessions;
+CREATE TABLE IF NOT EXISTS grant_requests (
   id TEXT PRIMARY KEY,
-  fingerprint BLOB NOT NULL UNIQUE,
-  accessor_nonce BLOB NOT NULL,
-  accessor_ciphertext BLOB NOT NULL,
-  approved INTEGER NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending',
-  operation TEXT NOT NULL,
-  path TEXT NOT NULL,
-  data_nonce BLOB NOT NULL,
-  data_ciphertext BLOB NOT NULL,
-  approval_context_nonce BLOB,
-  approval_context_ciphertext BLOB,
-  requester_id TEXT NOT NULL,
-  requester_name TEXT NOT NULL,
-  authorizations BLOB NOT NULL,
-  first_seen TEXT NOT NULL,
-  last_seen TEXT NOT NULL
+  entity_id TEXT NOT NULL,
+  session_nonce BLOB NOT NULL,
+  session_ciphertext BLOB NOT NULL,
+  reason_nonce BLOB NOT NULL,
+  reason_ciphertext BLOB NOT NULL,
+  created_at INTEGER NOT NULL,
+  pending_until INTEGER NOT NULL,
+  has_pending INTEGER NOT NULL,
+  items TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS grant_requests_pending ON grant_requests (has_pending, pending_until);
+CREATE TABLE IF NOT EXISTS grants (
+  id TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL REFERENCES grant_requests (id),
+  item_id TEXT NOT NULL UNIQUE,
+  entity_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  capabilities TEXT NOT NULL,
+  session_nonce BLOB NOT NULL,
+  session_ciphertext BLOB NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  approved_by_name TEXT NOT NULL,
+  revoked_at INTEGER NOT NULL DEFAULT 0,
+  revoked_by_name TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS grants_active ON grants (entity_id, revoked_at, expires_at);
 CREATE TABLE IF NOT EXISTS subscriptions (
   fingerprint BLOB PRIMARY KEY,
   entity_id TEXT NOT NULL,
@@ -174,64 +144,14 @@ CREATE TABLE IF NOT EXISTS subscriptions (
   expires_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS sessions (
+CREATE TABLE IF NOT EXISTS approver_sessions (
   fingerprint BLOB PRIMARY KEY,
-  nonce BLOB NOT NULL,
-  ciphertext BLOB NOT NULL,
-  expires_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  entity_id TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  expires_at INTEGER NOT NULL
 );`
 	if _, err := d.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
-	}
-
-	if err := d.addColumn(ctx, "requests", "approval_context_nonce", "BLOB"); err != nil {
-		return err
-	}
-
-	if err := d.addColumn(ctx, "requests", "approval_context_ciphertext", "BLOB"); err != nil {
-		return err
-	}
-
-	if err := d.addColumn(ctx, "requests", "status", "TEXT NOT NULL DEFAULT 'pending'"); err != nil {
-		return err
-	}
-
-	if _, err := d.db.ExecContext(ctx, "UPDATE requests SET status = 'approved' WHERE approved = 1 AND status = 'pending'"); err != nil {
-		return fmt.Errorf("migrate request statuses: %w", err)
-	}
-
-	return nil
-}
-
-func (d *DB) addColumn(ctx context.Context, table, column, definition string) error {
-	rows, err := d.db.QueryContext(ctx, "PRAGMA table_info("+table+")")
-	if err != nil {
-		return fmt.Errorf("inspect %s schema: %w", table, err)
-	}
-
-	defer func() { _ = rows.Close() }()
-
-	for rows.Next() {
-		var cid int
-		var name, columnType string
-		var notNull, primaryKey int
-		var defaultValue any
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-			return fmt.Errorf("scan %s schema: %w", table, err)
-		}
-
-		if name == column {
-			return nil
-		}
-	}
-
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("inspect %s schema: %w", table, err)
-	}
-
-	if _, err := d.db.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN "+column+" "+definition); err != nil {
-		return fmt.Errorf("add %s.%s: %w", table, column, err)
 	}
 
 	return nil
@@ -240,359 +160,51 @@ func (d *DB) addColumn(ctx context.Context, table, column, definition string) er
 // Close closes the SQLite database.
 func (d *DB) Close() error { return d.db.Close() }
 
-// Upsert stores current OpenBao state and reports its ID and whether this accessor was first observed.
-func (d *DB) Upsert(ctx context.Context, accessor string, request openbao.ControlGroupRequest, options UpsertOptions) (string, bool, error) {
-	fingerprint := d.fingerprint(accessor)
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-
-	var id string
-	err := d.db.QueryRowContext(ctx, "SELECT id FROM requests WHERE fingerprint = ?", fingerprint).Scan(&id)
-	isNew := errors.Is(err, sql.ErrNoRows)
-	if err != nil && !isNew {
-		return "", false, fmt.Errorf("find request: %w", err)
-	}
-
-	if isNew {
-		id, err = randomID()
-		if err != nil {
-			return "", false, err
-		}
-	}
-
-	accessorNonce, accessorCiphertext, err := d.encrypt([]byte(accessor), []byte(id+":accessor"))
-	if err != nil {
-		return "", false, err
-	}
-
-	dataNonce, dataCiphertext, err := d.encrypt(request.Data, []byte(id+":data"))
-	if err != nil {
-		return "", false, err
-	}
-
-	authorizations, err := json.Marshal(request.Authorizations)
-	if err != nil {
-		return "", false, fmt.Errorf("encode authorizations: %w", err)
-	}
-
-	approvalContext, err := json.Marshal(request.ApprovalContext)
-	if err != nil {
-		return "", false, fmt.Errorf("encode approval context: %w", err)
-	}
-
-	approvalContextNonce, approvalContextCiphertext, err := d.encrypt(approvalContext, []byte(id+":approval-context"))
-	if err != nil {
-		return "", false, err
-	}
-
-	status := RequestPending
-	if request.Approved {
-		status = RequestApproved
-	}
-
-	if isNew {
-		_, err = d.db.ExecContext(ctx, `INSERT INTO requests
-(id, fingerprint, accessor_nonce, accessor_ciphertext, approved, status, operation, path, data_nonce, data_ciphertext, approval_context_nonce, approval_context_ciphertext, requester_id, requester_name, authorizations, first_seen, last_seen)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, fingerprint, accessorNonce, accessorCiphertext, request.Approved, status, request.Operation, request.Path,
-			dataNonce, dataCiphertext, approvalContextNonce, approvalContextCiphertext, request.Entity.ID, request.Entity.Name, authorizations, now, now)
-	} else {
-		if options.ApprovalContext == ReplaceApprovalContext {
-			_, err = d.db.ExecContext(ctx, `UPDATE requests SET
-accessor_nonce = ?, accessor_ciphertext = ?, approved = CASE WHEN status IN ('rejected', 'expired') THEN approved ELSE ? END, status = CASE WHEN status IN ('rejected', 'expired') THEN status ELSE ? END, operation = ?, path = ?, data_nonce = ?, data_ciphertext = ?, approval_context_nonce = ?, approval_context_ciphertext = ?, requester_id = ?, requester_name = ?, authorizations = ?, last_seen = ?
-WHERE id = ?`, accessorNonce, accessorCiphertext, request.Approved, status, request.Operation, request.Path,
-				dataNonce, dataCiphertext, approvalContextNonce, approvalContextCiphertext, request.Entity.ID, request.Entity.Name, authorizations, now, id)
-		} else {
-			_, err = d.db.ExecContext(ctx, `UPDATE requests SET
-accessor_nonce = ?, accessor_ciphertext = ?, approved = CASE WHEN status IN ('rejected', 'expired') THEN approved ELSE ? END, status = CASE WHEN status IN ('rejected', 'expired') THEN status ELSE ? END, operation = ?, path = ?, data_nonce = ?, data_ciphertext = ?, requester_id = ?, requester_name = ?, authorizations = ?, last_seen = ?
-WHERE id = ?`, accessorNonce, accessorCiphertext, request.Approved, status, request.Operation, request.Path,
-				dataNonce, dataCiphertext, request.Entity.ID, request.Entity.Name, authorizations, now, id)
-		}
-	}
-
-	if err != nil {
-		return "", false, fmt.Errorf("upsert request: %w", err)
-	}
-
-	return id, isNew, nil
-}
-
-// List returns all discovered requests, newest first.
-func (d *DB) List(ctx context.Context) ([]Request, error) {
-	rows, err := d.db.QueryContext(ctx, `SELECT id, approved, status, operation, path, data_nonce, data_ciphertext, approval_context_nonce, approval_context_ciphertext,
-requester_id, requester_name, authorizations, first_seen, last_seen FROM requests ORDER BY first_seen DESC`)
-	if err != nil {
-		return nil, fmt.Errorf("list requests: %w", err)
-	}
-
-	defer func() { _ = rows.Close() }()
-
-	requests := make([]Request, 0)
-	for rows.Next() {
-		var request Request
-		var dataNonce, dataCiphertext, approvalContextNonce, approvalContextCiphertext, authorizations []byte
-		var firstSeen, lastSeen string
-		if err := rows.Scan(&request.ID, &request.Approved, &request.Status, &request.Operation, &request.Path, &dataNonce, &dataCiphertext, &approvalContextNonce, &approvalContextCiphertext,
-			&request.Entity.ID, &request.Entity.Name, &authorizations, &firstSeen, &lastSeen); err != nil {
-			return nil, fmt.Errorf("scan request: %w", err)
-		}
-
-		data, err := d.decrypt(dataNonce, dataCiphertext, []byte(request.ID+":data"))
-		if err != nil {
-			return nil, err
-		}
-
-		request.Data = data
-		if len(approvalContextCiphertext) > 0 {
-			approvalContext, decryptErr := d.decrypt(approvalContextNonce, approvalContextCiphertext, []byte(request.ID+":approval-context"))
-			if decryptErr != nil {
-				return nil, decryptErr
-			}
-
-			if string(approvalContext) != "null" {
-				if decodeErr := json.Unmarshal(approvalContext, &request.ApprovalContext); decodeErr != nil {
-					return nil, fmt.Errorf("decode approval context: %w", decodeErr)
-				}
-			}
-		}
-
-		authorizationErr := json.Unmarshal(authorizations, &request.Authorizations)
-		if authorizationErr != nil {
-			return nil, fmt.Errorf("decode authorizations: %w", authorizationErr)
-		}
-
-		request.FirstSeen, err = time.Parse(time.RFC3339Nano, firstSeen)
-		if err != nil {
-			return nil, fmt.Errorf("parse first seen: %w", err)
-		}
-
-		request.LastSeen, err = time.Parse(time.RFC3339Nano, lastSeen)
-		if err != nil {
-			return nil, fmt.Errorf("parse last seen: %w", err)
-		}
-
-		requests = append(requests, request)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate requests: %w", err)
-	}
-
-	return requests, nil
-}
-
-// Accessor decrypts the accessor for a server-side OpenBao call.
-func (d *DB) Accessor(ctx context.Context, id string) (string, error) {
-	var nonce, ciphertext []byte
-	if err := d.db.QueryRowContext(ctx, "SELECT accessor_nonce, accessor_ciphertext FROM requests WHERE id = ?", id).Scan(&nonce, &ciphertext); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return "", ErrNotFound
-		}
-
-		return "", fmt.Errorf("find accessor: %w", err)
-	}
-
-	plaintext, err := d.decrypt(nonce, ciphertext, []byte(id+":accessor"))
-	if err != nil {
-		return "", err
-	}
-
-	return string(plaintext), nil
-}
-
-// SetApproved updates the locally cached approval status.
-func (d *DB) SetApproved(ctx context.Context, id string, approved bool) error {
-	status := RequestPending
-	if approved {
-		status = RequestApproved
-	}
-
-	result, err := d.db.ExecContext(ctx, "UPDATE requests SET approved = ?, status = ?, last_seen = ? WHERE id = ? AND status = ?", approved, status, time.Now().UTC().Format(time.RFC3339Nano), id, RequestPending)
-	if err != nil {
-		return fmt.Errorf("update request: %w", err)
-	}
-
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("read update result: %w", err)
-	}
-
-	if rows == 0 {
-		return ErrStatusChanged
-	}
-
-	return nil
-}
-
-// TransitionStatus atomically changes a request from one lifecycle state to another.
-func (d *DB) TransitionStatus(ctx context.Context, id string, from, to RequestStatus) (bool, error) {
-	if !validRequestStatus(from) || !validRequestStatus(to) {
-		return false, fmt.Errorf("invalid request status transition %q to %q", from, to)
-	}
-
-	result, err := d.db.ExecContext(ctx, "UPDATE requests SET status = ?, approved = ? WHERE id = ? AND status = ?", to, to == RequestApproved, id, from)
-	if err != nil {
-		return false, fmt.Errorf("transition request status: %w", err)
-	}
-
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("read status transition result: %w", err)
-	}
-
-	return rows == 1, nil
-}
-
-func validRequestStatus(status RequestStatus) bool {
-	return status == RequestPending || status == RequestApproved || status == RequestRejected || status == RequestExpired
-}
-
-// ExpireMissing marks pending requests absent from a complete accessor snapshot.
-func (d *DB) ExpireMissing(ctx context.Context, accessors []string) ([]string, error) {
-	present := make(map[string]struct{}, len(accessors))
-	for _, accessor := range accessors {
-		present[hex.EncodeToString(d.fingerprint(accessor))] = struct{}{}
-	}
-
-	rows, err := d.db.QueryContext(ctx, "SELECT id, fingerprint FROM requests WHERE status = ?", RequestPending)
-	if err != nil {
-		return nil, fmt.Errorf("list pending request fingerprints: %w", err)
-	}
-
-	var expired []string
-	for rows.Next() {
-		var id string
-		var fingerprint []byte
-		if err := rows.Scan(&id, &fingerprint); err != nil {
-			_ = rows.Close()
-			return nil, fmt.Errorf("scan pending request fingerprint: %w", err)
-		}
-
-		if _, ok := present[hex.EncodeToString(fingerprint)]; !ok {
-			expired = append(expired, id)
-		}
-	}
-
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return nil, fmt.Errorf("iterate pending request fingerprints: %w", err)
-	}
-
-	if err := rows.Close(); err != nil {
-		return nil, fmt.Errorf("close pending request fingerprints: %w", err)
-	}
-
-	changed := make([]string, 0, len(expired))
-	for _, id := range expired {
-		result, err := d.db.ExecContext(ctx, "UPDATE requests SET status = ?, approved = 0 WHERE id = ? AND status = ?", RequestExpired, id, RequestPending)
-		if err != nil {
-			return nil, fmt.Errorf("expire missing request: %w", err)
-		}
-
-		rows, err := result.RowsAffected()
-		if err != nil {
-			return nil, fmt.Errorf("read expiration result: %w", err)
-		}
-
-		if rows == 1 {
-			changed = append(changed, id)
-		}
-	}
-
-	return changed, nil
-}
-
-// PutSession creates or replaces an encrypted durable application session.
+// PutSession stores an application session. Only an HMAC of its ID is kept,
+// so the database alone cannot be turned into session cookies.
 func (d *DB) PutSession(ctx context.Context, session Session) error {
-	if session.ID == "" || session.Token == "" || session.CSRFToken == "" || session.Identity.EntityID == "" {
+	if session.ID == "" || session.EntityID == "" {
 		return errors.New("session is incomplete")
 	}
 
-	payload, err := json.Marshal(session)
-	if err != nil {
-		return fmt.Errorf("encode session: %w", err)
-	}
-
-	fingerprint := d.fingerprint(session.ID)
-	nonce, ciphertext, err := d.encrypt(payload, fingerprint)
-	if err != nil {
-		return err
-	}
-
-	_, err = d.db.ExecContext(ctx, `INSERT INTO sessions (fingerprint, nonce, ciphertext, expires_at, updated_at)
-VALUES (?, ?, ?, ?, ?) ON CONFLICT(fingerprint) DO UPDATE SET nonce=excluded.nonce, ciphertext=excluded.ciphertext, expires_at=excluded.expires_at, updated_at=excluded.updated_at`,
-		fingerprint, nonce, ciphertext, session.ExpiresAt.UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano))
-	if err != nil {
+	if _, err := d.db.ExecContext(ctx, "INSERT INTO approver_sessions (fingerprint, entity_id, display_name, expires_at) VALUES (?, ?, ?, ?)",
+		d.fingerprint(session.ID), session.EntityID, session.DisplayName, unixMilli(session.ExpiresAt)); err != nil {
 		return fmt.Errorf("store session: %w", err)
 	}
 
 	return nil
 }
 
-// Sessions returns unexpired encrypted application sessions.
-func (d *DB) Sessions(ctx context.Context, now time.Time) ([]Session, error) {
-	rows, err := d.db.QueryContext(ctx, "SELECT fingerprint, nonce, ciphertext FROM sessions WHERE expires_at > ?", now.UTC().Format(time.RFC3339Nano))
+// Session returns the unexpired session with id, or ErrNotFound.
+func (d *DB) Session(ctx context.Context, id string, now time.Time) (Session, error) {
+	session := Session{ID: id}
+	var expiresAt int64
+	err := d.db.QueryRowContext(ctx, "SELECT entity_id, display_name, expires_at FROM approver_sessions WHERE fingerprint = ? AND expires_at > ?",
+		d.fingerprint(id), unixMilli(now)).Scan(&session.EntityID, &session.DisplayName, &expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Session{}, ErrNotFound
+	}
+
 	if err != nil {
-		return nil, fmt.Errorf("list sessions: %w", err)
+		return Session{}, fmt.Errorf("read session: %w", err)
 	}
 
-	defer func() { _ = rows.Close() }()
-	result := make([]Session, 0)
-	for rows.Next() {
-		var fingerprint, nonce, ciphertext []byte
-		if err := rows.Scan(&fingerprint, &nonce, &ciphertext); err != nil {
-			return nil, fmt.Errorf("scan session: %w", err)
-		}
-
-		payload, err := d.decrypt(nonce, ciphertext, fingerprint)
-		if err != nil {
-			return nil, err
-		}
-
-		var session Session
-		if err := json.Unmarshal(payload, &session); err != nil {
-			return nil, fmt.Errorf("decode session: %w", err)
-		}
-
-		result = append(result, session)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate sessions: %w", err)
-	}
-
-	return result, nil
+	session.ExpiresAt = fromUnixMilli(expiresAt)
+	return session, nil
 }
 
-// DeleteSession removes an opaque application session.
+// DeleteSession removes an application session.
 func (d *DB) DeleteSession(ctx context.Context, id string) error {
-	if _, err := d.db.ExecContext(ctx, "DELETE FROM sessions WHERE fingerprint = ?", d.fingerprint(id)); err != nil {
+	if _, err := d.db.ExecContext(ctx, "DELETE FROM approver_sessions WHERE fingerprint = ?", d.fingerprint(id)); err != nil {
 		return fmt.Errorf("delete session: %w", err)
 	}
 
 	return nil
 }
 
-// DeleteSessionsByToken removes every durable session using token.
-func (d *DB) DeleteSessionsByToken(ctx context.Context, token string) error {
-	sessions, err := d.Sessions(ctx, time.Time{})
-	if err != nil {
-		return err
-	}
-
-	for _, session := range sessions {
-		if session.Token == token {
-			if err := d.DeleteSession(ctx, session.ID); err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
-}
-
-// DeleteExpiredSessions removes expired durable sessions.
+// DeleteExpiredSessions removes expired application sessions.
 func (d *DB) DeleteExpiredSessions(ctx context.Context, now time.Time) error {
-	if _, err := d.db.ExecContext(ctx, "DELETE FROM sessions WHERE expires_at <= ?", now.UTC().Format(time.RFC3339Nano)); err != nil {
+	if _, err := d.db.ExecContext(ctx, "DELETE FROM approver_sessions WHERE expires_at <= ?", unixMilli(now)); err != nil {
 		return fmt.Errorf("delete expired sessions: %w", err)
 	}
 
@@ -680,11 +292,11 @@ func (d *DB) DeleteSubscriptionsByEntity(ctx context.Context, entityID string) e
 	return nil
 }
 
-// ErrNotFound marks an unknown opaque application request ID.
-var ErrNotFound = errors.New("request not found")
+// ErrNotFound marks an unknown opaque application ID.
+var ErrNotFound = errors.New("not found")
 
-// ErrStatusChanged marks a request that left pending before a decision completed.
-var ErrStatusChanged = errors.New("request status changed")
+// ErrStatusChanged marks an item or Grant that left the expected state first.
+var ErrStatusChanged = errors.New("state changed")
 
 func (d *DB) fingerprint(value string) []byte {
 	mac := hmac.New(sha256.New, d.key)
@@ -710,10 +322,11 @@ func (d *DB) decrypt(nonce, ciphertext, additionalData []byte) ([]byte, error) {
 	return plaintext, nil
 }
 
-func randomID() (string, error) {
+// NewID returns a random opaque identifier.
+func NewID() (string, error) {
 	value := make([]byte, 16)
 	if _, err := rand.Read(value); err != nil {
-		return "", fmt.Errorf("generate request ID: %w", err)
+		return "", fmt.Errorf("generate ID: %w", err)
 	}
 
 	return hex.EncodeToString(value), nil

@@ -4,86 +4,147 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
 )
 
-func TestClientListsAndInspectsControlGroupRequests(t *testing.T) {
+func TestLookupSelfAndCapabilitiesSelfUseCallerToken(t *testing.T) {
 	t.Parallel()
 
-	var sawList, sawRequest bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("X-Vault-Token"); got != "scanner" {
+		if got := r.Header.Get("X-Vault-Token"); got != "session-token" {
 			t.Fatalf("token header = %q", got)
 		}
 
 		switch r.URL.Path {
-		case "/v1/auth/token/accessors":
-			sawList = true
-			if r.Method != "LIST" {
-				t.Fatalf("method = %s", r.Method)
+		case "/v1/auth/token/lookup-self":
+			_, _ = w.Write([]byte(`{"data":{"entity_id":"entity-1","display_name":"token","policies":["default","opencode-session"],"role":"opencode-session","meta":{"session_id":"abc","title":"Fix CI","directory":"/src/app"}}}`))
+		case "/v1/sys/capabilities-self":
+			var payload struct {
+				Paths []string `json:"paths"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
 			}
 
-			_, _ = w.Write([]byte(`{"data":{"keys":["ordinary","pending"]}}`))
-		case "/v1/sys/control-group/request":
-			sawRequest = true
-			_, _ = w.Write([]byte(`{"data":{"approved":false,"request_operation":"update","request_path":"secret/data/payroll","request_data":{"ttl":"1h"},"request_entity":{"ID":"entity-1","name":"Alice"},"authorizations":[]}}`))
+			if !slices.Equal(payload.Paths, []string{"kv/data/a", "kv/data/b"}) {
+				t.Fatalf("paths = %#v", payload.Paths)
+			}
+
+			// OpenBao repeats capabilities-self data at the top level.
+			_, _ = w.Write([]byte(`{"kv/data/a":["read"],"kv/data/b":["deny"],"data":{"kv/data/a":["read"],"kv/data/b":["deny"]}}`))
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	defer server.Close()
 
-	client, err := New(Config{Address: server.URL, ScannerToken: "scanner", HTTPClient: server.Client()})
+	client, err := New(Config{Address: server.URL, Token: "authorizer", HTTPClient: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	accessors, err := client.ListAccessors(t.Context())
+	identity, err := client.LookupSelf(t.Context(), "session-token")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if len(accessors) != 2 || accessors[1] != "pending" {
-		t.Fatalf("accessors = %#v", accessors)
+	if identity.EntityID != "entity-1" || identity.Role != "opencode-session" || identity.Meta["title"] != "Fix CI" || identity.Meta["directory"] != "/src/app" {
+		t.Fatalf("identity = %#v", identity)
 	}
 
-	request, err := client.ControlGroupRequest(t.Context(), "pending")
+	capabilities, err := client.CapabilitiesSelf(t.Context(), "session-token", []string{"kv/data/a", "kv/data/b"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if request.Path != "secret/data/payroll" || request.Entity.ID != "entity-1" || request.Entity.Name != "Alice" {
-		t.Fatalf("request = %#v", request)
-	}
-
-	if !sawList || !sawRequest {
-		t.Fatalf("sawList=%v sawRequest=%v", sawList, sawRequest)
+	if !slices.Equal(capabilities["kv/data/a"], []string{"read"}) || !slices.Equal(capabilities["kv/data/b"], []string{"deny"}) {
+		t.Fatalf("capabilities = %#v", capabilities)
 	}
 }
 
-func TestClientClassifiesNonControlGroupAccessor(t *testing.T) {
+func TestGrantWritesUseAuthorizerToken(t *testing.T) {
 	t.Parallel()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"errors":["no control group metadata found"]}`))
+	expiration := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Vault-Token"); got != "authorizer" {
+			t.Fatalf("token header = %q", got)
+		}
+
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		switch r.Method + " " + r.URL.Path {
+		case "POST /v1/sys/policies/acl/agent-grant-1":
+			var payload map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+
+			if payload["policy"] != `{"path":{}}` || payload["expiration"] != "2030-01-02T03:04:05Z" {
+				t.Fatalf("policy payload = %#v", payload)
+			}
+
+			w.WriteHeader(http.StatusNoContent)
+		case "DELETE /v1/sys/policies/acl/agent-grant-1":
+			w.WriteHeader(http.StatusNotFound)
+		case "GET /v1/identity/entity/id/entity-1":
+			_, _ = w.Write([]byte(`{"data":{"id":"entity-1","name":"entity_1","policies":["agent-grant-0"]}}`))
+		case "POST /v1/identity/entity/id/entity-1":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+
+			if !reflect.DeepEqual(payload, map[string]any{"policies": []any{"agent-grant-0", "agent-grant-1"}}) {
+				t.Fatalf("entity payload = %#v", payload)
+			}
+
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	defer server.Close()
 
-	client, err := New(Config{Address: server.URL, ScannerToken: "scanner", HTTPClient: server.Client()})
+	client, err := New(Config{Address: server.URL, Token: "authorizer", HTTPClient: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = client.ControlGroupRequest(t.Context(), "ordinary")
-	if !IsNotControlGroup(err) {
-		t.Fatalf("error = %v", err)
+	if writeErr := client.WritePolicy(t.Context(), "agent-grant-1", `{"path":{}}`, expiration); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+
+	entity, err := client.ReadEntity(t.Context(), "entity-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !slices.Equal(entity.Policies, []string{"agent-grant-0"}) {
+		t.Fatalf("entity = %#v", entity)
+	}
+
+	if err := client.SetEntityPolicies(t.Context(), "entity-1", []string{"agent-grant-0", "agent-grant-1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := client.DeletePolicy(t.Context(), "agent-grant-1"); err != nil {
+		t.Fatalf("deleting a missing policy: %v", err)
+	}
+
+	if _, err := client.ReadEntity(t.Context(), "missing"); err == nil {
+		t.Fatal("expected missing entity error")
+	}
+
+	if len(calls) != 5 {
+		t.Fatalf("calls = %#v", calls)
 	}
 }
 
-func TestLoginUserpassExchangesPasswordForRenewableToken(t *testing.T) {
+func TestLoginUserpassExchangesPasswordForToken(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -113,34 +174,25 @@ func TestLoginUserpassExchangesPasswordForRenewableToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	auth, err := client.LoginUserpass(t.Context(), "bob", "correct horse")
+	token, err := client.LoginUserpass(t.Context(), "bob", "correct horse")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if auth.Token != "human-token" || !auth.Renewable || auth.TTL != 24*time.Hour {
-		t.Fatalf("auth = %#v", auth)
+	if token != "human-token" {
+		t.Fatalf("token = %q", token)
 	}
 }
 
-func TestRenewAndRevokeSelfUseHumanToken(t *testing.T) {
+func TestRevokeSelfUsesHumanToken(t *testing.T) {
 	t.Parallel()
 
-	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("X-Vault-Token"); got != "human-token" {
-			t.Fatalf("token header = %q", got)
+		if got := r.Header.Get("X-Vault-Token"); got != "human-token" || r.URL.Path != "/v1/auth/token/revoke-self" {
+			t.Fatalf("request = %s with token %q", r.URL.Path, got)
 		}
 
-		calls = append(calls, r.URL.Path)
-		switch r.URL.Path {
-		case "/v1/auth/token/renew-self":
-			_, _ = w.Write([]byte(`{"auth":{"client_token":"human-token","renewable":true,"lease_duration":86400}}`))
-		case "/v1/auth/token/revoke-self":
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			http.NotFound(w, r)
-		}
+		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
 
@@ -149,108 +201,7 @@ func TestRenewAndRevokeSelfUseHumanToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := client.RenewSelf(t.Context(), "human-token"); err != nil {
-		t.Fatal(err)
-	}
-
 	if err := client.RevokeSelf(t.Context(), "human-token"); err != nil {
-		t.Fatal(err)
-	}
-
-	if !slices.Equal(calls, []string{"/v1/auth/token/renew-self", "/v1/auth/token/revoke-self"}) {
-		t.Fatalf("calls = %#v", calls)
-	}
-}
-
-func TestReadUsesScannerToken(t *testing.T) {
-	t.Parallel()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/github/permissionset/project authorizer" || r.URL.RawPath != "" || r.Method != http.MethodGet {
-			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
-		}
-
-		if got := r.Header.Get("X-Vault-Token"); got != "scanner" {
-			t.Fatalf("token header = %q", got)
-		}
-
-		_, _ = w.Write([]byte(`{"data":{"installation_id":87654321,"org_name":"example-org","repositories":["example-repo"],"permissions":{"administration":"write","contents":"write"}}}`))
-	}))
-	defer server.Close()
-
-	client, err := New(Config{Address: server.URL, ScannerToken: "scanner", HTTPClient: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	data, err := client.Read(t.Context(), "github/permissionset/project authorizer")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if string(data) != `{"installation_id":87654321,"org_name":"example-org","repositories":["example-repo"],"permissions":{"administration":"write","contents":"write"}}` {
-		t.Fatalf("data = %s", data)
-	}
-}
-
-func TestAuthorizeUsesHumanToken(t *testing.T) {
-	t.Parallel()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("X-Vault-Token"); got != "human-token" {
-			t.Fatalf("token header = %q", got)
-		}
-
-		_, _ = w.Write([]byte(`{"data":{"approved":true}}`))
-	}))
-	defer server.Close()
-
-	client, err := New(Config{Address: server.URL, ScannerToken: "scanner", HTTPClient: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	approved, err := client.Authorize(t.Context(), "human-token", "pending")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !approved {
-		t.Fatal("expected approved")
-	}
-}
-
-func TestRevokeAccessorUsesScannerToken(t *testing.T) {
-	t.Parallel()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/auth/token/revoke-accessor" || r.Method != http.MethodPost {
-			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
-		}
-
-		if got := r.Header.Get("X-Vault-Token"); got != "scanner" {
-			t.Fatalf("token header = %q", got)
-		}
-
-		var payload map[string]string
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			t.Fatal(err)
-		}
-
-		if payload["accessor"] != "wrapping-accessor" {
-			t.Fatalf("accessor = %q", payload["accessor"])
-		}
-
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer server.Close()
-
-	client, err := New(Config{Address: server.URL, ScannerToken: "scanner", HTTPClient: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if err := client.RevokeAccessor(t.Context(), "wrapping-accessor"); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -13,41 +13,47 @@ import (
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/gohcl"
 	"github.com/hashicorp/hcl/v2/hclparse"
-	"github.com/xtruder/openbao-authorizer/internal/approvalcontext"
+	"github.com/xtruder/openbao-authorizer/internal/grants"
 	"github.com/zclconf/go-cty/cty"
+)
+
+const (
+	defaultGrantTTL         = 72 * time.Hour
+	defaultPendingTTL       = 24 * time.Hour
+	defaultSessionTTL       = 168 * time.Hour
+	defaultSessionTokenRole = "opencode-session"
 )
 
 // Config is the complete validated server configuration.
 type Config struct {
-	ListenAddress       string
-	PublicOrigin        string
-	InsecureCookies     bool
-	DatabasePath        string
-	EncryptionKey       []byte
-	OpenBaoAddress      string
-	OpenBaoNamespace    string
-	OpenBaoScannerToken string
-	OpenBaoCAFile       string
-	ApproverPolicy      string
-	ExposeRequestData   bool
-	ScanInterval        time.Duration
-	ScanConcurrency     int
-	StaticDirectory     string
-	VAPIDPublicKey      string
-	VAPIDPrivateKey     string
-	VAPIDSubject        string
-	PushAllowedHosts    []string
-	ApprovalContext     *approvalcontext.Resolver
+	ListenAddress          string
+	PublicOrigin           string
+	InsecureCookies        bool
+	SessionTTL             time.Duration
+	DatabasePath           string
+	EncryptionKey          []byte
+	OpenBaoAddress         string
+	OpenBaoNamespace       string
+	OpenBaoAuthorizerToken string
+	OpenBaoCAFile          string
+	ApproverPolicy         string
+	SessionTokenRole       string
+	GrantPolicy            grants.Policy
+	PendingTTL             time.Duration
+	StaticDirectory        string
+	VAPIDPublicKey         string
+	VAPIDPrivateKey        string
+	VAPIDSubject           string
+	PushAllowedHosts       []string
 }
 
 type fileConfig struct {
-	Server           serverConfig           `hcl:"server,block"`
-	Storage          storageConfig          `hcl:"storage,block"`
-	OpenBao          openBaoConfig          `hcl:"openbao,block"`
-	Scanner          scannerConfig          `hcl:"scanner,block"`
-	Requests         requestsConfig         `hcl:"requests,block"`
-	WebPush          []webPushConfig        `hcl:"web_push,block"`
-	ApprovalContexts []approvalcontext.Rule `hcl:"approval_context,block"`
+	Server    serverConfig      `hcl:"server,block"`
+	Storage   storageConfig     `hcl:"storage,block"`
+	OpenBao   openBaoConfig     `hcl:"openbao,block"`
+	Grants    *grantsConfig     `hcl:"grants,block"`
+	Grantable []grantableConfig `hcl:"grantable,block"`
+	WebPush   []webPushConfig   `hcl:"web_push,block"`
 }
 
 type serverConfig struct {
@@ -55,6 +61,7 @@ type serverConfig struct {
 	PublicOrigin    string `hcl:"public_origin"`
 	InsecureCookies bool   `hcl:"insecure_cookies"`
 	StaticDirectory string `hcl:"static_directory"`
+	SessionTTL      string `hcl:"session_ttl,optional"`
 }
 
 type storageConfig struct {
@@ -63,20 +70,24 @@ type storageConfig struct {
 }
 
 type openBaoConfig struct {
-	Address          string `hcl:"address"`
-	Namespace        string `hcl:"namespace"`
-	CAFile           string `hcl:"ca_file"`
-	ScannerTokenFile string `hcl:"scanner_token_file"`
-	ApproverPolicy   string `hcl:"approver_policy"`
+	Address             string `hcl:"address"`
+	Namespace           string `hcl:"namespace,optional"`
+	CAFile              string `hcl:"ca_file,optional"`
+	AuthorizerTokenFile string `hcl:"authorizer_token_file"`
+	ApproverPolicy      string `hcl:"approver_policy"`
+	SessionTokenRole    string `hcl:"session_token_role,optional"`
 }
 
-type scannerConfig struct {
-	Interval    string `hcl:"interval"`
-	Concurrency int    `hcl:"concurrency"`
+type grantsConfig struct {
+	DefaultTTL string `hcl:"default_ttl,optional"`
+	PendingTTL string `hcl:"pending_ttl,optional"`
 }
 
-type requestsConfig struct {
-	ExposeData bool `hcl:"expose_data"`
+type grantableConfig struct {
+	Name         string   `hcl:"name,label"`
+	Path         string   `hcl:"path"`
+	Capabilities []string `hcl:"capabilities"`
+	MaxTTL       string   `hcl:"max_ttl,optional"`
 }
 
 type webPushConfig struct {
@@ -126,18 +137,9 @@ func Load(path string) (Config, error) {
 		return Config{}, errors.New("storage.encryption_key_file must contain base64 encoding of exactly 32 bytes")
 	}
 
-	scannerToken, err := readFile(resolvePath(raw.OpenBao.ScannerTokenFile), "openbao.scanner_token_file")
+	authorizerToken, err := readFile(resolvePath(raw.OpenBao.AuthorizerTokenFile), "openbao.authorizer_token_file")
 	if err != nil {
 		return Config{}, err
-	}
-
-	scanInterval, err := time.ParseDuration(raw.Scanner.Interval)
-	if err != nil || scanInterval < time.Second {
-		return Config{}, errors.New("scanner.interval must be a duration of at least one second")
-	}
-
-	if raw.Scanner.Concurrency < 1 || raw.Scanner.Concurrency > 64 {
-		return Config{}, errors.New("scanner.concurrency must be between 1 and 64")
 	}
 
 	if strings.TrimSpace(raw.OpenBao.ApproverPolicy) == "" {
@@ -148,27 +150,39 @@ func Load(path string) (Config, error) {
 		return Config{}, errors.New("server.public_origin is required unless insecure_cookies is true")
 	}
 
-	contextResolver, err := approvalcontext.New(raw.ApprovalContexts)
+	sessionTTL := defaultSessionTTL
+	if raw.Server.SessionTTL != "" {
+		if sessionTTL, err = parsePositiveDuration(raw.Server.SessionTTL, "server.session_ttl"); err != nil {
+			return Config{}, err
+		}
+	}
+
+	sessionTokenRole := strings.TrimSpace(raw.OpenBao.SessionTokenRole)
+	if sessionTokenRole == "" {
+		sessionTokenRole = defaultSessionTokenRole
+	}
+
+	grantPolicy, pendingTTL, err := loadGrants(raw.Grants, raw.Grantable)
 	if err != nil {
 		return Config{}, err
 	}
 
 	result := Config{
-		ListenAddress:       raw.Server.ListenAddress,
-		PublicOrigin:        strings.TrimSuffix(raw.Server.PublicOrigin, "/"),
-		InsecureCookies:     raw.Server.InsecureCookies,
-		DatabasePath:        resolvePath(raw.Storage.DatabasePath),
-		EncryptionKey:       encryptionKey,
-		OpenBaoAddress:      raw.OpenBao.Address,
-		OpenBaoNamespace:    raw.OpenBao.Namespace,
-		OpenBaoScannerToken: scannerToken,
-		OpenBaoCAFile:       resolvePath(raw.OpenBao.CAFile),
-		ApproverPolicy:      strings.TrimSpace(raw.OpenBao.ApproverPolicy),
-		ExposeRequestData:   raw.Requests.ExposeData,
-		ScanInterval:        scanInterval,
-		ScanConcurrency:     raw.Scanner.Concurrency,
-		StaticDirectory:     resolvePath(raw.Server.StaticDirectory),
-		ApprovalContext:     contextResolver,
+		ListenAddress:          raw.Server.ListenAddress,
+		PublicOrigin:           strings.TrimSuffix(raw.Server.PublicOrigin, "/"),
+		InsecureCookies:        raw.Server.InsecureCookies,
+		SessionTTL:             sessionTTL,
+		DatabasePath:           resolvePath(raw.Storage.DatabasePath),
+		EncryptionKey:          encryptionKey,
+		OpenBaoAddress:         raw.OpenBao.Address,
+		OpenBaoNamespace:       raw.OpenBao.Namespace,
+		OpenBaoAuthorizerToken: authorizerToken,
+		OpenBaoCAFile:          resolvePath(raw.OpenBao.CAFile),
+		ApproverPolicy:         strings.TrimSpace(raw.OpenBao.ApproverPolicy),
+		SessionTokenRole:       sessionTokenRole,
+		GrantPolicy:            grantPolicy,
+		PendingTTL:             pendingTTL,
+		StaticDirectory:        resolvePath(raw.Server.StaticDirectory),
 	}
 
 	if len(raw.WebPush) > 1 {
@@ -195,6 +209,60 @@ func Load(path string) (Config, error) {
 	}
 
 	return result, nil
+}
+
+func loadGrants(raw *grantsConfig, grantable []grantableConfig) (grants.Policy, time.Duration, error) {
+	policy := grants.Policy{DefaultTTL: defaultGrantTTL, Rules: make([]grants.Rule, 0, len(grantable))}
+	pendingTTL := defaultPendingTTL
+	if raw != nil {
+		var err error
+		if raw.DefaultTTL != "" {
+			if policy.DefaultTTL, err = parsePositiveDuration(raw.DefaultTTL, "grants.default_ttl"); err != nil {
+				return grants.Policy{}, 0, err
+			}
+		}
+
+		if raw.PendingTTL != "" {
+			if pendingTTL, err = parsePositiveDuration(raw.PendingTTL, "grants.pending_ttl"); err != nil {
+				return grants.Policy{}, 0, err
+			}
+		}
+	}
+
+	names := make(map[string]bool, len(grantable))
+	for _, entry := range grantable {
+		if names[entry.Name] {
+			return grants.Policy{}, 0, fmt.Errorf("grantable %q is defined more than once", entry.Name)
+		}
+
+		names[entry.Name] = true
+		rule := grants.Rule{Name: entry.Name, Path: entry.Path, Capabilities: entry.Capabilities}
+		if entry.MaxTTL != "" {
+			maxTTL, err := parsePositiveDuration(entry.MaxTTL, fmt.Sprintf("grantable %q max_ttl", entry.Name))
+			if err != nil {
+				return grants.Policy{}, 0, err
+			}
+
+			rule.MaxTTL = maxTTL
+		}
+
+		if err := grants.ValidateRule(rule); err != nil {
+			return grants.Policy{}, 0, err
+		}
+
+		policy.Rules = append(policy.Rules, rule)
+	}
+
+	return policy, pendingTTL, nil
+}
+
+func parsePositiveDuration(value, field string) (time.Duration, error) {
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration < time.Second {
+		return 0, fmt.Errorf("%s must be a duration of at least one second", field)
+	}
+
+	return duration, nil
 }
 
 func environmentEvalContext() *hcl.EvalContext {

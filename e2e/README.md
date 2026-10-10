@@ -1,6 +1,6 @@
-# Real-process OpenBao control-group E2E
+# Real-process session-grant E2E
 
-The Makefile prepares the repository's application binary and the official OpenBao `v2.7.0-beta20260909` Linux release. The tagged Go test receives those prebuilt binaries and drives the real-process workflow.
+The Makefile builds the authorizer and `bao-cred` binaries and prepares the official OpenBao `v2.7.1` Linux release. The tagged Go test receives those binaries and drives the real-process workflow. It mints Session Tokens with the opencode plugin's own mint CLI (`integrations/opencode/src/mint-cli.ts`), run by Bun.
 
 ## Run
 
@@ -16,11 +16,11 @@ The `e2e` build tag is the explicit opt-in for the real-process workflow. Ordina
 go test ./e2e
 ```
 
-Requirements are Linux on `amd64` or `arm64`, Go 1.26 or newer, `curl`, `sha256sum`, and GNU tar.
+Requirements are Linux on `amd64` or `arm64`, Go 1.26 or newer, Bun, `curl`, `sha256sum`, and GNU tar.
 
 Downloads and the extracted `bao` binary are cached beneath ignored `.e2e/openbao/`. Set `OPENBAO_E2E_KEEP_RUNTIME=1` to retain successful-run logs and temporary state. Failed runs retain their runtime directory automatically and print both process logs.
 
-`make e2e` builds the application first and passes its binary path to the harness. The harness gives the OpenBao and application processes isolated home, temporary, and configuration directories, then writes an isolated HCL application config and secret files. Child environments use explicit allowlists, so workstation credentials, OpenBao/Vault settings, application secrets, GitHub credentials, and CLI authentication state are not inherited. The workflow mounts only OpenBao's built-in engines and asserts that no `github/` plugin mount exists.
+`make e2e` builds the binaries first and passes their paths, plus the `bun` found on `PATH`, to the harness. The harness gives the OpenBao and application processes isolated home, temporary, and configuration directories, then writes an isolated HCL application config and secret files. Child environments use explicit allowlists, so workstation credentials, OpenBao/Vault settings, application secrets, GitHub credentials, and CLI authentication state are not inherited. The workflow mounts only OpenBao's built-in engines and asserts that no `github/` plugin mount exists.
 
 ## Supply-chain and process checks
 
@@ -41,23 +41,23 @@ The Go test:
 
 ## Verified workflow
 
-All credentials, OpenBao state, and application state are disposable. The test verifies against the live APIs that:
+All credentials, OpenBao state and application state are disposable. The harness installs the repository's real `config/authorizer-policy.hcl` and `config/approver-policy.hcl`. It also creates the `opencode-session` token role, the baseline policy, and the `opencode-minter` policy and AppRole. Against the live processes, the test checks the following:
 
-- userpass aliases bind Alice and Bob to explicit identity entities;
-- Alice belongs to `e2e-requesters`, Bob belongs to `e2e-approvers`, and both inherit policy through their identity groups;
-- Alice's write to `kv/data/payroll` is deferred by a factor with `approvals = 1` and `self_auth_allowed = false`;
-- the scanner token has only `e2e-scanner`, can list service-token accessors with `sudo`, inspect `sys/control-group/request`, and revoke a rejected wrapping token by accessor;
-- the scanner receives HTTP 403 from `sys/control-group/authorize`, and the denied call does not change request state;
-- the real application scanner discovers and persists the pending request;
-- Bob logs in through `POST /api/v1/session`;
-- the application's CSRF-protected approval endpoint authorizes with Bob's human token;
-- exactly one human authorization is recorded;
-- the secret does not exist before unwrap;
-- Alice's single-use wrapping token executes the approved deferred write; and
-- the resulting KV value matches the unique per-run marker.
-
-Policy fixtures are in [`policies/`](policies/).
-
-## Version caveat
-
-OpenBao 2.6.2 does **not** contain control groups. They first appear in the official `2.7.0-beta20260909` prerelease, so substituting 2.6.2 cannot exercise this workflow. The test is deliberately pinned to that beta and does not recommend a prerelease for production. Update the version, archive names, both architecture digests, and documentation only with a successful full E2E run.
+- **Minting:** the plugin's mint CLI logs in with AppRole and mints a Session Token for alias `opencode-session-<id>`. The baseline token can't read the KV secrets.
+- **API transport:** the approver side uses the generated ConnectRPC Go client with a cookie session, as the PWA does. bao-cred uses the same API through `AgentService`, waiting on `WatchGrantRequest`.
+- **Batch request:**
+  - `bao-cred request` files a batch. The approver learns about it from the `WatchEvents` stream, not by polling, and sees the reason and the session's ID and title.
+  - The approver approves one item and rejects another. A path outside the Grantable Rules and a `sys/` path are refused before anyone sees them.
+  - bao-cred exits with the denied code and prints every item's state.
+- **Approved access:** the session's **existing** token reads the approved path, both directly and through `bao-cred -field`. The rejected path stays denied. The session's entity carries exactly one `agent-grant-` policy.
+- **No duplicates:**
+  - Requesting an already-allowed path returns `already_granted` and no approver sees it.
+  - A request filed with `-no-wait` is approved, and `bao-cred request -wait <id>` resumes and sees the approval.
+- **Session isolation:** another session can't use the Grant. A subagent minted with `--parent` resolves to the root session's identity and can.
+- **Expiry and revoke:**
+  - A Grant with a 5s TTL stops working once its block's `expiration` passes, while other blocks of the same session policy keep working.
+  - Revoking a Grant through the approver API takes effect at once and leaves other Grants intact.
+- **Request on denial:** `bao-cred -reason … <path>` files a request when a read is denied, waits, and prints the secret after approval. Without `-reason` it fails with a hint.
+- **Grant listing:** `bao-cred grants` lists only the session's active Grants.
+- **Agent API access:** a human userpass token gets `permission_denied` from `AgentService`.
+- **Authorizer token limits:** the authorizer token can't rename or disable an entity, or write a policy outside `agent-grant-*`.

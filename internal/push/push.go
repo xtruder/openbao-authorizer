@@ -1,4 +1,4 @@
-// Package push delivers generic Web Push notifications for new requests.
+// Package push delivers generic Web Push notifications for new Grant Requests.
 package push
 
 import (
@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/SherClockHolmes/webpush-go"
-	"github.com/xtruder/openbao-authorizer/internal/openbao"
 	"github.com/xtruder/openbao-authorizer/internal/store"
 )
 
@@ -36,7 +35,6 @@ type Config struct {
 	Subject             string
 	AllowedHostSuffixes []string
 	Resolver            Resolver
-	Eligible            func(context.Context, string) bool
 }
 
 // Sender abstracts the webpush library for deterministic tests.
@@ -202,8 +200,9 @@ var deniedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("2001:db8::/32"),
 }
 
-// NewRequest sends a generic hint; sensitive request details remain in the authenticated app.
-func (s *Service) NewRequest(ctx context.Context, id string, _ openbao.ControlGroupRequest) error {
+// NewRequest sends a generic hint; reasons, paths and session details remain
+// in the authenticated app.
+func (s *Service) NewRequest(ctx context.Context, id string) error {
 	if s.config.PublicKey == "" {
 		return nil
 	}
@@ -214,8 +213,8 @@ func (s *Service) NewRequest(ctx context.Context, id string, _ openbao.ControlGr
 	}
 
 	payload, err := json.Marshal(map[string]string{
-		"title": "OpenBao approval pending",
-		"body":  "A new control-group request needs review.",
+		"title": "OpenBao access requested",
+		"body":  "An agent session is waiting for an access decision.",
 		"url":   "/?request=" + url.QueryEscape(id),
 	})
 	if err != nil {
@@ -223,11 +222,9 @@ func (s *Service) NewRequest(ctx context.Context, id string, _ openbao.ControlGr
 	}
 
 	var sendErrors []error
+	// Subscriptions expire with the session that registered them, and logout
+	// deletes them, so every stored one belongs to a logged-in Approver.
 	for _, subscription := range subscriptions {
-		if s.config.Eligible == nil || !s.config.Eligible(ctx, subscription.EntityID) {
-			continue
-		}
-
 		if validateErr := s.ValidateEndpoint(ctx, subscription.Endpoint); validateErr != nil {
 			if deleteErr := s.store.DeleteSubscription(ctx, subscription.Endpoint); deleteErr != nil {
 				sendErrors = append(sendErrors, deleteErr)

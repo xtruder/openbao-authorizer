@@ -22,32 +22,37 @@ this unit as a production OpenBao deployment.
 The app binary embeds `web/dist`; `app.hcl` leaves `server.static_directory`
 empty so the service does not need a frontend directory at runtime.
 
-## Provisioned local identities
+## Provisioned local objects
 
 `bootstrap-openbao.sh` creates:
 
-- scanner policy/token for the app;
-- `approver` user and the `local-approvers` identity group;
-- `requester` user and a protected `kv/data/controlled` path;
-- `agent` user restricted to approved `github/token/project-*` permission sets;
-- one-approval control-group factors with self-authorization disabled.
+- the `openbao-authorizer` policy ([`config/authorizer-policy.hcl`](../../config/authorizer-policy.hcl))
+  and an orphan authorizer token without the default policy;
+- the `approver` user, its `openbao-authorizer-approver` marker policy and the
+  `local-approvers` identity group;
+- the `opencode-session` baseline policy and token role
+  (`orphan`, renewable, 24h period, entity aliases `opencode-session-*`);
+- the `opencode-minter` policy and AppRole, which can only call
+  `auth/token/create/opencode-session`;
+- an example secret at `kv/opencode/example`, plus `grantable` rules in
+  `app.hcl` for `kv/data/opencode/*`, `kv/metadata/opencode/*` and
+  `github/token/project-*`.
 
-Generated login material remains local:
+Generated material remains local:
 
 ```text
 ~/.config/openbao-authorizer/approver-password
 ~/.config/openbao-authorizer/app.hcl
 ~/.config/openbao-authorizer/encryption-key
-~/.config/openbao-authorizer/scanner-token
-~/.config/openbao-authorizer/requester-password
-~/.config/openbao-authorizer/requester-token
-~/.config/openbao-authorizer/agent-token
+~/.config/openbao-authorizer/authorizer-token
+~/.config/openbao-authorizer/opencode-minter-role-id
+~/.config/openbao-authorizer/opencode-minter-secret-id
 ```
 
 Sign into the PWA as `approver` with the generated approver password. The app
 stores only OpenBao's renewable token, encrypted server-side; the password is
-not retained. `bao-cred` reads the agent token directly; do not copy it into
-`gh auth login`. Never publish these files.
+not retained. The opencode plugin reads the minter role ID and secret ID files
+and mints one Session Token per agent session. Never publish these files.
 
 ## Operations
 
@@ -58,7 +63,26 @@ journalctl --user -u openbao-authorizer-openbao.service -u openbao-authorizer.se
 ```
 
 Restarting the OpenBao unit also reprovisions it. Because the app is bound to
-that unit, systemd restarts the app with the newly generated scanner token.
+that unit, systemd restarts the app with the newly generated authorizer token.
+The in-memory dev server forgets every Grant and Session Identity on restart;
+delete `~/.local/state/openbao-authorizer/app.db` too if stale grants in the
+PWA are confusing.
+
+### Mint a Session Token by hand
+
+The opencode plugin normally does this. To try the flow from a shell:
+
+```sh
+cd ~/.config/openbao-authorizer
+export BAO_ADDR=http://127.0.0.1:18200
+minter="$(bao write -field=token auth/approle/login \
+  role_id="$(cat opencode-minter-role-id)" secret_id="$(cat opencode-minter-secret-id)")"
+export BAO_TOKEN="$(BAO_TOKEN="${minter}" bao token create -role=opencode-session \
+  -entity-alias=opencode-session-manual -metadata=title="Manual test" \
+  -metadata=directory="${PWD}" -field=token)"
+export OPENBAO_AUTHORIZER_URL=http://127.0.0.1:18202
+bao-cred -reason "Try the local authorizer" kv/data/opencode/example
+```
 
 ## Updating the application
 
@@ -157,34 +181,35 @@ Use a deployment-owned JSON file with `permission_sets` and
   project-name example-org/example-repo 87654321
 ```
 
-This creates `github/token/project-project-name`. Agents can read only paths
-matching `github/token/project-*`; they cannot access `github/config`, the bare
-unrestricted `github/token` endpoint, or permission-set administration.
+This creates `github/token/project-project-name`. The `github-token` grantable
+rule lets agents request only paths matching `github/token/project-*`; requests
+for `github/config`, the bare unrestricted `github/token` endpoint, or
+permission-set administration are refused before an approver sees them.
 
-### 4. Run `gh` through approval
+### 4. Run `gh` with a Grant
 
-The generic credential requester reads the local agent OpenBao token, requests
-the fixed project permission set, waits for a control-group approval, unwraps
-the GitHub token only in memory, and exports it only to the child `gh` process:
+Inside an opencode session the plugin has already put a Session Token in
+`BAO_TOKEN`. When the token lacks access, `bao-cred` files a Grant Request with
+the given reason, waits for an Approver, and retries the read once:
 
 ```sh
-bao-cred -map GH_TOKEN=token github/token/project-project-name -- \
+bao-cred -reason "Inspect the repository for the release" \
+  -map GH_TOKEN=token github/token/project-project-name -- \
   gh repo view example-org/example-repo
-bao-cred -map GH_TOKEN=token github/token/project-project-name -- \
-  gh pr list --repo example-org/example-repo
 ```
 
-Approve the pending request at:
+Approve the item at:
 
 ```text
 https://authorizer.example.com
 ```
 
 Sign in there as `approver` with the current value of
-`~/.config/openbao-authorizer/approver-password`. The helper waits up to 15
-minutes. On approval, the response-wrapping token is consumed once and the
-GitHub installation token expires at GitHub after about one hour. Neither token
-is written to disk by `bao-cred`.
+`~/.config/openbao-authorizer/approver-password`. The Grant lasts at most one
+hour (the `github-token` rule's `max_ttl`), so later `gh` calls in the same
+session read the path without asking again. The GitHub installation token
+expires at GitHub after about one hour and is never written to disk by
+`bao-cred`.
 
 ## Web Push
 

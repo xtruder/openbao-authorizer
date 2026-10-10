@@ -1,4 +1,5 @@
-// Command openbao-authorizer runs the OpenBao control-group approval web application.
+// Command openbao-authorizer runs the OpenBao Authorizer: the Agent API that
+// files Grant Requests and the Approver PWA that decides them.
 package main
 
 import (
@@ -11,6 +12,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"mime"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -20,10 +22,10 @@ import (
 	"time"
 
 	"github.com/xtruder/openbao-authorizer/internal/config"
+	"github.com/xtruder/openbao-authorizer/internal/grants"
 	"github.com/xtruder/openbao-authorizer/internal/httpapi"
 	"github.com/xtruder/openbao-authorizer/internal/openbao"
 	"github.com/xtruder/openbao-authorizer/internal/push"
-	"github.com/xtruder/openbao-authorizer/internal/scanner"
 	"github.com/xtruder/openbao-authorizer/internal/store"
 	frontend "github.com/xtruder/openbao-authorizer/web"
 )
@@ -50,10 +52,10 @@ func run(configPath string) error {
 	}
 
 	bao, err := openbao.New(openbao.Config{
-		Address:      cfg.OpenBaoAddress,
-		ScannerToken: cfg.OpenBaoScannerToken,
-		Namespace:    cfg.OpenBaoNamespace,
-		HTTPClient:   httpClient,
+		Address:    cfg.OpenBaoAddress,
+		Token:      cfg.OpenBaoAuthorizerToken,
+		Namespace:  cfg.OpenBaoNamespace,
+		HTTPClient: httpClient,
 	})
 	if err != nil {
 		return err
@@ -71,101 +73,40 @@ func run(configPath string) error {
 	}()
 
 	events := httpapi.NewEventBus()
-	sessions := httpapi.NewSessions()
-	if deleteExpiredErr := database.DeleteExpiredSessions(context.Background(), time.Now()); deleteExpiredErr != nil {
-		return deleteExpiredErr
-	}
-
-	storedSessions, err := database.Sessions(context.Background(), time.Now())
-	if err != nil {
-		return err
-	}
-
-	sessions.Restore(storedSessions)
 	pushService, err := push.New(database, push.Config{
 		PublicKey: cfg.VAPIDPublicKey, PrivateKey: cfg.VAPIDPrivateKey, Subject: cfg.VAPIDSubject,
 		AllowedHostSuffixes: cfg.PushAllowedHosts,
-		Eligible: func(ctx context.Context, entityID string) bool {
-			tokens := sessions.ActiveTokens(entityID)
-			if len(tokens) == 0 {
-				return false
-			}
-
-			// Deliver only when at least one active session still presents a
-			// valid, eligible OpenBao token. Transient lookup failures must not
-			// delete sessions or subscriptions.
-			for _, token := range tokens {
-				identity, lookupErr := bao.LookupSelf(ctx, token)
-				if lookupErr != nil {
-					if isAuthoritativeTokenError(lookupErr) {
-						continue
-					}
-
-					return true
-				}
-
-				if identity.EntityID == entityID && identity.HasPolicy(cfg.ApproverPolicy) {
-					return true
-				}
-			}
-
-			sessions.DeleteEntity(entityID)
-			for _, token := range tokens {
-				if deleteErr := database.DeleteSessionsByToken(ctx, token); deleteErr != nil {
-					logger.Error("delete ineligible durable sessions", "error", deleteErr)
-				}
-			}
-
-			if deleteErr := database.DeleteSubscriptionsByEntity(ctx, entityID); deleteErr != nil {
-				logger.Error("delete ineligible push subscriptions", "error", deleteErr)
-			}
-
-			return false
-		},
 	}, nil)
 	if err != nil {
 		return err
 	}
 
-	notifier := &notificationFanout{events: events, push: pushService}
-	accessorScanner := scanner.New(bao, database, notifier, cfg.ApprovalContext, cfg.ScanConcurrency)
+	grantService := grants.New(bao, database, &httpapi.Notifier{Events: events, Push: pushService, Logger: logger}, grants.Config{
+		Policy:           cfg.GrantPolicy,
+		PendingTTL:       cfg.PendingTTL,
+		SessionTokenRole: cfg.SessionTokenRole,
+		Logger:           logger,
+	})
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	go scanLoop(rootCtx, logger, accessorScanner, cfg.ScanInterval)
-	go apiSweeper(rootCtx, logger, sessions, database)
-	go sessionRenewalLoop(rootCtx, logger, sessions, bao, database)
+	go grantService.Run(rootCtx)
+	go sessionSweeper(rootCtx, logger, database)
 
 	api := httpapi.New(httpapi.Options{
 		OpenBao:              bao,
 		Store:                database,
+		Grants:               grantService,
 		Events:               events,
 		Logger:               logger,
 		PublicOrigin:         cfg.PublicOrigin,
 		VAPIDPublicKey:       cfg.VAPIDPublicKey,
 		ApproverPolicy:       cfg.ApproverPolicy,
-		ExposeRequestData:    cfg.ExposeRequestData,
-		ApprovalContext:      cfg.ApprovalContext,
 		InsecureCookies:      cfg.InsecureCookies,
-		Sessions:             sessions,
+		SessionTTL:           cfg.SessionTTL,
 		ValidatePushEndpoint: pushService.ValidateEndpoint,
 	})
-	mux := http.NewServeMux()
-	mux.Handle("/api/", api)
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
-	mux.Handle("/", staticHandler(staticFileSystem(cfg.StaticDirectory)))
-
-	server := &http.Server{
-		Addr:              cfg.ListenAddress,
-		Handler:           requestLogger(logger, mux),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       2 * time.Minute,
-	}
+	server := newHTTPServer(cfg.ListenAddress, requestLogger(logger, routes(api, staticFileSystem(cfg.StaticDirectory))))
 	serveErrors := make(chan error, 1)
 	go func() {
 		logger.Info("listening", "address", cfg.ListenAddress)
@@ -187,116 +128,52 @@ func run(configPath string) error {
 	return nil
 }
 
-type notificationFanout struct {
-	events *httpapi.EventBus
-	push   *push.Service
-}
-
-func (n *notificationFanout) NewRequest(ctx context.Context, id string, request openbao.ControlGroupRequest) error {
-	eventErr := n.events.Publish("new-request", map[string]string{"status": "pending"})
-	pushErr := n.push.NewRequest(ctx, id, request)
-	return errors.Join(eventErr, pushErr)
-}
-
-func (n *notificationFanout) StatusChanged(_ context.Context, id string, status store.RequestStatus) error {
-	return n.events.Publish("status", map[string]any{"id": id, "status": status})
-}
-
-func scanLoop(ctx context.Context, logger *slog.Logger, accessorScanner *scanner.Scanner, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		scanCtx, cancel := context.WithTimeout(ctx, interval)
-		err := accessorScanner.Scan(scanCtx)
-		cancel()
-		if err != nil && !errors.Is(err, context.Canceled) {
-			logger.Error("accessor scan failed", "error", err)
-		}
-
-		select {
-		case <-ticker.C:
-		case <-ctx.Done():
-			return
-		}
+// newHTTPServer builds the server. Its request contexts are cancelled as soon
+// as Shutdown begins: Shutdown only waits for idle connections, and live
+// streams would otherwise hold it until the timeout.
+func newHTTPServer(address string, handler http.Handler) *http.Server {
+	baseCtx, cancel := context.WithCancel(context.Background())
+	server := &http.Server{
+		Addr:              address,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		BaseContext:       func(net.Listener) context.Context { return baseCtx },
 	}
+	server.RegisterOnShutdown(cancel)
+	return server
 }
 
-type tokenRenewer interface {
-	RenewSelf(context.Context, string) error
+// routes serves the ConnectRPC services under /api/ next to the health check
+// and the PWA.
+func routes(api http.Handler, staticFiles fs.FS) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/api/", api)
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.Handle("/", staticHandler(staticFiles))
+	return mux
 }
 
-func renewSessionTokens(ctx context.Context, renewer tokenRenewer, tokens []string) ([]string, []error) {
-	invalid := make([]string, 0)
-	renewErrors := make([]error, 0)
-	for _, token := range tokens {
-		if err := renewer.RenewSelf(ctx, token); err != nil {
-			if isAuthoritativeTokenError(err) {
-				invalid = append(invalid, token)
-				continue
-			}
-
-			renewErrors = append(renewErrors, fmt.Errorf("renew OpenBao session token: %w", err))
-		}
-	}
-
-	return invalid, renewErrors
-}
-
-type sessionTokenStore interface {
-	DeleteSessionsByToken(context.Context, string) error
-	DeleteExpiredSessions(context.Context, time.Time) error
-}
-
-func sessionRenewalLoop(ctx context.Context, logger *slog.Logger, sessions *httpapi.Sessions, renewer tokenRenewer, storage sessionTokenStore) {
-	ticker := time.NewTicker(10 * time.Minute)
-	defer ticker.Stop()
-	for {
-		select {
-		case now := <-ticker.C:
-			invalid, renewErrors := renewSessionTokens(ctx, renewer, sessions.AllActiveTokens(now))
-			for _, token := range invalid {
-				sessions.DeleteToken(token)
-				if err := storage.DeleteSessionsByToken(ctx, token); err != nil {
-					logger.Error("delete invalid durable sessions", "error", err)
-				}
-			}
-
-			for _, err := range renewErrors {
-				logger.Warn("session token renewal failed; will retry", "error", err)
-			}
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
-// apiSweeper periodically deletes expired sessions so human OpenBao tokens do
-// not remain in process memory after their cookie has disappeared.
-func apiSweeper(ctx context.Context, logger *slog.Logger, sessions *httpapi.Sessions, storage sessionTokenStore) {
+// sessionSweeper periodically deletes expired approver sessions; lookups
+// already ignore them, so this only keeps the table small.
+func sessionSweeper(ctx context.Context, logger *slog.Logger, storage *store.DB) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for {
 		select {
 		case now := <-ticker.C:
-			sessions.DeleteExpired(now)
 			if err := storage.DeleteExpiredSessions(ctx, now); err != nil {
-				logger.Error("delete expired durable sessions", "error", err)
+				logger.Error("delete expired sessions", "error", err)
 			}
 		case <-ctx.Done():
 			return
 		}
 	}
-}
-
-// isAuthoritativeTokenError reports whether OpenBao rejected the token itself,
-// as opposed to a transient transport or server failure.
-func isAuthoritativeTokenError(err error) bool {
-	var httpErr *openbao.HTTPError
-	if !errors.As(err, &httpErr) {
-		return false
-	}
-
-	return httpErr.StatusCode == http.StatusForbidden || httpErr.StatusCode == http.StatusBadRequest || httpErr.StatusCode == http.StatusNotFound
 }
 
 func openBaoHTTPClient(caFile string) (*http.Client, error) {

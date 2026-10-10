@@ -53,8 +53,8 @@ describe('push service worker', () => {
     await dispatch(push!, {
       data: {
         json: () => ({
-          title: 'OpenBao approval pending',
-          body: 'A new control-group request needs review.',
+          title: 'OpenBao access requested',
+          body: 'An agent session is waiting for an access decision.',
           url: '/requests?status=pending',
           path: 'secret/data/payroll',
           entity: 'Alice',
@@ -63,8 +63,8 @@ describe('push service worker', () => {
       },
     })
 
-    expect(showNotification).toHaveBeenCalledWith('OpenBao approval pending', expect.objectContaining({
-      body: 'A new control-group request needs review.',
+    expect(showNotification).toHaveBeenCalledWith('OpenBao access requested', expect.objectContaining({
+      body: 'An agent session is waiting for an access decision.',
       data: { url: '/requests?status=pending' },
     }))
     const renderedNotification = JSON.stringify(showNotification.mock.calls[0])
@@ -78,8 +78,8 @@ describe('push service worker', () => {
     await dispatch(malformedWorker.handlers.get('push')!, {
       data: { json: () => { throw new SyntaxError('invalid JSON') } },
     })
-    expect(malformedWorker.showNotification).toHaveBeenCalledWith('OpenBao approval pending', expect.objectContaining({
-      body: 'A new control-group request needs review.',
+    expect(malformedWorker.showNotification).toHaveBeenCalledWith('OpenBao access requested', expect.objectContaining({
+      body: 'An agent session is waiting for an access decision.',
       data: { url: '/' },
     }))
 
@@ -87,13 +87,13 @@ describe('push service worker', () => {
     await dispatch(crossOriginWorker.handlers.get('push')!, {
       data: {
         json: () => ({
-          title: 'OpenBao approval pending',
-          body: 'A new control-group request needs review.',
+          title: 'OpenBao access requested',
+          body: 'An agent session is waiting for an access decision.',
           url: 'https://attacker.example/approval',
         }),
       },
     })
-    expect(crossOriginWorker.showNotification).toHaveBeenCalledWith('OpenBao approval pending', expect.objectContaining({
+    expect(crossOriginWorker.showNotification).toHaveBeenCalledWith('OpenBao access requested', expect.objectContaining({
       data: { url: '/' },
     }))
   })

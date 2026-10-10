@@ -1,37 +1,59 @@
 # OpenBao Authorizer
 
-A self-hosted approval inbox for [OpenBao control groups](https://openbao.org/community/rfcs/control-groups/). It discovers pending control-group wrapping accessors, streams them to an installable React PWA, sends generic Web Push notifications, and records approvals with the logged-in human's OpenBao identity.
+Humans approve, item by item, the extra OpenBao permissions that an AI agent session asks for. Approved permissions apply to the session's existing OpenBao token.
 
-> **OpenBao compatibility:** control groups are not present in OpenBao 2.6.2. The real-process test is pinned to the official `v2.7.0-beta20260909` prerelease, where the feature first appears. Do not infer production stability from this prerelease test; qualify a stable release before production use.
+Each **Agent Session** (one opencode conversation and its subagents) has its own **Session Token** and **Session Identity**. The agent files a **Grant Request**: a reason plus one or more **Permission Items** (path + capabilities). Items outside the operator's **Grantable Rules** are refused at once; the rest wait in an installable React PWA, with Web Push for new items. An **Approver** approves or rejects each item, optionally shortening its TTL. An approved item becomes a **Grant**: a path block with its own expiry in the session's single OpenBao policy, which is attached to the Session Identity. The agent's unchanged token can read the path immediately, until the Grant expires or is revoked; after expiry the path needs a new approval. See [`CONTEXT.md`](CONTEXT.md) for the vocabulary and [ADR-0001](docs/adr/0001-session-scoped-grants.md) for the design decision.
+
+> **OpenBao compatibility:** targets OpenBao **2.7.1** stable. Policy-level `expiration` and entity aliases on token roles are required; OpenBao control groups are not used.
 
 ## Security model
 
-Two OpenBao credentials have deliberately different roles:
+Approver sessions are app-owned and keep no OpenBao token ([ADR-0003](docs/adr/0003-approver-sessions.md)).
 
-- **Scanner token:** lists service-token accessors, calls `sys/control-group/request`, may revoke a reviewed wrapping token after an authenticated approver rejects it, and may read explicitly configured non-secret approval metadata. It cannot approve, unwrap, or renew. Context-reader policies must expose only data safe for every approver to inspect.
-- **Human token:** obtained by exchanging username/password with OpenBao's `userpass` auth method, encrypted in the server-side SQLite session store, renewed while the 30-day app session is active, and used for `sys/control-group/authorize`. The password is discarded immediately. Login and every authenticated request require the configured `APPROVER_POLICY`; OpenBao—not this app—then decides whether that identity satisfies each request's control-group factor and prevents disallowed self-approval.
+Three kinds of OpenBao token have deliberately different roles:
 
-The browser receives neither OpenBao token nor password after login. Its opaque 30-day session is an `HttpOnly`, `SameSite=Strict`, secure cookie; encrypted server-side sessions survive application restarts. Mutations require a session-bound CSRF token, JSON content type, and same-origin checks. Signing out revokes the human token. Wrapping tokens remain with requesters; the app never stores or unwraps them.
+- **Authorizer token:** the authorizer's own credential, created without the default policy. It reads identity entities to attach session policies, writes and deletes `agent-grant-*` ACL policies, and updates entity `policies`. It can't change other entity fields, other policies' contents, tokens or auth methods. Because it controls Grant policy content and entity policy lists, it can grant privileges and must be protected like an administrative credential. All OpenBao writes use this token.
+- **Session Token:** minted by the opencode plugin through the `opencode-session` token role, with an entity alias `opencode-session-<session id>` and only the baseline policy. Agents present it as `Authorization: Bearer` to the Agent API. The authorizer accepts it only when `lookup-self` reports that token role and an entity; only the minter can create tokens with the role. It uses the token only for `lookup-self` and `capabilities-self` and never stores it.
+- **Human token:** obtained by exchanging username/password with OpenBao's `userpass` auth method at login. It only proves that the Approver holds the configured `approver_policy`, and the authorizer revokes it right after that check. Neither the token nor the password is kept.
 
-Accessors, deferred request payloads, and push subscriptions are AES-256-GCM encrypted before SQLite persistence; the database is created with mode `0600`. Payloads are omitted from API responses unless `requests.expose_data = true` is explicitly configured. Logs, SSE messages, push payloads, URLs, and browser storage do not contain accessors or tokens. Push notifications contain only a generic “approval pending” message, are sent only for an active eligible approver session, expire with that session, and are restricted to configured public push-service host suffixes.
+Grants are enforced by OpenBao, not by the authorizer:
+
+- Each Agent Session has one policy, `agent-grant-<entity id>`, holding one `path` block per active Grant. Each block carries its own `expiration`, and the policy expires with its last block, so Grants lapse on time even when the authorizer is down.
+- Grants attach to the Session Identity, so they reach every token of that session (including one re-minted after an opencode restart) and never another session's.
+- The **Hard Denylist** refuses any path with a `sys`, `auth`, `identity` or `cubbyhole` segment in any position (a root-namespace policy on `ns1/sys/...` reaches namespace `ns1`'s `sys/`) and any `sudo` capability, whatever the configuration says. The server refuses to start if a `grantable` rule names such a segment.
+- Requested paths must be concrete (no `*` or `+`), so each Grant covers exactly one path.
+
+The threat model guards against agent mistakes, not a malicious local agent: the agent runs as the same OS user as the minting credential, so it could mint baseline tokens for any session alias and use that session's Grants.
+
+The browser receives neither OpenBao token nor password after login. Its opaque session (`server.session_ttl`, default 7 days) is an `HttpOnly`, `SameSite=Strict`, secure cookie; server-side sessions hold only the entity ID, display name and expiry, and survive application restarts. Every approver RPC, including login, reads and the live stream, requires a same-origin request (`Origin` and `Sec-Fetch-Site` checks). There is no CSRF token: the cookie is `SameSite=Strict`, Connect's content types force a CORS preflight the server never grants, and the origin check rejects sibling sites. The authorizer checks the approver policy only at login, so removing it from someone takes effect at their next login, at most `session_ttl` later. Signing out deletes the session and its push subscriptions. The `AgentService` accepts only bearer tokens and ignores cookies, so a browser cannot be tricked into calling it.
+
+Request reasons, session display fields (session ID, title, directory), and push subscriptions are AES-256-GCM encrypted before SQLite persistence; approver sessions are stored under an HMAC of their ID; the database is created with mode `0600`. Paths and capabilities are stored in plaintext. Logs, stream messages, push payloads, URLs, and browser storage contain no tokens. Push notifications contain only a generic "access requested" message, expire with the approver session that registered them, and are restricted to configured public push-service host suffixes.
 
 ## Architecture
 
 ```text
-OpenBao ── LIST accessors / inspect ──> Go scanner ──> encrypted SQLite
-   ^                                         │              │
-   │ human authorize / app revoke            ├── SSE ────────┤
-   │                                         └── Web Push    │
-Browser PWA ── HttpOnly session + CSRF ──> Go HTTP API ─────┘
+opencode plugin ──AppRole login──> OpenBao ──token/create/opencode-session──> Session Token
+                                                                                 │
+agent ── bao-cred (Bearer Session Token) ──> AgentService ──lookup-self,          │
+                                               │            capabilities-self     │
+                                               │                                  │
+                                               ▼                                  │
+                                     encrypted SQLite ──WatchEvents / Web Push──> Approver PWA
+                                               ▲                                  │
+                                               └── per-item approve / reject ─────┘
+                                               │
+                      authorizer token: policy agent-grant-<entity id>, one path block per Grant
+                                        (expiration each) + attached to the Session Identity
+agent ── same Session Token ──> OpenBao (bao-cred, secretspec, bao CLI)
 ```
 
-The production Vite build is embedded in the Go binary and served by default. The service worker precaches only static application assets; `/api/` is network-only.
+Both clients use one ConnectRPC API defined in `proto/` ([ADR-0002](docs/adr/0002-connectrpc-api.md)), served on the same listener under `/api`. The production Vite build is embedded in the Go binary and served by default. The service worker precaches only static application assets; `/api/` is network-only.
 
 ## Prerequisites
 
 - Go 1.26 or newer
 - Node.js and npm
-- OpenBao with control-group support (`v2.7.0-beta20260909` is the currently tested version)
+- OpenBao 2.7.1 or newer
 - HTTPS for production PWA installation, secure cookies, and Web Push
 
 ## Build and test
@@ -41,7 +63,7 @@ make test       # Go race tests + React workflow tests
 make lint       # go vet, golangci-lint, Oxlint
 make bin/openbao-authorizer
 make bin/bao-cred
-make e2e        # tagged Go test: real OpenBao + real Go app + API approval flow
+make e2e        # tagged Go test: real OpenBao + authorizer + bao-cred grant flow
 ```
 
 The E2E setup downloads and caches the official Linux release, verifies the repository-pinned per-architecture SHA-256 and exact archive layout, allocates kernel-assigned loopback ports, and cleans up both process groups. See [`e2e/README.md`](e2e/README.md).
@@ -67,54 +89,63 @@ files. OpenBao itself and environment-specific
 GitHub App installations, permission sets, passwords, keys, DNS, and Compose
 configuration belong in a deployment repository. Generic local-development
 examples remain under [`deploy/local`](deploy/local/). The image also contains
-`bao-cred` at `/usr/local/bin/bao-cred` for requester workflows that use the
-same container image.
+`bao-cred` at `/usr/local/bin/bao-cred` for agent workflows that use the same
+container image.
 
-## OpenBao policies
+## OpenBao setup
 
-Install [`config/scanner-policy.hcl`](config/scanner-policy.hcl) on a dedicated orphan machine token created **without the default policy**. Assign [`config/approver-policy.hcl`](config/approver-policy.hcl) to the human identity group that appears in your protected path's `control_group` factor.
-
-For example, if the HCL configuration includes the GitHub approval-context rule,
-install a separate least-privilege metadata-reader policy:
-
-```hcl
-path "github/permissionset/*" {
-  capabilities = ["read"]
-}
-```
-
-Then create the scanner token with both policies:
+| Object | Definition |
+|---|---|
+| Baseline policy `opencode-session` | Empty or site-defined. Session Tokens also carry `default`, which provides `lookup-self`, `renew-self` and `capabilities-self`. Example: [`deploy/local/opencode-session-policy.hcl`](deploy/local/opencode-session-policy.hcl). |
+| Token role `opencode-session` | `allowed_policies=["opencode-session"]`, `orphan=true`, `renewable=true`, `token_period=24h`, `allowed_entity_aliases=["opencode-session-*"]` |
+| Minter policy `opencode-minter` | `update` on `auth/token/create/opencode-session` only ([`deploy/local/opencode-minter-policy.hcl`](deploy/local/opencode-minter-policy.hcl)) |
+| AppRole role `opencode-minter` | `token_policies=["opencode-minter"]`, short token TTL; the plugin reads its role ID and secret ID from files |
+| Authorizer policy | [`config/authorizer-policy.hcl`](config/authorizer-policy.hcl), on a dedicated orphan token created without the default policy |
+| Approver policy | [`config/approver-policy.hcl`](config/approver-policy.hcl), on the human approvers' identity group; its name is `openbao.approver_policy` |
 
 ```sh
-bao token create -orphan \
-  -policy=openbao-authorizer-scanner \
-  -policy=openbao-authorizer-github-context \
-  -no-default-policy \
-  -renewable=false
+bao policy write openbao-authorizer config/authorizer-policy.hcl
+bao policy write openbao-authorizer-approver config/approver-policy.hcl
+bao policy write opencode-session deploy/local/opencode-session-policy.hcl
+bao policy write opencode-minter deploy/local/opencode-minter-policy.hcl
+
+bao write auth/token/roles/opencode-session \
+  allowed_policies=opencode-session orphan=true renewable=true token_period=24h \
+  allowed_entity_aliases='opencode-session-*'
+bao write auth/approle/role/opencode-minter \
+  token_policies=opencode-minter token_ttl=15m token_max_ttl=1h
+
+bao token create -orphan -policy=openbao-authorizer -no-default-policy \
+  -renewable=false -ttl=720h -field=token >/run/secrets/openbao-authorizer-token
 ```
 
-The scanner policy uses path-scoped `sudo`; it is not a root token. Listing `auth/token/accessors` exposes every service-token accessor, and `auth/token/revoke-accessor` can revoke any token whose accessor is supplied, so this credential must be tightly controlled. The application invokes revocation only for an encrypted accessor belonging to a stored pending request after an authenticated, CSRF-protected rejection. The `-no-default-policy` flag is required: without it, OpenBao attaches capabilities such as token self-renewal that are outside the documented scanner role.
-
-Each protected factor must explicitly set `approvals >= 1` and should leave self-authorization disabled:
+The authorizer policy grants:
 
 ```hcl
-path "pki/issue/*" {
-  capabilities = ["update"]
-
-  control_group = {
-    ttl               = "30m"
-    self_auth_allowed = false
-
-    factor "pki-approvers" {
-      controlled_capabilities = ["update"]
-      identity {
-        group_names = ["pki-approvers"]
-        approvals   = 1
-      }
-    }
+path "identity/entity/id/*" {
+  capabilities = ["read", "update"]
+  allowed_parameters = {
+    "policies" = []
   }
 }
+
+path "sys/policies/acl/agent-grant-*" {
+  capabilities = ["create", "read", "update", "delete"]
+}
 ```
+
+The key-only `allowed_parameters` allows entity updates to change `policies` and nothing else, so `name`, `metadata` and `disabled` are refused. OpenBao can't restrict which policy names go into that list. Value globs such as `["agent-grant-*"]` reject a JSON list and accept a comma-joined string containing any names. Treat this token as a privilege-granting credential: it writes the content of Grant policies and can attach any non-root policy to any entity. Grantable Rules and the Hard Denylist are enforced by the authorizer, not by OpenBao. When it attaches a session policy, the authorizer appends the name and keeps every policy already on the entity.
+
+The authorizer does not renew its own token. Create it with a TTL that covers the deployment's restart cadence, or replace the token file and restart the server before it expires.
+
+### Grant lifecycle in OpenBao
+
+- **Approve:** one batch of decisions is all or nothing. The authorizer rewrites `sys/policies/acl/agent-grant-<entity id>` once, from the session's active Grants plus the new approvals, and attaches the name to the Session Identity if it isn't there yet. It then stores every decision of the batch in one transaction. If the policy write fails, nothing changes; if storing fails, the policy is rewritten from the stored Grants. A batch with only rejections makes no OpenBao calls.
+- **Revoke:** rewrite the policy without that Grant's block, or delete it when no Grant is left, so access ends at once; then record the revocation. The name stays on the entity: without the policy it grants nothing.
+- **Expire:** OpenBao ignores each block after its `expiration` and drops the whole policy after the last one. Expired blocks are left out of the next rewrite.
+- **Pending expiry:** all items of a request share one deadline; those no Approver decides within `grants.pending_ttl` become `expired`.
+
+Run a single authorizer process per database. Decisions and policy writes for one session are serialized by in-process locks, so two instances sharing a database could race on a session's policy.
 
 ## Run
 
@@ -124,54 +155,35 @@ Build first:
 make bin/openbao-authorizer bin/bao-cred
 ```
 
-Create mode-`0400` files for the application encryption key and scanner token,
+Create mode-`0400` files for the application encryption key and authorizer token,
 then copy and edit [`config/openbao-authorizer.example.hcl`](config/openbao-authorizer.example.hcl):
 
 ```sh
 openssl rand -base64 32 >/run/secrets/openbao-authorizer-key
-chmod 0400 /run/secrets/openbao-authorizer-key /run/secrets/openbao-scanner-token
+chmod 0400 /run/secrets/openbao-authorizer-key /run/secrets/openbao-authorizer-token
 cp config/openbao-authorizer.example.hcl openbao-authorizer.hcl
 ./bin/openbao-authorizer -config openbao-authorizer.hcl
 ```
 
-Terminate TLS at a trusted reverse proxy. Do not set `insecure_cookies = true` outside loopback development or the E2E harness. Relative paths in the HCL file are resolved from the file's directory.
+Terminate TLS at a trusted reverse proxy. The proxy must not buffer responses under `/api/`: `WatchEvents` and `WatchGrantRequest` are long-lived streams, and a buffering proxy holds back their snapshots and heartbeats. The server sends `X-Accel-Buffering: no`, which nginx honors; configure other proxies to flush streamed responses immediately and to allow idle reads longer than the 25-second heartbeat. Do not set `insecure_cookies = true` outside loopback development or the E2E harness. Relative paths in the HCL file are resolved from the file's directory.
 
 ## Credential requester CLI
 
-`bao-cred` reads any OpenBao path and returns its data. When OpenBao applies a
-control group, it reports progress on stderr, waits up to 15 minutes for
-approval, then consumes the wrapping token. It uses the official OpenBao Go
-client and honors standard client variables such as `BAO_ADDR`, `BAO_NAMESPACE`,
-and `BAO_CACERT`.
+`bao-cred` reads OpenBao paths with the **Agent Session**'s existing
+**Session Token**, and files **Grant Requests** with the authorizer when the
+session needs more access. It never stores or mints tokens.
 
-Log in interactively with the `userpass` auth method:
+| Setting | Source |
+|---|---|
+| Session Token | `BAO_TOKEN`, then `VAULT_TOKEN`; bao-cred fails if neither is set |
+| OpenBao client | Standard client variables such as `BAO_ADDR`, `BAO_NAMESPACE`, and `BAO_CACERT` |
+| Authorizer URL | `-authorizer`, then `OPENBAO_AUTHORIZER_URL`; needed only for `request`, `grants`, and `-reason`. Give the bare origin; bao-cred calls the `AgentService` RPCs under `/api`. It must be HTTPS unless the host is loopback (`localhost`, `127.0.0.0/8`, `::1`), because the Session Token is sent with every call; redirects to plain HTTP are refused |
+| Authorizer TLS | System roots plus any CA from `BAO_CACERT`, `BAO_CACERT_BYTES`, or `BAO_CAPATH`; `BAO_SKIP_VERIFY` is ignored for the authorizer |
 
-```sh
-bao-cred login
-```
+The opencode plugin injects these variables into the agent's shell, so agents
+pass no token or address flags.
 
-The command prompts for the OpenBao address, username (default `agent`), and a
-hidden password. It saves the address and token under
-`~/.config/openbao-authorizer/` by default, so later credential requests need no
-address or token flags. Use `bao-cred logout` to remove the saved token. For
-automation, pass `-address`, `-username`, and `-password-stdin` explicitly.
-
-The request token is selected in this order: an explicit `-token-file`,
-`BAO_TOKEN`, then
-`$OPENBAO_CONTROL_GROUP_CONFIG_DIR/agent-token` (defaulting to
-`~/.config/openbao-authorizer/agent-token`). Credentials are delivered through
-exactly one output or command action:
-
-For protected paths, the request token's policy must also allow the
-parameter-constrained control-group status check used while waiting:
-
-```hcl
-path "sys/control-group/request" {
-  capabilities        = ["update"]
-  required_parameters = ["accessor"]
-  allowed_parameters  = { "accessor" = [] }
-}
-```
+### Reading credentials
 
 ```sh
 # Complete data object as JSON.
@@ -180,7 +192,10 @@ bao-cred database/creds/app
 # One scalar, with no trailing newline.
 bao-cred -field username database/creds/app
 
-# Custom text from the unwrapped data object.
+# On permission denied, request read access, wait for a decision, and retry once.
+bao-cred -reason "run the app's schema migration" -field password database/creds/app
+
+# Custom text from the data object.
 bao-cred -format template -template '{{ .username }}:{{ .password }}' database/creds/app
 
 # Explicit dotenv mappings written atomically with mode 0600.
@@ -193,40 +208,150 @@ bao-cred -map GH_TOKEN=token github/token/project-example -- \
   gh repo view example-org/example-repo
 ```
 
-Formats are `json`, `template`, `dotenv`, and POSIX `shell`. Dot-path selectors
-support nested objects, array indexes, and backslash-escaped dots in key names.
-Missing fields, duplicate mappings, and mapped arrays or objects fail the whole
-operation. Use `-quiet`, `-timeout`, and `-poll-interval` for automation. Shell
-output contains credentials by design; source it only in a trusted shell and do
-not log it.
+Credentials are delivered through exactly one output or command action. Formats
+are `json`, `template`, `dotenv`, and POSIX `shell`. Dot-path selectors support
+nested objects, array indexes, and backslash-escaped dots in key names. Missing
+fields, duplicate mappings, and mapped arrays or objects fail the whole
+operation. Shell output contains credentials by design; source it only in a
+trusted shell and do not log it. In command mode the child receives the mapped
+variables but not `BAO_TOKEN` or `VAULT_TOKEN`.
 
-### Configuration
+Without `-reason`, a permission-denied read fails with a hint to rerun with
+`-reason` or to use `bao-cred request`. With `-reason`, bao-cred files a
+**Grant Request** for `PATH=read`, waits up to `-timeout` (default 15m), and
+retries the read once when the item is approved or already granted.
+
+### Requesting Grants
+
+```sh
+# Batch several Permission Items under one reason; waits until none is pending.
+bao-cred request -reason "deploy app to staging" \
+  -item kv/data/app=read -item database/creds/app=read -ttl 2h
+
+# File without waiting, then resume waiting later.
+bao-cred request -no-wait -reason "rotate the CI token" -item github/token/project-ci=read
+bao-cred request -wait <request-id>
+
+# Active Grants for this session.
+bao-cred grants
+```
+
+`-item PATH=CAP[,CAP]` is repeatable; capabilities come from `create`, `read`,
+`update`, `patch`, `delete`, and `list`. `-ttl` asks for a Grant lifetime for
+every item; the authorizer refuses a TTL above the matching **Grantable Rule**'s
+`max_ttl`, or above `grants.default_ttl` when the rule sets none.
+
+While waiting, bao-cred watches the request over a stream that sends its full
+state after every decision. If the stream drops or the authorizer is
+unavailable, bao-cred reconnects with backoff until `-timeout`; the next
+snapshot is the truth, so no decision is missed.
+
+`request` prints `{"id": ..., "items": [...]}` on stdout. Each item has `id`,
+`path`, `capabilities`, `ttl` (a Go duration such as `1h0m0s`), `state`
+(`pending`, `already_granted`, `approved`, `rejected`, `refused`, `expired`, or
+`revoked`), any `reason`, and `expires_at` (RFC 3339): the pending deadline, or
+the Grant's expiry once approved. `grants` prints an array of the session's
+active Grants, each with `id`, `item_id`, `path`, `capabilities`, `created_at`,
+and `expires_at`. Progress goes to stderr; `-quiet` suppresses it.
+
+| Exit status | Meaning |
+|---|---|
+| `0` | Every Permission Item is approved or already granted, or the read succeeded |
+| `1` | Error, including a permission-denied read without `-reason` |
+| `2` | Usage error |
+| `3` | A Permission Item was rejected, refused, expired, or revoked |
+| `4` | A Permission Item is still pending at `-timeout`, or after `-no-wait`; resume with `bao-cred request -wait ID` |
+
+Status `4` wins over `3` because the request is not finished. In command mode,
+bao-cred exits with the child command's status.
+
+## Configuration
 
 The server accepts one HCL file through `-config`. String attributes may
 explicitly reference process environment variables through expressions such as
 `public_origin = "https://authorizer.${env.DOMAIN_NAME}"`; environment variables
-do not implicitly override HCL attributes. The example file documents every
-required block. Encryption keys, scanner tokens, and optional VAPID keys are
-read from files so secret values do not appear in HCL or the process
-environment.
-
-An `approval_context` block maps a reviewed request path to a safe, read-only
-OpenBao endpoint. Placeholders capture complete path segments and are escaped
-before substitution:
+do not implicitly override HCL attributes. The
+[example file](config/openbao-authorizer.example.hcl) documents every block.
+Encryption keys, the authorizer token, and optional VAPID keys are read from
+files so secret values do not appear in HCL or the process environment.
 
 ```hcl
-approval_context "github-token" {
-  match_path = "github/token/{name}"
-  read_path  = "github/permissionset/{name}"
+server {
+  listen_address   = "127.0.0.1:8080"
+  public_origin    = "https://approvals.example.com"
+  insecure_cookies = false
+  static_directory = ""     # empty serves the embedded PWA
+  session_ttl      = "168h" # default; approver session lifetime
+}
+
+openbao {
+  address               = "https://openbao.example.com"
+  ca_file               = "/etc/ssl/certs/organization-openbao-ca.pem" # optional
+  namespace             = ""                                           # optional
+  authorizer_token_file = "/run/secrets/openbao-authorizer-token"
+  approver_policy       = "openbao-authorizer-approver"
+  session_token_role    = "opencode-session" # default; token role of every Session Token
+}
+
+grants {
+  default_ttl = "72h" # default; TTL when a request sets none, and the cap for rules without max_ttl
+  pending_ttl = "24h" # default; undecided items expire after this
+}
+
+grantable "github-token" {
+  path         = "github/token/project-*" # OpenBao ACL pattern: `+` segment, trailing `*`
+  capabilities = ["read"]                  # maximum capabilities
+  max_ttl      = "8h"                      # optional; caps request and approver TTLs (default: default_ttl)
 }
 ```
 
-The scanner token must have `read` access to every configured `read_path`.
-Returned data is displayed opaquely; the authorizer contains no GitHub-specific
-schema or path logic. If a configured read fails, the UI warns the operator not
-to approve the request.
+A Session Token qualifies for the Agent API only when `lookup-self` reports
+`session_token_role` as its role and an entity ID. Approvers see the token's
+`meta.session_id` as the session ID (the entity ID when it is missing), with
+`meta.title` and `meta.directory` alongside it.
 
-### Android Firefox/Fennec Web Push
+`grantable` blocks are **Grantable Rules**. They may be repeated; names must be
+unique. Capabilities come from `create`, `read`, `update`, `patch`, `delete`
+and `list`. The server refuses to start if a rule grants `sudo`, starts with a
+`+` or `*` segment, or has a segment that is `sys`, `auth`, `identity` or
+`cubbyhole` (any case) or a glob that could begin one, such as `s*` or
+`kv/id*`. A generic `+` or trailing `*` later in the pattern is allowed, but
+the concrete paths it expands to are still refused when any of their segments
+is on the Hard Denylist. So a KV key literally named `auth` or `sys` can't be
+granted.
+
+### Item validation
+
+Every Permission Item passes these steps before an Approver sees it:
+
+1. The path must be concrete (no `*` or `+`, empty or `.`/`..` segments,
+   quoting characters, or control or invisible Unicode formatting characters).
+   Capabilities must be non-empty and drawn from the list above. The request
+   reason may contain newlines and tabs but no other such characters.
+2. **Hard Denylist:** paths with a `sys`, `auth`, `identity` or `cubbyhole`
+   segment anywhere (any case) and any request for `sudo` are refused,
+   whatever the configuration says.
+3. The path must match a `grantable` rule whose capabilities include every
+   requested one. A rule's cap is its `max_ttl`, or `grants.default_ttl` when
+   it sets none. The TTL is `min(requested or default_ttl, cap)`; a requested
+   TTL above the cap is refused, not clamped. When several rules match, the
+   one with the longest cap applies.
+4. `sys/capabilities-self`, called with the requester's own token, decides
+   whether the session already has every requested capability; then the item
+   is `already_granted`. This does not consider how long an existing Grant
+   has left, so an item covered by a Grant that expires in a minute is still
+   `already_granted`.
+5. Two identical items (same path and capabilities) in one request are
+   refused as duplicates.
+
+When an Approver decides, the item is checked again against the current
+configuration: an approval of an item that no longer passes steps 1–3 makes it
+`refused`, and its TTL is clamped to the rule's current cap.
+
+Refused items get the state `refused` and a human-readable `reason`; the other
+items in the request continue.
+
+## Web Push on Android Firefox/Fennec
 
 Fennec-based Android browsers may expose the Notification, Service Worker, and
 Push APIs even when their underlying push transport has not been configured.
@@ -268,18 +393,23 @@ keys. After changing the allowlist, restart the server and enroll the device
 again. Do not use a broad suffix merely to make enrollment pass: permitted
 hosts can receive authenticated outbound Web Push requests from the server.
 
-Successful enrollment creates an encrypted subscription in SQLite. New
-control-group requests can then notify the device while the PWA is closed,
-provided its persistent approver session remains active. Push messages contain
-only a generic pending-approval notice; request details still require opening
-the authenticated app.
+Successful enrollment creates an encrypted subscription in SQLite. Grant
+Requests with new pending items can then notify the device while the PWA is
+closed, provided its persistent approver session remains active. Push messages
+contain only a generic "access requested" notice; reasons, paths and session
+details still require opening the authenticated app.
 
-Requests move through `pending`, `approved`, `rejected`, or `expired` states.
-Rejected and expired requests leave the default pending queue but remain
-available in their corresponding history tabs. A complete scanner snapshot
-marks pending records expired when their wrapping accessor has disappeared.
+## Approver PWA
 
-### Frontend development
+- **Pending:** one card per Grant Request with the reason, the session's title,
+  ID and directory, and every item. Pending items have **Approve** and
+  **Reject** buttons and a TTL field that may only shorten the resolved TTL.
+- **History:** requests with no pending items left, with each item's outcome
+  and approver.
+- **Active grants:** unexpired, unrevoked Grants across sessions, each with a
+  **Revoke** button.
+
+## Frontend development
 
 Run the Go server on port 8080, then:
 
@@ -293,21 +423,73 @@ The Vite dev server proxies `/api` to `http://127.0.0.1:8080`.
 
 ## API
 
-- `POST /api/v1/session` — exchange an OpenBao username/password and create a persistent opaque session
-- `GET /api/v1/session` — restore browser session state
-- `DELETE /api/v1/session` — sign out
-- `GET /api/v1/requests` — list discovered requests without accessors
-- `POST /api/v1/requests/{id}/approve` — approve with the session's human token
-- `POST /api/v1/requests/{id}/reject` — revoke the wrapping token and mark the request rejected
-- `GET /api/v1/events` — same-origin SSE update hints
-- `GET /api/v1/push/public-key`, `POST /api/v1/push/subscriptions`, and `DELETE /api/v1/push/subscriptions` — Web Push enrollment/removal
-- `GET /healthz` — process health
+The API is ConnectRPC, defined in `proto/openbao/authorizer/v1/`; generated
+Go and TypeScript clients are committed under `gen/go/` and `web/src/gen/`.
+Services are mounted under `/api`, e.g.
+`POST /api/openbao.authorizer.v1.AgentService/CreateGrantRequest`, so clients
+use `<origin>/api` as their base URL. The server accepts the Connect, gRPC and
+gRPC-Web protocols with binary or JSON messages; request messages are limited
+to 1 MiB. The proto comments document every RPC and field.
+
+### AgentService
+
+Authenticated with `Authorization: Bearer <Session Token>`; no cookies.
+A caller sees only its own session's requests and Grants.
+
+| RPC | Notes |
+|---|---|
+| `CreateGrantRequest` | `reason` is required, 1–64 items, each with an optional `ttl`. Refused and already-granted items are answered in the item state. |
+| `GetGrantRequest` | One of the caller's requests. |
+| `WatchGrantRequest` | Sends the request on connect and after every change, plus a heartbeat every 25 seconds. Ends normally after the final state once no item is pending. |
+| `ListSessionGrants` | Active Grants of the caller's session. |
+
+When an OpenBao call made for an agent fails, the error has a generic message;
+details are logged on the server only.
+
+### ApproverService
+
+`Login` checks OpenBao userpass credentials and the approver policy, revokes
+the resulting OpenBao token, and sets the `HttpOnly` cookie for an opaque
+session; logging in again replaces the session the cookie names. `Logout`
+deletes the session and its push subscriptions and clears the cookie. Every RPC
+requires a same-origin request (`Origin` and `Sec-Fetch-Site` checks); every RPC
+except `Login` also requires the cookie. There is no CSRF token.
+
+| RPC | Notes |
+|---|---|
+| `Login`, `GetSession`, `Logout` | Session lifecycle; `Login` and `GetSession` return the Approver's identity. |
+| `ListGrantRequests` | Pending, decided (the latest 200) or all requests, with the session and per-item decision metadata. |
+| `DecideItems` | Approve or reject pending items of one request; a `ttl` may only shorten the resolved TTL. Returns the updated request. |
+| `ListGrants`, `RevokeGrant` | Active Grants across sessions; revoke one before its expiry. |
+| `WatchEvents` | Sends a dashboard snapshot (pending requests, decided requests, active Grants) on connect and after every change, including Grant expiry within about 10 seconds, plus a heartbeat every 25 seconds. Ends with `unauthenticated` / `SESSION_EXPIRED` when the session ends. |
+| `GetPushPublicKey`, `RegisterPushSubscription`, `DeletePushSubscription` | Web Push enrollment and removal; the key is empty when push is disabled. |
+
+Streams carry full state, not deltas: after a dropped connection, clients
+reconnect and treat the next snapshot as the truth.
+
+### Errors
+
+Errors use Connect codes and carry an `openbao.authorizer.v1.ErrorDetail` with
+a stable `reason`:
+
+| Code | `reason` | When |
+|---|---|---|
+| `unauthenticated` | `INVALID_TOKEN` | OpenBao rejects the bearer token or the login credentials |
+| `unauthenticated` | `SESSION_EXPIRED` | missing, expired or logged-out approver session |
+| `permission_denied` | `NOT_SESSION_IDENTITY` | agent token not from the session token role, or without an entity |
+| `permission_denied` | `NOT_APPROVER` | identity lacks the approver policy |
+| `permission_denied` | `CROSS_ORIGIN` | same-origin check failed |
+| `invalid_argument` | `INVALID_REQUEST` | bad input |
+| `not_found` | `NOT_FOUND` | unknown, or another session's, request or grant |
+| `failed_precondition` | `ITEM_NOT_PENDING` | an item is no longer pending; `ids` lists it |
+| `failed_precondition` | `GRANT_NOT_ACTIVE` | the Grant is already revoked or expired |
+| `unavailable` | `OPENBAO_UNAVAILABLE` | an OpenBao call failed; approvers see OpenBao's message, agents a generic one |
+
+`GET /healthz` reports process health.
 
 ## Current deployment boundaries
 
-- Encrypted sessions and subscriptions are durable in SQLite, while SSE fan-out remains process-local; deploy one instance unless you add shared event infrastructure.
-- SQLite is suited to one app instance. Back it up together with the external encryption key.
-- Discovery cost scales with all active service-token accessors because OpenBao has no pending-control-group list endpoint.
-- OpenBao provides no native durable rejection state. The application records rejection locally and revokes the wrapping token by accessor; `bao-cred` reports a revoked or naturally expired request as `request rejected or expired`.
-- Browser push is best-effort. The request list and SSE remain authoritative.
-- Deferred request payloads are encrypted at rest and redacted from the API by default. If `requests.expose_data = true`, every app approver can view them; use that only where submitted fields are safe to disclose.
+- Sessions, requests and subscriptions are durable in SQLite, while stream wake-ups are process-local; deploy one instance unless you add shared event infrastructure.
+- SQLite is suited to one app instance. Back it up together with the external encryption key. Losing the database does not revoke Grants in OpenBao; they still expire on their own.
+- The Hard Denylist checks the first path segment. With OpenBao namespaces, a rule such as `team/*` in a parent namespace could reach `team/sys/...` of a child namespace named `team`; avoid such rules where child namespaces exist.
+- Browser push is best-effort. The request list and `WatchEvents` remain authoritative.

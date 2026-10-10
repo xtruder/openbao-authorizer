@@ -1,6 +1,6 @@
 [Unit]
 Description=OpenBao for the local Authorizer app
-Documentation=https://openbao.org/docs/concepts/control-groups/
+Documentation=https://openbao.org/docs/concepts/policies/
 After=network-online.target
 Wants=network-online.target
 Before=openbao-authorizer.service

@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+package openbao.authorizer.v1;
+
+import "google/protobuf/duration.proto";
+import "openbao/authorizer/v1/types.proto";
+
+// AgentService is called by Agent Sessions (bao-cred) with
+// `Authorization: Bearer <Session Token>`. Only tokens whose entity has a
+// session alias may call it; a session sees only its own requests and Grants.
+service AgentService {
+  // CreateGrantRequest files a batch of Permission Items. Items outside the
+  // Grantable Rules are refused, items OpenBao already allows are answered as
+  // already granted, and identical pending items join the existing one.
+  rpc CreateGrantRequest(CreateGrantRequestRequest) returns (CreateGrantRequestResponse);
+  // GetGrantRequest returns one of the caller's requests.
+  rpc GetGrantRequest(GetGrantRequestRequest) returns (GetGrantRequestResponse);
+  // WatchGrantRequest sends the request's full state on connect and after
+  // every change, plus periodic heartbeats. The stream ends once no item is
+  // pending; clients reconnect after a drop and rely on the snapshot.
+  rpc WatchGrantRequest(WatchGrantRequestRequest) returns (stream WatchGrantRequestResponse);
+  // ListSessionGrants returns the caller's active Grants.
+  rpc ListSessionGrants(ListSessionGrantsRequest) returns (ListSessionGrantsResponse);
+}
+
+// PermissionItemInput is one requested path and its capabilities.
+message PermissionItemInput {
+  string path = 1;
+  repeated string capabilities = 2;
+  // Requested Grant lifetime; defaults to the rule's cap.
+  google.protobuf.Duration ttl = 3;
+}
+
+message CreateGrantRequestRequest {
+  // Required justification shown to Approvers.
+  string reason = 1;
+  repeated PermissionItemInput items = 2;
+}
+
+message CreateGrantRequestResponse {
+  GrantRequest grant_request = 1;
+}
+
+message GetGrantRequestRequest {
+  string id = 1;
+}
+
+message GetGrantRequestResponse {
+  GrantRequest grant_request = 1;
+}
+
+message WatchGrantRequestRequest {
+  string id = 1;
+}
+
+message WatchGrantRequestResponse {
+  oneof event {
+    // Full current state of the request.
+    GrantRequest grant_request = 1;
+    Heartbeat heartbeat = 2;
+  }
+}
+
+message ListSessionGrantsRequest {}
+
+message ListSessionGrantsResponse {
+  repeated Grant grants = 1;
+}

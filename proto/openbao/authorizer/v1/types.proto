@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package openbao.authorizer.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+// ItemState is the lifecycle of one Permission Item.
+enum ItemState {
+  ITEM_STATE_UNSPECIFIED = 0;
+  // Waiting for an Approver.
+  ITEM_STATE_PENDING = 1;
+  // OpenBao already allowed the capabilities when the item was filed.
+  ITEM_STATE_ALREADY_GRANTED = 2;
+  // Approved; a Grant is or was in effect.
+  ITEM_STATE_APPROVED = 3;
+  // Rejected by an Approver.
+  ITEM_STATE_REJECTED = 4;
+  // Refused by the authorizer before or at decision time; see the item reason.
+  ITEM_STATE_REFUSED = 5;
+  // Nobody decided the item before its pending deadline.
+  ITEM_STATE_EXPIRED = 6;
+  // An Approver revoked the Grant before its expiry.
+  ITEM_STATE_REVOKED = 7;
+}
+
+// PermissionItem is one OpenBao path plus capabilities within a Grant Request.
+message PermissionItem {
+  string id = 1;
+  string path = 2;
+  repeated string capabilities = 3;
+  // Resolved Grant lifetime; unset for refused items.
+  google.protobuf.Duration ttl = 4;
+  ItemState state = 5;
+  // Why the item was refused, when it was.
+  string reason = 6;
+  // Pending deadline for pending items; Grant expiry for approved and revoked items.
+  google.protobuf.Timestamp expires_at = 7;
+  // Approver display name; only on the approver API.
+  string decided_by = 8;
+  google.protobuf.Timestamp decided_at = 9;
+  // Only on the approver API.
+  string grant_id = 10;
+}
+
+// AgentSession describes the session that filed a request, for Approvers.
+message AgentSession {
+  string id = 1;
+  string title = 2;
+  string directory = 3;
+  string entity_id = 4;
+}
+
+// GrantRequest is a batch of Permission Items one Agent Session asked for at once.
+message GrantRequest {
+  string id = 1;
+  string reason = 2;
+  google.protobuf.Timestamp created_at = 3;
+  // Only on the approver API.
+  AgentSession session = 4;
+  repeated PermissionItem items = 5;
+}
+
+// Grant is an approved Permission Item in effect for an Agent Session.
+message Grant {
+  string id = 1;
+  string item_id = 2;
+  string path = 3;
+  repeated string capabilities = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp expires_at = 6;
+  // Only on the approver API.
+  string approved_by = 7;
+  // Only on the approver API.
+  AgentSession session = 8;
+}
+
+// Heartbeat keeps idle streams alive through proxies; clients ignore it.
+message Heartbeat {}
+
+// ErrorDetail is attached to RPC errors so clients can branch on a stable reason.
+message ErrorDetail {
+  // Stable machine-readable reason, e.g. "ITEM_NOT_PENDING" or "SESSION_EXPIRED".
+  string reason = 1;
+  // IDs of the items or grants the error concerns, when relevant.
+  repeated string ids = 2;
+}

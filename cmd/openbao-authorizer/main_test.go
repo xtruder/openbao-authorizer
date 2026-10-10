@@ -2,51 +2,24 @@ package main
 
 import (
 	"context"
-	"errors"
+	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
-	"github.com/xtruder/openbao-authorizer/internal/openbao"
+	"connectrpc.com/connect"
+
+	authorizerv1 "github.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1"
+	"github.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1/authorizerv1connect"
+	"github.com/xtruder/openbao-authorizer/internal/httpapi"
 )
-
-type fakeRenewer struct {
-	errors map[string]error
-	seen   []string
-}
-
-func (f *fakeRenewer) RenewSelf(_ context.Context, token string) error {
-	f.seen = append(f.seen, token)
-	return f.errors[token]
-}
-
-func TestRenewSessionTokensDropsOnlyAuthoritativelyInvalidTokens(t *testing.T) {
-	t.Parallel()
-
-	transient := errors.New("network timeout")
-	renewer := &fakeRenewer{errors: map[string]error{
-		"invalid":   &openbao.HTTPError{StatusCode: http.StatusForbidden},
-		"transient": transient,
-	}}
-	invalid, renewErrors := renewSessionTokens(t.Context(), renewer, []string{"valid", "invalid", "transient"})
-	if !slices.Equal(renewer.seen, []string{"valid", "invalid", "transient"}) {
-		t.Fatalf("renewed = %#v", renewer.seen)
-	}
-
-	if !slices.Equal(invalid, []string{"invalid"}) {
-		t.Fatalf("invalid = %#v", invalid)
-	}
-
-	if len(renewErrors) != 1 || !errors.Is(renewErrors[0], transient) {
-		t.Fatalf("renew errors = %#v", renewErrors)
-	}
-}
 
 func TestStaticFileSystemDefaultsToEmbeddedDistribution(t *testing.T) {
 	t.Parallel()
@@ -140,5 +113,94 @@ func TestStaticHandlerReturnsNotFoundForMissingAsset(t *testing.T) {
 
 	if strings.Contains(recorder.Body.String(), `id="root"`) {
 		t.Fatal("missing static asset was served the application shell")
+	}
+}
+
+func TestRoutesServeConnectAPIHealthAndPWA(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(routes(httpapi.New(httpapi.Options{}), fstest.MapFS{
+		"index.html": &fstest.MapFile{Data: []byte(`<!doctype html><div id="root"></div>`)},
+	}))
+	t.Cleanup(server.Close)
+
+	// An unauthenticated call proves the services are mounted under /api.
+	client := authorizerv1connect.NewAgentServiceClient(server.Client(), server.URL+"/api")
+	_, err := client.ListSessionGrants(t.Context(), connect.NewRequest(&authorizerv1.ListSessionGrantsRequest{}))
+	if connect.CodeOf(err) != connect.CodeUnauthenticated {
+		t.Fatalf("agent call error = %v", err)
+	}
+
+	tests := []struct {
+		path     string
+		status   int
+		wantBody string
+	}{
+		{path: "/healthz", status: http.StatusOK, wantBody: `"ok"`},
+		{path: "/requests/pending", status: http.StatusOK, wantBody: `id="root"`},
+		{path: "/api/v1/grants", status: http.StatusNotFound},
+		{path: "/api/v1/events", status: http.StatusNotFound},
+	}
+	for _, test := range tests {
+		request, requestErr := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+test.path, nil)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+
+		response, responseErr := server.Client().Do(request)
+		if responseErr != nil {
+			t.Fatal(responseErr)
+		}
+
+		body, readErr := io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+
+		if response.StatusCode != test.status || !strings.Contains(string(body), test.wantBody) {
+			t.Fatalf("GET %s = %d %q", test.path, response.StatusCode, body)
+		}
+	}
+}
+
+func TestShutdownEndsOpenStreams(t *testing.T) {
+	t.Parallel()
+
+	opened := make(chan struct{})
+	// Stands in for a watch stream: it only ends when its context does.
+	server := newHTTPServer("", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = http.NewResponseController(w).Flush()
+		close(opened)
+		<-r.Context().Done()
+	}))
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	go func() { _ = server.Serve(listener) }()
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+listener.Addr().String(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() { _ = response.Body.Close() }()
+	<-opened
+	shutdownCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	started := time.Now()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("shutdown with an open stream: %v", err)
+	}
+
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("shutdown took %s", elapsed)
 	}
 }

@@ -1,8 +1,8 @@
 /* global self */
 
 const DEFAULT_NOTIFICATION = Object.freeze({
-  title: 'OpenBao approval pending',
-  body: 'A new control-group request needs review.',
+  title: 'OpenBao access requested',
+  body: 'An agent session is waiting for an access decision.',
   url: '/',
 })
 

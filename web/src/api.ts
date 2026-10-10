@@ -1,82 +1,49 @@
-import type { ApprovalRequest, Session } from './types'
+import { Code, ConnectError, createClient, type Client, type Transport } from '@connectrpc/connect'
+import { createConnectTransport } from '@connectrpc/connect-web'
+import { ApproverService, type Identity } from './gen/openbao/authorizer/v1/approver_pb'
+import { ErrorDetailSchema } from './gen/openbao/authorizer/v1/types_pb'
 
-export class ApiError extends Error {
-  readonly status: number
+export type ApproverClient = Client<typeof ApproverService>
 
-  constructor(message: string, status: number) {
-    super(message)
-    this.name = 'ApiError'
-    this.status = status
-  }
+export interface Session {
+  identity?: Identity
 }
 
-async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const headers = new Headers(init.headers)
-  headers.set('Accept', 'application/json')
-  if (init.body !== undefined) headers.set('Content-Type', 'application/json')
-
-  const response = await fetch(path, {
-    ...init,
-    headers,
-    cache: 'no-store',
-    credentials: 'same-origin',
-  })
-
-  if (!response.ok) {
-    let message = `Request failed (${response.status})`
-    try {
-      const payload = await response.json() as { message?: string; error?: string }
-      message = payload.message ?? payload.error ?? message
-    } catch {
-      // Keep the status-based message when the server has no JSON body.
-    }
-    throw new ApiError(message, response.status)
-  }
-
-  if (response.status === 204) return undefined as T
-  return response.json() as Promise<T>
+export function createApproverClient(transport: Transport = createConnectTransport({
+  baseUrl: '/api',
+  useBinaryFormat: false,
+  fetch: (input, init) => fetch(input, { ...init, credentials: 'same-origin' }),
+})): ApproverClient {
+  return createClient(ApproverService, transport)
 }
 
-export const api = {
-  getSession: () => apiFetch<Session>('/api/v1/session'),
-  createSession: (username: string, password: string) => apiFetch<Session>('/api/v1/session', {
-    method: 'POST',
-    body: JSON.stringify({ username, password }),
-  }),
-  deleteSession: (csrfToken: string) => apiFetch<void>('/api/v1/session', {
-    method: 'DELETE',
-    headers: { 'X-CSRF-Token': csrfToken },
-    body: JSON.stringify({}),
-  }),
-  getRequests: () => apiFetch<ApprovalRequest[]>('/api/v1/requests'),
-  approveRequest: (id: string, csrfToken: string) => apiFetch<ApprovalRequest>(
-    `/api/v1/requests/${encodeURIComponent(id)}/approve`,
-    {
-      method: 'POST',
-      headers: { 'X-CSRF-Token': csrfToken },
-      body: JSON.stringify({}),
-    },
-  ),
-  rejectRequest: (id: string, csrfToken: string) => apiFetch<ApprovalRequest>(
-    `/api/v1/requests/${encodeURIComponent(id)}/reject`,
-    {
-      method: 'POST',
-      headers: { 'X-CSRF-Token': csrfToken },
-      body: JSON.stringify({}),
-    },
-  ),
-  getPushPublicKey: () => apiFetch<{ publicKey: string }>('/api/v1/push/public-key'),
-  subscribeToPush: (
-    subscription: { endpoint: string; keys: { p256dh: string; auth: string } },
-    csrfToken: string,
-  ) => apiFetch<void>('/api/v1/push/subscriptions', {
-    method: 'POST',
-    headers: { 'X-CSRF-Token': csrfToken },
-    body: JSON.stringify(subscription),
-  }),
-  unsubscribeFromPush: (endpoint: string, csrfToken: string) => apiFetch<void>('/api/v1/push/subscriptions', {
-    method: 'DELETE',
-    headers: { 'X-CSRF-Token': csrfToken },
-    body: JSON.stringify({ endpoint }),
-  }),
+export function errorReason(error: unknown) {
+  if (!(error instanceof ConnectError)) return undefined
+  return error.findDetails(ErrorDetailSchema)[0]?.reason
+}
+
+// A cross-origin rejection or a revoked approver policy can only be fixed by signing in again.
+export function isSessionLost(error: unknown) {
+  if (!(error instanceof ConnectError)) return false
+  if (error.code === Code.Unauthenticated) return true
+  const reason = errorReason(error)
+  return error.code === Code.PermissionDenied && (reason === 'NOT_APPROVER' || reason === 'CROSS_ORIGIN')
+}
+
+const reasonMessages: Record<string, string> = {
+  SESSION_EXPIRED: 'Your session has expired. Sign in again.',
+  NOT_APPROVER: 'Your OpenBao identity is not allowed to approve requests.',
+  NOT_FOUND: 'That request or grant no longer exists.',
+  ITEM_NOT_PENDING: 'That item was already decided. Showing the latest state.',
+  GRANT_NOT_ACTIVE: 'That grant was already revoked or has expired.',
+  OPENBAO_UNAVAILABLE: 'OpenBao is unavailable. Try again shortly.',
+}
+
+export function getErrorMessage(error: unknown, fallback: string) {
+  if (!(error instanceof ConnectError)) return error instanceof Error && error.message ? error.message : fallback
+  const reason = errorReason(error)
+  if (reason && reasonMessages[reason]) return reasonMessages[reason]
+  // INVALID_REQUEST and unclassified errors carry the server's explanation.
+  if (error.code === Code.Unavailable) return 'The authorizer is unreachable. Check your connection and try again.'
+  return error.rawMessage || fallback
 }

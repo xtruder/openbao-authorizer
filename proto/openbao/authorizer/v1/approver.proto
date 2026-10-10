@@ -1,0 +1,153 @@
+syntax = "proto3";
+
+package openbao.authorizer.v1;
+
+import "google/protobuf/duration.proto";
+import "openbao/authorizer/v1/types.proto";
+
+// ApproverService is called by the PWA. Every RPC requires a same-origin
+// request; every RPC except Login also requires the HttpOnly, SameSite=Strict
+// session cookie that Login sets. No CSRF token is needed: the cookie is never
+// sent cross-site, Connect's content types force a CORS preflight that the
+// server never grants, and the origin check rejects sibling sites.
+service ApproverService {
+  // Login checks OpenBao userpass credentials and the approver policy, then
+  // revokes the OpenBao token at once: the authorizer keeps only its own
+  // session. The password is discarded; the session cookie is set on the
+  // response. It is the only RPC that needs no session.
+  rpc Login(LoginRequest) returns (LoginResponse);
+  // GetSession restores the current session after a page load.
+  rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
+  // Logout ends the session and clears the session cookie.
+  rpc Logout(LogoutRequest) returns (LogoutResponse);
+
+  // ListGrantRequests returns requests by filter, newest first.
+  rpc ListGrantRequests(ListGrantRequestsRequest) returns (ListGrantRequestsResponse);
+  // DecideItems approves or rejects pending items of one request.
+  rpc DecideItems(DecideItemsRequest) returns (DecideItemsResponse);
+  // ListGrants returns active Grants across sessions.
+  rpc ListGrants(ListGrantsRequest) returns (ListGrantsResponse);
+  // RevokeGrant ends a Grant before its expiry.
+  rpc RevokeGrant(RevokeGrantRequest) returns (RevokeGrantResponse);
+  // WatchEvents sends a full dashboard snapshot on connect and after every
+  // change, plus periodic heartbeats. It ends when the session ends.
+  rpc WatchEvents(WatchEventsRequest) returns (stream WatchEventsResponse);
+
+  // Web Push enrollment, so the device can be notified while the PWA is closed.
+  rpc GetPushPublicKey(GetPushPublicKeyRequest) returns (GetPushPublicKeyResponse);
+  rpc RegisterPushSubscription(RegisterPushSubscriptionRequest) returns (RegisterPushSubscriptionResponse);
+  rpc DeletePushSubscription(DeletePushSubscriptionRequest) returns (DeletePushSubscriptionResponse);
+}
+
+// Identity is the approver's OpenBao identity.
+message Identity {
+  string entity_id = 1;
+  string display_name = 2;
+}
+
+message LoginRequest {
+  string username = 1;
+  string password = 2;
+}
+
+message LoginResponse {
+  Identity identity = 1;
+}
+
+message GetSessionRequest {}
+
+message GetSessionResponse {
+  Identity identity = 1;
+}
+
+message LogoutRequest {}
+
+message LogoutResponse {}
+
+enum GrantRequestFilter {
+  GRANT_REQUEST_FILTER_UNSPECIFIED = 0;
+  // Requests with at least one pending item.
+  GRANT_REQUEST_FILTER_PENDING = 1;
+  // Requests with no pending items.
+  GRANT_REQUEST_FILTER_DECIDED = 2;
+}
+
+message ListGrantRequestsRequest {
+  GrantRequestFilter filter = 1;
+}
+
+message ListGrantRequestsResponse {
+  repeated GrantRequest grant_requests = 1;
+}
+
+enum Decision {
+  DECISION_UNSPECIFIED = 0;
+  DECISION_APPROVE = 1;
+  DECISION_REJECT = 2;
+}
+
+message ItemDecision {
+  string item_id = 1;
+  Decision decision = 2;
+  // Optional shorter Grant lifetime; only valid with DECISION_APPROVE.
+  google.protobuf.Duration ttl = 3;
+}
+
+message DecideItemsRequest {
+  string grant_request_id = 1;
+  repeated ItemDecision decisions = 2;
+}
+
+message DecideItemsResponse {
+  GrantRequest grant_request = 1;
+}
+
+message ListGrantsRequest {}
+
+message ListGrantsResponse {
+  repeated Grant grants = 1;
+}
+
+message RevokeGrantRequest {
+  string grant_id = 1;
+}
+
+message RevokeGrantResponse {}
+
+message WatchEventsRequest {}
+
+// DashboardSnapshot is everything the PWA renders.
+message DashboardSnapshot {
+  repeated GrantRequest pending_requests = 1;
+  // Most recent decided requests (capped server-side).
+  repeated GrantRequest decided_requests = 2;
+  repeated Grant active_grants = 3;
+}
+
+message WatchEventsResponse {
+  oneof event {
+    DashboardSnapshot snapshot = 1;
+    Heartbeat heartbeat = 2;
+  }
+}
+
+message GetPushPublicKeyRequest {}
+
+message GetPushPublicKeyResponse {
+  // VAPID application server key, base64url; empty when push is disabled.
+  string public_key = 1;
+}
+
+message RegisterPushSubscriptionRequest {
+  string endpoint = 1;
+  string p256dh = 2;
+  string auth = 3;
+}
+
+message RegisterPushSubscriptionResponse {}
+
+message DeletePushSubscriptionRequest {
+  string endpoint = 1;
+}
+
+message DeletePushSubscriptionResponse {}

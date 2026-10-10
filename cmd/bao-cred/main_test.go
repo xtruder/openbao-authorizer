@@ -2,23 +2,28 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"reflect"
-	"runtime"
+	"strings"
 	"testing"
+
+	"google.golang.org/protobuf/proto"
+
+	authorizerv1 "github.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1"
 )
 
+const testToken = "session-token-value"
+
 func TestParseOutputAndExecModes(t *testing.T) {
-	output, err := parseOptions([]string{"-field", "database.username", "secret/path"}, &bytes.Buffer{})
+	output, err := parseOptions([]string{"-field", "database.username", "-reason", " deploy ", "secret/path"}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if output.path != "secret/path" || output.field != "database.username" {
+	if output.path != "secret/path" || output.field != "database.username" || output.reason != "deploy" {
 		t.Fatalf("unexpected options: %#v", output)
 	}
 
@@ -34,116 +39,180 @@ func TestParseOutputAndExecModes(t *testing.T) {
 
 func TestParseRejectsMixedDeliveryModes(t *testing.T) {
 	_, err := parseOptions([]string{"-field", "token", "-map", "TOKEN=token", "secret/path", "--", "tool"}, &bytes.Buffer{})
-	if err == nil {
-		t.Fatal("mixed delivery modes unexpectedly succeeded")
+	if exitCode(err) != exitUsage {
+		t.Fatalf("error = %v, want usage error", err)
 	}
 }
 
 func TestParseRejectsDuplicateMappings(t *testing.T) {
 	_, err := parseOptions([]string{"-format", "dotenv", "-map", "TOKEN=one", "-map", "TOKEN=two", "secret/path"}, &bytes.Buffer{})
-	if err == nil {
-		t.Fatal("duplicate mappings unexpectedly succeeded")
+	if exitCode(err) != exitUsage {
+		t.Fatalf("error = %v, want usage error", err)
 	}
 }
 
-func TestRequestTokenPriority(t *testing.T) {
-	directory := t.TempDir()
-	explicit := filepath.Join(directory, "explicit")
-	if err := os.WriteFile(explicit, []byte("file-token\n"), 0o600); err != nil {
-		t.Fatal(err)
+func TestSessionTokenPriority(t *testing.T) {
+	t.Setenv("BAO_TOKEN", "bao-token")
+	t.Setenv("VAULT_TOKEN", "vault-token")
+	if got, err := sessionToken(); err != nil || got != "bao-token" {
+		t.Fatalf("BAO_TOKEN: got %q, %v", got, err)
 	}
 
-	t.Setenv("BAO_TOKEN", "environment-token")
-	got, err := requestToken(explicit)
-	if err != nil || got != "file-token" {
-		t.Fatalf("explicit file: got %q, %v", got, err)
+	t.Setenv("BAO_TOKEN", "")
+	if got, err := sessionToken(); err != nil || got != "vault-token" {
+		t.Fatalf("VAULT_TOKEN: got %q, %v", got, err)
 	}
 
-	got, err = requestToken("")
-	if err != nil || got != "environment-token" {
-		t.Fatalf("environment: got %q, %v", got, err)
+	t.Setenv("VAULT_TOKEN", "")
+	if _, err := sessionToken(); err == nil || !strings.Contains(err.Error(), "BAO_TOKEN") {
+		t.Fatalf("missing token error = %v", err)
 	}
 }
 
 func TestMergeEnvironmentReplacesMappedValues(t *testing.T) {
-	got := mergeEnvironment([]string{"PATH=/bin", "TOKEN=old", "BAO_TOKEN=requester"}, []string{"TOKEN=new", "USER=alice"})
+	got := mergeEnvironment(
+		[]string{"PATH=/bin", "TOKEN=old", "BAO_TOKEN=requester", "VAULT_TOKEN=requester"},
+		[]string{"TOKEN=new", "USER=alice"},
+	)
 	want := []string{"PATH=/bin", "TOKEN=new", "USER=alice"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %#v, want %#v", got, want)
 	}
 }
 
-func TestLoginStoresTokenAndLogoutRemovesIt(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.Method != http.MethodPut || request.URL.Path != "/v1/auth/userpass/login/agent" {
-			t.Fatalf("request = %s %s", request.Method, request.URL.Path)
-		}
+func TestReadDeniedWithoutReasonHints(t *testing.T) {
+	openBao := fakeOpenBao(t, func() bool { return false })
+	authorizer := newFakeAuthorizer(t)
+	setupEnvironment(t, authorizer.url, openBao.URL)
 
-		var body map[string]string
-		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
-			t.Fatal(err)
-		}
-
-		if body["password"] != "login-secret" {
-			t.Fatalf("password = %q", body["password"])
-		}
-
-		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{"auth":{"client_token":"stored-token","renewable":true,"lease_duration":3600}}`))
-	}))
-	defer server.Close()
-	tokenPath := filepath.Join(t.TempDir(), "config", "agent-token")
 	var stdout bytes.Buffer
-	if err := runWithInput(
-		[]string{"login", "-address", server.URL, "-username", "agent", "-password-stdin", "-token-file", tokenPath},
-		bytes.NewBufferString("login-secret\n"), &stdout, &bytes.Buffer{},
-	); err != nil {
-		t.Fatal(err)
+	err := run([]string{"secret/app"}, &stdout, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "-reason") || !strings.Contains(err.Error(), "bao-cred request") {
+		t.Fatalf("error = %v, want hint", err)
 	}
 
-	contents, err := os.ReadFile(tokenPath)
+	if exitCode(err) != exitFailure || stdout.Len() != 0 || authorizer.calls() != 0 {
+		t.Fatalf("exit %d, stdout %q, authorizer calls %d", exitCode(err), stdout.String(), authorizer.calls())
+	}
+}
+
+func TestReadWithReasonRequestsAccessAndRetries(t *testing.T) {
+	authorizer := newFakeAuthorizer(t)
+	authorizer.created = testRequest(item("item-1", "secret/app", pending))
+	authorizer.watches = []watchScript{{messages: []*authorizerv1.WatchGrantRequestResponse{
+		snapshot(item("item-1", "secret/app", approved)),
+	}}}
+	openBao := fakeOpenBao(t, func() bool { return authorizer.watchCount() > 0 })
+	setupEnvironment(t, authorizer.url, openBao.URL)
+
+	var stdout, stderr bytes.Buffer
+	err := run([]string{"-reason", "deploy the app", "-field", "token", "secret/app"}, &stdout, &stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if string(contents) != "stored-token\n" {
-		t.Fatalf("token file = %q", contents)
-	}
-
-	if runtime.GOOS != "windows" {
-		info, statErr := os.Stat(tokenPath)
-		if statErr != nil {
-			t.Fatal(statErr)
-		}
-
-		if info.Mode().Perm() != 0o600 {
-			t.Fatalf("token mode = %o", info.Mode().Perm())
-		}
-	}
-
-	if stdout.String() != "Logged in as agent.\n" {
+	if stdout.String() != "secret-value" {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 
-	address, err := os.ReadFile(filepath.Join(filepath.Dir(tokenPath), "address"))
-	if err != nil {
-		t.Fatal(err)
+	want := &authorizerv1.CreateGrantRequestRequest{
+		Reason: "deploy the app", Items: []*authorizerv1.PermissionItemInput{{Path: "secret/app", Capabilities: []string{"read"}}},
+	}
+	if got := authorizer.inputs(); len(got) != 1 || !proto.Equal(got[0], want) {
+		t.Fatalf("filed %v, want %v", got, want)
 	}
 
-	if string(address) != server.URL+"\n" {
-		t.Fatalf("address file = %q", address)
+	if !strings.Contains(stderr.String(), "secret/app=read: approved") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestReadWithReasonReportsRejection(t *testing.T) {
+	authorizer := newFakeAuthorizer(t)
+	authorizer.created = testRequest(item("item-1", "secret/app", pending))
+	denied := item("item-1", "secret/app", rejected)
+	denied.Reason = "use the staging path"
+	authorizer.watches = []watchScript{{messages: []*authorizerv1.WatchGrantRequestResponse{snapshot(denied)}}}
+	openBao := fakeOpenBao(t, func() bool { return false })
+	setupEnvironment(t, authorizer.url, openBao.URL)
+
+	var stdout bytes.Buffer
+	err := run([]string{"-reason", "deploy", "-quiet", "secret/app"}, &stdout, &bytes.Buffer{})
+	if exitCode(err) != exitNotGranted || !strings.Contains(err.Error(), "use the staging path") {
+		t.Fatalf("error = %v (exit %d)", err, exitCode(err))
 	}
 
-	stdout.Reset()
-	if err := runWithInput([]string{"logout", "-token-file", tokenPath}, &bytes.Buffer{}, &stdout, &bytes.Buffer{}); err != nil {
-		t.Fatal(err)
+	if strings.Contains(err.Error(), testToken) || stdout.Len() != 0 {
+		t.Fatalf("error %q or stdout %q leaks data", err, stdout.String())
 	}
 
-	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
-		t.Fatalf("token file still exists: %v", err)
+	if openBao.reads() != 1 {
+		t.Fatalf("OpenBao reads = %d, want no retry after rejection", openBao.reads())
+	}
+}
+
+func TestReadWithReasonWithoutAuthorizerURLFails(t *testing.T) {
+	openBao := fakeOpenBao(t, func() bool { return false })
+	setupEnvironment(t, "", openBao.URL)
+
+	err := run([]string{"-reason", "deploy", "secret/app"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "OPENBAO_AUTHORIZER_URL") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+type fakeOpenBaoServer struct {
+	*httptest.Server
+
+	count *counter
+}
+
+func (s fakeOpenBaoServer) reads() int { return s.count.get() }
+
+// fakeOpenBao serves secret/app, denying it until allowed reports true.
+func fakeOpenBao(t *testing.T, allowed func() bool) fakeOpenBaoServer {
+	t.Helper()
+	count := &counter{}
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("X-Vault-Token") != testToken || request.URL.Path != "/v1/secret/app" {
+			http.Error(response, "unexpected request", http.StatusBadRequest)
+			return
+		}
+
+		count.add()
+		response.Header().Set("Content-Type", "application/json")
+		if !allowed() {
+			response.WriteHeader(http.StatusForbidden)
+			_, _ = fmt.Fprint(response, `{"errors":["1 error occurred:\n\t* permission denied\n\n"]}`)
+			return
+		}
+
+		_, _ = fmt.Fprint(response, `{"data":{"token":"secret-value"}}`)
+	}))
+	t.Cleanup(server.Close)
+	return fakeOpenBaoServer{Server: server, count: count}
+}
+
+func setupEnvironment(t *testing.T, authorizerURL, openBaoURL string) {
+	t.Helper()
+	t.Setenv("BAO_TOKEN", testToken)
+	t.Setenv("VAULT_TOKEN", "")
+	t.Setenv("BAO_ADDR", openBaoURL)
+	t.Setenv("BAO_MAX_RETRIES", "0")
+	t.Setenv("BAO_CACERT", "")
+	t.Setenv("BAO_CACERT_BYTES", "")
+	t.Setenv("BAO_CAPATH", "")
+	t.Setenv("OPENBAO_AUTHORIZER_URL", authorizerURL)
+}
+
+func exitCode(err error) int {
+	if err == nil {
+		return 0
 	}
 
-	if stdout.String() != "Logged out.\n" {
-		t.Fatalf("stdout = %q", stdout.String())
+	if coded, ok := errors.AsType[*exitError](err); ok {
+		return coded.code
 	}
+
+	return exitFailure
 }

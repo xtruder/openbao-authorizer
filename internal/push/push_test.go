@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/SherClockHolmes/webpush-go"
-	"github.com/xtruder/openbao-authorizer/internal/openbao"
 	"github.com/xtruder/openbao-authorizer/internal/store"
 )
 
@@ -43,18 +42,18 @@ func TestNotificationIsGenericAndRemovesGoneSubscription(t *testing.T) {
 	}
 	service, err := New(storage, Config{
 		PublicKey: "public", PrivateKey: "private", Subject: "mailto:ops@example.com",
-		AllowedHostSuffixes: []string{"push.example"}, Resolver: fakeResolver{"push.example": {{IP: net.ParseIP("8.8.8.8")}}}, Eligible: func(context.Context, string) bool { return true },
+		AllowedHostSuffixes: []string{"push.example"}, Resolver: fakeResolver{"push.example": {{IP: net.ParseIP("8.8.8.8")}}},
 	}, sender)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err := service.NewRequest(t.Context(), "opaque-request-id", openbao.ControlGroupRequest{Path: "secret/data/payroll", Entity: openbao.Entity{Name: "Alice"}}); err != nil {
+	if err := service.NewRequest(t.Context(), "opaque-request-id"); err != nil {
 		t.Fatal(err)
 	}
 
-	if strings.Contains(payload, "payroll") || strings.Contains(payload, "Alice") {
-		t.Fatalf("sensitive push payload: %s", payload)
+	if !strings.Contains(payload, `"title":"OpenBao access requested"`) || strings.Contains(payload, "path") {
+		t.Fatalf("push payload is not generic: %s", payload)
 	}
 
 	if !strings.Contains(payload, `"url":"/?request=opaque-request-id"`) {
@@ -63,32 +62,6 @@ func TestNotificationIsGenericAndRemovesGoneSubscription(t *testing.T) {
 
 	if len(storage.deleted) != 1 || storage.deleted[0] != "https://push.example/sub" {
 		t.Fatalf("deleted = %#v", storage.deleted)
-	}
-}
-
-func TestNotificationSkipsInactiveIdentity(t *testing.T) {
-	t.Parallel()
-
-	storage := &fakeStore{subscriptions: []store.Subscription{{EntityID: "logged-out", Endpoint: "https://push.example/sub", P256DH: "key", Auth: "auth"}}}
-	calls := 0
-	sender := func(context.Context, []byte, *webpush.Subscription, *webpush.Options) (*http.Response, error) {
-		calls++
-		return nil, nil
-	}
-	service, err := New(storage, Config{
-		PublicKey: "public", PrivateKey: "private", Subject: "mailto:ops@example.com",
-		AllowedHostSuffixes: []string{"push.example"}, Resolver: fakeResolver{"push.example": {{IP: net.ParseIP("8.8.8.8")}}}, Eligible: func(context.Context, string) bool { return false },
-	}, sender)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if err := service.NewRequest(t.Context(), "accessor", openbao.ControlGroupRequest{}); err != nil {
-		t.Fatal(err)
-	}
-
-	if calls != 0 {
-		t.Fatalf("push calls = %d, want 0", calls)
 	}
 }
 

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -9,15 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	openbao "github.com/openbao/openbao/api/v2"
 )
 
-func TestReadReturnsImmediateSecret(t *testing.T) {
+func TestReadReturnsSecretData(t *testing.T) {
 	want := map[string]any{"token": "secret"}
 	client := testAPIClient(t, func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/v1/path" {
@@ -27,7 +23,7 @@ func TestReadReturnsImmediateSecret(t *testing.T) {
 
 		_, _ = fmt.Fprint(response, `{"data":{"token":"secret"}}`)
 	})
-	got, err := readCredentials(t.Context(), client, "path", time.Millisecond, nil)
+	got, err := readCredentials(t.Context(), client, "path")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,71 +33,19 @@ func TestReadReturnsImmediateSecret(t *testing.T) {
 	}
 }
 
-func TestReadWaitsForApproval(t *testing.T) {
-	var statusCalls atomic.Int32
-	client := testAPIClient(t, func(response http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/v1/path":
-			_, _ = fmt.Fprint(response, `{"wrap_info":{"token":"wrap","accessor":"accessor"}}`)
-		case "/v1/sys/control-group/request":
-			approved := statusCalls.Add(1) == 2
-			_, _ = fmt.Fprintf(response, `{"data":{"approved":%t}}`, approved)
-		case "/v1/sys/wrapping/unwrap":
-			_, _ = fmt.Fprint(response, `{"data":{"token":"secret"}}`)
-		default:
-			http.NotFound(response, request)
-		}
+func TestReadClassifiesPermissionDenied(t *testing.T) {
+	client := testAPIClient(t, func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		response.WriteHeader(http.StatusForbidden)
+		_, _ = fmt.Fprint(response, `{"errors":["permission denied"]}`)
 	})
-	got, err := readCredentials(t.Context(), client, "path", time.Millisecond, nil)
-	if err != nil {
-		t.Fatal(err)
+	_, err := readCredentials(t.Context(), client, "path")
+	if !isPermissionDenied(err) {
+		t.Fatalf("error = %v, want permission denied", err)
 	}
 
-	if got["token"] != "secret" || statusCalls.Load() != 2 {
-		t.Fatalf("got %#v after %d status calls", got, statusCalls.Load())
-	}
-}
-
-func TestReadHonorsCancellation(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), time.Millisecond)
-	defer cancel()
-	client := testAPIClient(t, func(response http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/v1/path" {
-			_, _ = fmt.Fprint(response, `{"wrap_info":{"token":"wrap","accessor":"accessor"}}`)
-			return
-		}
-
-		_, _ = fmt.Fprint(response, `{"data":{"approved":false}}`)
-	})
-	_, err := readCredentials(ctx, client, "path", time.Hour, nil)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("got %v, want deadline exceeded", err)
-	}
-}
-
-func TestReadStopsWhenRequestIsRejectedOrExpired(t *testing.T) {
-	var statusCalls atomic.Int32
-	client := testAPIClient(t, func(response http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/v1/path":
-			_, _ = fmt.Fprint(response, `{"wrap_info":{"token":"wrap","accessor":"accessor"}}`)
-		case "/v1/sys/control-group/request":
-			statusCalls.Add(1)
-			response.Header().Set("Content-Type", "application/json")
-			response.WriteHeader(http.StatusNotFound)
-			_, _ = fmt.Fprint(response, `{"errors":["invalid accessor"]}`)
-		default:
-			http.NotFound(response, request)
-		}
-	})
-
-	_, err := readCredentials(t.Context(), client, "path", time.Millisecond, nil)
-	if err == nil || !strings.Contains(err.Error(), "request rejected or expired") {
-		t.Fatalf("error = %v", err)
-	}
-
-	if statusCalls.Load() != 1 {
-		t.Fatalf("status calls = %d", statusCalls.Load())
+	if isPermissionDenied(errors.New("other")) {
+		t.Fatal("plain error classified as permission denied")
 	}
 }
 

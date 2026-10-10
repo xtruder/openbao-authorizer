@@ -1,0 +1,32 @@
+{
+  "name": "@xtruder/opencode-openbao",
+  "version": "0.1.0",
+  "description": "opencode V2 plugin that gives each Agent Session its own OpenBao Session Token, plus the openbao-access skill",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./index.ts",
+    "./lib": "./src/lib.ts",
+    "./mint": "./src/mint.ts",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "opencode-openbao-mint": "./src/mint-cli.ts"
+  },
+  "files": [
+    "index.ts",
+    "src",
+    "skills",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "bun test",
+    "test:live": "bun test/live/opencode-v2.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "2.0.21",
+    "@types/bun": "1.4.2",
+    "typescript": "5.9.3"
+  }
+}

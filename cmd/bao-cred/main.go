@@ -1,33 +1,33 @@
-// Command bao-cred reads OpenBao credentials and waits for control-group approval.
+// Command bao-cred reads OpenBao credentials and requests Grants for the current Agent Session.
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	openbao "github.com/openbao/openbao/api/v2"
-	"golang.org/x/term"
+
+	authorizerv1 "github.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1"
 )
 
 const usageText = `usage:
-  bao-cred login [flags]
-  bao-cred logout [flags]
   bao-cred [flags] <openbao-path> [-- command [args...]]
+  bao-cred request -reason TEXT -item PATH=CAP[,CAP] [-item ...] [-ttl D] [-timeout D] [-no-wait]
+  bao-cred request -wait ID [-timeout D]
+  bao-cred grants
 
-Reads credentials from OpenBao. If the response requires control-group approval,
-bao-cred waits for approval before unwrapping it.
+Reads credentials from OpenBao with the Session Token in BAO_TOKEN (or
+VAULT_TOKEN). When the token lacks access, bao-cred can file a Grant Request
+with the authorizer and wait for an Approver to decide it.
 
 Output flags:
   -format string       json (default), template, dotenv, or shell
@@ -36,108 +36,163 @@ Output flags:
   -map NAME=path       map a field for dotenv, shell, or command execution; repeatable
   -output path         atomically overwrite a file with mode 0600 instead of stdout
 
+Access flags:
+  -reason TEXT         on permission denied, request read access with this reason,
+                       wait for a decision, and retry the read once
+  -authorizer URL      authorizer base URL (default $OPENBAO_AUTHORIZER_URL)
+  -timeout duration    approval wait timeout (default 15m)
+  -quiet               suppress progress messages
+
 Request flags:
-  -token-file path     read the request token from a file
-  -timeout duration    approval timeout (default 15m)
-  -poll-interval duration
-                       approval polling interval (default 5s)
-  -quiet               suppress approval progress messages
+  -reason TEXT         why the session needs access (required)
+  -item PATH=CAPS      Permission Item; CAPS is a comma-separated list of
+                       create, read, update, patch, delete, list; repeatable
+  -ttl duration        requested Grant lifetime for every item
+  -no-wait             print the filed request without waiting
+  -wait ID             resume waiting on an existing Grant Request
+
+Request outcomes are printed as JSON on stdout; progress goes to stderr.
+
+Exit status:
+  0  success; every Permission Item is approved or already granted
+  1  error
+  2  usage error
+  3  a Permission Item was rejected, refused, expired, or revoked
+  4  a Permission Item is still pending (timeout or -no-wait)
+  In command mode, the command's own exit status is returned.
 
 Examples:
-	bao-cred -field token github/token/project-example
+  bao-cred -field token github/token/project-example
+  bao-cred -reason "open a PR in org/repo" -field token github/token/project-example
+  bao-cred request -reason "migrate app schema" -item database/creds/app=read -item kv/data/app=read,update
   bao-cred -format dotenv -map DB_USER=username -map DB_PASSWORD=password database/creds/app
   bao-cred -map GH_TOKEN=token github/token/project-example -- gh repo view org/repo
 `
 
+const (
+	exitFailure    = 1
+	exitUsage      = 2
+	exitNotGranted = 3
+	exitPending    = 4
+)
+
 type options struct {
-	path         string
-	format       string
-	field        string
-	template     string
-	output       string
-	tokenFile    string
-	timeout      time.Duration
-	pollInterval time.Duration
-	quiet        bool
-	mappings     []mapping
-	command      []string
+	path       string
+	format     string
+	field      string
+	template   string
+	output     string
+	reason     string
+	authorizer string
+	timeout    time.Duration
+	quiet      bool
+	mappings   []mapping
+	command    []string
 }
 
-type mappingFlags []string
+type repeatedFlag []string
 
-func (m *mappingFlags) String() string { return strings.Join(*m, ",") }
-func (m *mappingFlags) Set(value string) error {
+func (m *repeatedFlag) String() string { return strings.Join(*m, ",") }
+func (m *repeatedFlag) Set(value string) error {
 	*m = append(*m, value)
 	return nil
 }
 
-type exitError struct{ code int }
+// exitError carries a specific exit status. A nil err means the status came
+// from a child command, which has already reported its own failure.
+type exitError struct {
+	code int
+	err  error
+}
 
-func (e *exitError) Error() string { return fmt.Sprintf("command exited with status %d", e.code) }
+func (e *exitError) Error() string {
+	if e.err == nil {
+		return fmt.Sprintf("command exited with status %d", e.code)
+	}
+
+	return e.err.Error()
+}
+
+func (e *exitError) Unwrap() error { return e.err }
+
+func usageError(err error) error { return &exitError{code: exitUsage, err: err} }
 
 func main() {
-	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
-		if childExit, ok := errors.AsType[*exitError](err); ok {
-			os.Exit(childExit.code)
-		}
-
-		fmt.Fprintln(os.Stderr, "bao-cred:", err)
-		os.Exit(1)
+	err := run(os.Args[1:], os.Stdout, os.Stderr)
+	if err == nil || errors.Is(err, flag.ErrHelp) {
+		return
 	}
+
+	code := exitFailure
+	if coded, ok := errors.AsType[*exitError](err); ok {
+		code = coded.code
+		err = coded.err
+	}
+
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "bao-cred:", err)
+	}
+
+	os.Exit(code)
 }
 
 func run(arguments []string, stdout, stderr io.Writer) error {
-	return runWithInput(arguments, os.Stdin, stdout, stderr)
-}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-func runWithInput(arguments []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(arguments) > 0 {
 		switch arguments[0] {
-		case "login":
-			return runLogin(arguments[1:], stdin, stdout, stderr)
-		case "logout":
-			return runLogout(arguments[1:], stdout, stderr)
+		case "request":
+			return runRequest(ctx, arguments[1:], stdout, stderr)
+		case "grants":
+			return runGrants(ctx, arguments[1:], stdout, stderr)
 		}
 	}
 
+	return runRead(ctx, arguments, stdout, stderr)
+}
+
+func runRead(ctx context.Context, arguments []string, stdout, stderr io.Writer) error {
 	opts, err := parseOptions(arguments, stderr)
 	if err != nil {
 		return err
 	}
 
-	token, err := requestToken(opts.tokenFile)
+	token, err := sessionToken()
 	if err != nil {
 		return err
 	}
 
-	client, err := newOpenBaoClient(opts.tokenFile, "")
+	client, err := newOpenBaoClient(token)
 	if err != nil {
-		return fmt.Errorf("configure OpenBao client: %w", err)
+		return err
 	}
 
-	client.SetToken(token)
-
-	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	approvalCtx, cancel := context.WithTimeout(rootCtx, opts.timeout)
-
-	var progress progressFunc
-	if !opts.quiet {
-		progress = func(message string) { _, _ = fmt.Fprintln(stderr, message) }
-	}
-
-	data, err := readCredentials(approvalCtx, client, opts.path, opts.pollInterval, progress)
-	cancel()
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return fmt.Errorf("approval did not arrive within %s", opts.timeout)
+	progress := newProgress(stderr, opts.quiet)
+	data, err := readCredentials(ctx, client, opts.path)
+	if isPermissionDenied(err) {
+		if opts.reason == "" {
+			return fmt.Errorf(
+				"%w\nhint: rerun with -reason TEXT to request read access, or file a Grant Request with "+
+					"bao-cred request -reason TEXT -item %s=read",
+				err, opts.path,
+			)
 		}
 
+		err = requestReadAccess(ctx, opts, token, progress)
+		if err != nil {
+			return err
+		}
+
+		data, err = readCredentials(ctx, client, opts.path)
+	}
+
+	if err != nil {
 		return err
 	}
 
 	if len(opts.command) > 0 {
-		return execute(rootCtx, opts.command, data, opts.mappings, stdout, stderr)
+		return execute(ctx, opts.command, data, opts.mappings, stdout, stderr)
 	}
 
 	contents, err := render(opts, data)
@@ -153,235 +208,31 @@ func runWithInput(arguments []string, stdin io.Reader, stdout, stderr io.Writer)
 	return err
 }
 
-func runLogin(arguments []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	flags := flag.NewFlagSet("bao-cred login", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	username := flags.String("username", "", "OpenBao userpass username")
-	address := flags.String("address", "", "OpenBao server address")
-	tokenFile := flags.String("token-file", "", "token destination")
-	passwordStdin := flags.Bool("password-stdin", false, "read the password from stdin")
-	if err := flags.Parse(arguments); err != nil {
-		return err
+func requestReadAccess(ctx context.Context, opts options, token string, progress progressFunc) error {
+	authorizer, err := newAuthorizerClient(opts.authorizer, token)
+	if err != nil {
+		return fmt.Errorf("request read access: %w", err)
 	}
 
-	if flags.NArg() != 0 {
-		return errors.New("login accepts no positional arguments")
+	request, err := authorizer.createGrantRequest(ctx, &authorizerv1.CreateGrantRequestRequest{
+		Reason: opts.reason,
+		Items:  []*authorizerv1.PermissionItemInput{{Path: opts.path, Capabilities: []string{"read"}}},
+	})
+	if err != nil {
+		return fmt.Errorf("request read access: %w", err)
 	}
 
-	tokenPath, err := resolveTokenPath(*tokenFile)
+	progress(fmt.Sprintf("permission denied; filed Grant Request %s for %s=read", request.ID, opts.path))
+	request, err = waitForGrantRequest(ctx, authorizer, request, opts.timeout, progress)
 	if err != nil {
 		return err
 	}
 
-	resolvedAddress, err := resolveLoginAddress(*address, tokenPath, stdin, stderr, *passwordStdin)
-	if err != nil {
-		return err
-	}
-
-	resolvedUsername, err := resolveLoginUsername(*username, stdin, stderr, *passwordStdin)
-	if err != nil {
-		return err
-	}
-
-	password, err := readLoginPassword(stdin, stderr, *passwordStdin)
-	if err != nil {
-		return err
-	}
-
-	client, err := newOpenBaoClient(*tokenFile, resolvedAddress)
-	if err != nil {
-		return fmt.Errorf("configure OpenBao client: %w", err)
-	}
-
-	secret, err := client.Logical().WriteWithContext(
-		context.Background(), "auth/userpass/login/"+url.PathEscape(resolvedUsername), map[string]any{"password": password},
-	)
-	if err != nil {
-		return fmt.Errorf("userpass login: %w", err)
-	}
-
-	if secret == nil || secret.Auth == nil || secret.Auth.ClientToken == "" {
-		return errors.New("OpenBao userpass login returned no token")
-	}
-
-	err = os.MkdirAll(filepath.Dir(tokenPath), 0o700)
-	if err != nil {
-		return fmt.Errorf("create token directory: %w", err)
-	}
-
-	err = writeFile(tokenPath, []byte(secret.Auth.ClientToken+"\n"))
-	if err != nil {
-		return fmt.Errorf("store token: %w", err)
-	}
-
-	err = writeFile(filepath.Join(filepath.Dir(tokenPath), "address"), []byte(resolvedAddress+"\n"))
-	if err != nil {
-		return fmt.Errorf("store address: %w", err)
-	}
-
-	_, err = fmt.Fprintf(stdout, "Logged in as %s.\n", resolvedUsername)
-	return err
-}
-
-func resolveLoginUsername(explicit string, stdin io.Reader, stderr io.Writer, passwordStdin bool) (string, error) {
-	username := strings.TrimSpace(explicit)
-	terminal, interactive := stdin.(*os.File)
-	interactive = interactive && term.IsTerminal(int(terminal.Fd())) && !passwordStdin
-	if username == "" && interactive {
-		_, _ = fmt.Fprint(stderr, "Username [agent]: ")
-		input, err := bufio.NewReader(stdin).ReadString('\n')
-		if err != nil && !errors.Is(err, io.EOF) {
-			return "", fmt.Errorf("read username: %w", err)
-		}
-
-		username = strings.TrimSpace(input)
-	}
-
-	if username == "" {
-		username = "agent"
-	}
-
-	if strings.ContainsAny(username, "/\\") {
-		return "", errors.New("invalid OpenBao username")
-	}
-
-	return username, nil
-}
-
-func resolveLoginAddress(explicit, tokenPath string, stdin io.Reader, stderr io.Writer, passwordStdin bool) (string, error) {
-	address := strings.TrimSpace(explicit)
-	if address == "" {
-		address = strings.TrimSpace(os.Getenv("BAO_ADDR"))
-	}
-
-	if address == "" {
-		contents, err := os.ReadFile(filepath.Join(filepath.Dir(tokenPath), "address"))
-		if err == nil {
-			address = strings.TrimSpace(string(contents))
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return "", fmt.Errorf("read saved OpenBao address: %w", err)
-		}
-	}
-
-	terminal, interactive := stdin.(*os.File)
-	interactive = interactive && term.IsTerminal(int(terminal.Fd())) && !passwordStdin
-	if explicit == "" && interactive {
-		if address == "" {
-			_, _ = fmt.Fprint(stderr, "OpenBao address: ")
-		} else {
-			_, _ = fmt.Fprintf(stderr, "OpenBao address [%s]: ", address)
-		}
-
-		input, err := bufio.NewReader(stdin).ReadString('\n')
-		if err != nil && !errors.Is(err, io.EOF) {
-			return "", fmt.Errorf("read OpenBao address: %w", err)
-		}
-
-		if input = strings.TrimSpace(input); input != "" {
-			address = input
-		}
-	}
-
-	if address == "" {
-		return "", errors.New("OpenBao address is required; use -address or set BAO_ADDR")
-	}
-
-	parsed, err := url.Parse(address)
-	if err != nil || parsed.Host == "" || parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "", errors.New("OpenBao address must be an absolute HTTP or HTTPS URL")
-	}
-
-	return strings.TrimSuffix(address, "/"), nil
-}
-
-func newOpenBaoClient(tokenFile, explicitAddress string) (*openbao.Client, error) {
-	config := openbao.DefaultConfig()
-	if explicitAddress != "" {
-		config.Address = explicitAddress
-	} else if os.Getenv("BAO_ADDR") == "" {
-		tokenPath, err := resolveTokenPath(tokenFile)
-		if err != nil {
-			return nil, err
-		}
-
-		contents, err := os.ReadFile(filepath.Join(filepath.Dir(tokenPath), "address"))
-		if err == nil {
-			config.Address = strings.TrimSpace(string(contents))
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("read saved OpenBao address: %w", err)
-		}
-	}
-
-	client, err := openbao.NewClient(config)
-	if err != nil {
-		return nil, fmt.Errorf("configure OpenBao client: %w", err)
-	}
-
-	return client, nil
-}
-
-func runLogout(arguments []string, stdout, stderr io.Writer) error {
-	flags := flag.NewFlagSet("bao-cred logout", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	tokenFile := flags.String("token-file", "", "token file to remove")
-	if err := flags.Parse(arguments); err != nil {
-		return err
-	}
-
-	if flags.NArg() != 0 {
-		return errors.New("logout accepts no positional arguments")
-	}
-
-	path, err := resolveTokenPath(*tokenFile)
-	if err != nil {
-		return err
-	}
-
-	err = os.Remove(path)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove token file: %w", err)
-	}
-
-	_, err = fmt.Fprintln(stdout, "Logged out.")
-	return err
-}
-
-func readLoginPassword(stdin io.Reader, stderr io.Writer, fromStdin bool) (string, error) {
-	if fromStdin {
-		password, err := bufio.NewReader(stdin).ReadString('\n')
-		if err != nil && !errors.Is(err, io.EOF) {
-			return "", fmt.Errorf("read password: %w", err)
-		}
-
-		password = strings.TrimSuffix(strings.TrimSuffix(password, "\n"), "\r")
-		if password == "" {
-			return "", errors.New("password is empty")
-		}
-
-		return password, nil
-	}
-
-	terminal, ok := stdin.(*os.File)
-	if !ok || !term.IsTerminal(int(terminal.Fd())) {
-		return "", errors.New("password prompt requires a terminal; use -password-stdin")
-	}
-
-	_, _ = fmt.Fprint(stderr, "Password: ")
-	password, err := term.ReadPassword(int(terminal.Fd()))
-	_, _ = fmt.Fprintln(stderr)
-	if err != nil {
-		return "", fmt.Errorf("read password: %w", err)
-	}
-
-	if len(password) == 0 {
-		return "", errors.New("password is empty")
-	}
-
-	return string(password), nil
+	return request.outcomeError(opts.timeout)
 }
 
 func parseOptions(arguments []string, stderr io.Writer) (options, error) {
-	var rawMappings mappingFlags
+	var rawMappings repeatedFlag
 	separator := len(arguments)
 	for index, argument := range arguments {
 		if argument == "--" {
@@ -395,7 +246,7 @@ func parseOptions(arguments []string, stderr io.Writer) (options, error) {
 	if separator < len(arguments) {
 		command = arguments[separator+1:]
 		if len(command) == 0 {
-			return options{}, errors.New("-- must be followed by a command")
+			return options{}, usageError(errors.New("-- must be followed by a command"))
 		}
 	}
 
@@ -406,29 +257,29 @@ func parseOptions(arguments []string, stderr io.Writer) (options, error) {
 	field := flags.String("field", "", "scalar field")
 	templateSource := flags.String("template", "", "Go template")
 	output := flags.String("output", "", "output file")
-	tokenFile := flags.String("token-file", "", "request token file")
+	reason := flags.String("reason", "", "Grant Request reason")
+	authorizer := flags.String("authorizer", "", "authorizer URL")
 	timeout := flags.Duration("timeout", 15*time.Minute, "approval timeout")
-	pollInterval := flags.Duration("poll-interval", 5*time.Second, "approval polling interval")
 	quiet := flags.Bool("quiet", false, "suppress progress")
 	flags.Var(&rawMappings, "map", "NAME=dot.path mapping")
 	if err := flags.Parse(flagArguments); err != nil {
-		return options{}, err
+		return options{}, flagError(err)
 	}
 
 	if flags.NArg() != 1 {
 		flags.Usage()
-		return options{}, errors.New("exactly one OpenBao path is required")
+		return options{}, usageError(errors.New("exactly one OpenBao path is required"))
 	}
 
-	if *timeout <= 0 || *pollInterval <= 0 {
-		return options{}, errors.New("timeout and poll interval must be positive")
+	if *timeout <= 0 {
+		return options{}, usageError(errors.New("timeout must be positive"))
 	}
 
 	mappings := make([]mapping, 0, len(rawMappings))
 	for _, raw := range rawMappings {
 		parsedMapping, err := parseMapping(raw)
 		if err != nil {
-			return options{}, err
+			return options{}, usageError(err)
 		}
 
 		mappings = append(mappings, parsedMapping)
@@ -436,14 +287,23 @@ func parseOptions(arguments []string, stderr io.Writer) (options, error) {
 
 	parsed := options{
 		path: flags.Arg(0), format: *format, field: *field, template: *templateSource,
-		output: *output, tokenFile: *tokenFile, timeout: *timeout, pollInterval: *pollInterval,
+		output: *output, reason: strings.TrimSpace(*reason), authorizer: *authorizer, timeout: *timeout,
 		quiet: *quiet, mappings: mappings, command: command,
 	}
 	if err := validateOptions(parsed); err != nil {
-		return options{}, err
+		return options{}, usageError(err)
 	}
 
 	return parsed, nil
+}
+
+// flagError keeps -h a clean exit while making other parse failures usage errors.
+func flagError(err error) error {
+	if errors.Is(err, flag.ErrHelp) {
+		return err
+	}
+
+	return usageError(err)
 }
 
 func validateOptions(options options) error {
@@ -556,8 +416,10 @@ func execute(ctx context.Context, arguments []string, data map[string]any, mappi
 	return nil
 }
 
+// mergeEnvironment withholds the Session Token from the child: exec mode hands
+// it only the mapped credentials, not the session's access to request more.
 func mergeEnvironment(environment, mapped []string) []string {
-	names := map[string]struct{}{"BAO_TOKEN": {}}
+	names := map[string]struct{}{"BAO_TOKEN": {}, "VAULT_TOKEN": {}}
 	for _, value := range mapped {
 		name, _, _ := strings.Cut(value, "=")
 		names[name] = struct{}{}
@@ -574,57 +436,37 @@ func mergeEnvironment(environment, mapped []string) []string {
 	return append(result, mapped...)
 }
 
-func requestToken(tokenFile string) (string, error) {
-	if tokenFile != "" {
-		return readTokenFile(tokenFile)
-	}
-
-	if token := os.Getenv("BAO_TOKEN"); token != "" {
-		return token, nil
-	}
-
-	defaultPath, err := resolveTokenPath("")
-	if err != nil {
-		return "", err
-	}
-
-	token, err := readTokenFile(defaultPath)
-	if errors.Is(err, os.ErrNotExist) {
-		return "", errors.New("no request token: run bao-cred login, set BAO_TOKEN, or use -token-file")
-	}
-
-	return token, err
-}
-
-func resolveTokenPath(explicit string) (string, error) {
-	if explicit != "" {
-		return explicit, nil
-	}
-
-	configDirectory := os.Getenv("OPENBAO_CONTROL_GROUP_CONFIG_DIR")
-	if configDirectory == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("locate home directory: %w", err)
+func sessionToken() (string, error) {
+	for _, name := range []string{"BAO_TOKEN", "VAULT_TOKEN"} {
+		if token := strings.TrimSpace(os.Getenv(name)); token != "" {
+			return token, nil
 		}
-
-		configDirectory = filepath.Join(home, ".config", "openbao-authorizer")
 	}
 
-	return filepath.Join(configDirectory, "agent-token"), nil
+	return "", errors.New("no Session Token: set BAO_TOKEN (or VAULT_TOKEN)")
 }
 
-func readTokenFile(path string) (string, error) {
-	// #nosec G304,G703 -- token files are explicitly selected by the user or local configuration.
-	contents, err := os.ReadFile(path)
+func newOpenBaoClient(token string) (*openbao.Client, error) {
+	config := openbao.DefaultConfig()
+	if config.Error != nil {
+		return nil, fmt.Errorf("configure OpenBao client: %w", config.Error)
+	}
+
+	client, err := openbao.NewClient(config)
 	if err != nil {
-		return "", fmt.Errorf("read token file %q: %w", path, err)
+		return nil, fmt.Errorf("configure OpenBao client: %w", err)
 	}
 
-	token := strings.TrimSpace(string(contents))
-	if token == "" {
-		return "", fmt.Errorf("token file %q is empty", path)
+	client.SetToken(token)
+	return client, nil
+}
+
+type progressFunc func(string)
+
+func newProgress(stderr io.Writer, quiet bool) progressFunc {
+	if quiet {
+		return func(string) {}
 	}
 
-	return token, nil
+	return func(message string) { _, _ = fmt.Fprintln(stderr, message) }
 }

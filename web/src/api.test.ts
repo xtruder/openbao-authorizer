@@ -1,35 +1,54 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api, ApiError } from './api'
+import { Code, ConnectError } from '@connectrpc/connect'
+import { describe, expect, it, vi } from 'vitest'
+import { createApproverClient, getErrorMessage, isSessionLost } from './api'
+import { rpcError } from './test/fakeApprover'
 
-describe('push subscription API', () => {
-  afterEach(() => vi.unstubAllGlobals())
-
-  it('deletes one device endpoint with JSON and CSRF protection', async () => {
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }))
-    vi.stubGlobal('fetch', fetchMock)
-
-    await api.unsubscribeFromPush('https://push.example/device', 'csrf-token')
-
-    expect(fetchMock).toHaveBeenCalledWith('/api/v1/push/subscriptions', expect.objectContaining({
-      method: 'DELETE',
-      cache: 'no-store',
-      body: JSON.stringify({ endpoint: 'https://push.example/device' }),
-    }))
-    const headers = new Headers(fetchMock.mock.calls[0]?.[1]?.headers)
-    expect(headers.get('Content-Type')).toBe('application/json')
-    expect(headers.get('X-CSRF-Token')).toBe('csrf-token')
-  })
-
-  it('preserves server error details for request actions', async () => {
-    const message = 'OpenBao request revocation failed (HTTP 403): permission denied'
+describe('approver client', () => {
+  it('calls ApproverService over Connect JSON under /api with same-origin credentials', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(
-      JSON.stringify({ error: message }),
-      { status: 502, headers: { 'Content-Type': 'application/json' } },
+      JSON.stringify({ identity: { displayName: 'SRE on-call' } }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
     ))
     vi.stubGlobal('fetch', fetchMock)
 
-    await expect(api.rejectRequest('request-id', 'csrf-token')).rejects.toEqual(
-      new ApiError(message, 502),
+    const response = await createApproverClient().getSession({})
+
+    expect(response.identity?.displayName).toBe('SRE on-call')
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(String(url)).toBe('/api/openbao.authorizer.v1.ApproverService/GetSession')
+    expect(init).toEqual(expect.objectContaining({ method: 'POST', credentials: 'same-origin' }))
+    const headers = new Headers(init?.headers)
+    expect(headers.get('Content-Type')).toBe('application/json')
+  })
+})
+
+describe('approver errors', () => {
+  it('maps stable reasons to user-facing messages', () => {
+    expect(getErrorMessage(rpcError(Code.Unauthenticated, 'SESSION_EXPIRED'), 'fallback')).toBe('Your session has expired. Sign in again.')
+    expect(getErrorMessage(rpcError(Code.FailedPrecondition, 'GRANT_NOT_ACTIVE'), 'fallback')).toBe('That grant was already revoked or has expired.')
+    expect(getErrorMessage(rpcError(Code.NotFound, 'NOT_FOUND'), 'fallback')).toBe('That request or grant no longer exists.')
+  })
+
+  it('keeps the server explanation for invalid input', () => {
+    expect(getErrorMessage(rpcError(Code.InvalidArgument, 'INVALID_REQUEST', 'ttl must be positive'), 'fallback')).toBe('ttl must be positive')
+  })
+
+  it('hides transport details when the authorizer is unreachable', () => {
+    expect(getErrorMessage(new ConnectError('Failed to fetch', Code.Unavailable), 'fallback')).toBe(
+      'The authorizer is unreachable. Check your connection and try again.',
     )
+  })
+
+  it('falls back for errors without a message', () => {
+    expect(getErrorMessage(new ConnectError('', Code.Internal), 'fallback')).toBe('fallback')
+    expect(getErrorMessage(null, 'fallback')).toBe('fallback')
+  })
+
+  it('treats expired sessions, cross-origin rejections and revoked approvers as signed out', () => {
+    expect(isSessionLost(rpcError(Code.Unauthenticated, 'SESSION_EXPIRED'))).toBe(true)
+    expect(isSessionLost(rpcError(Code.PermissionDenied, 'CROSS_ORIGIN'))).toBe(true)
+    expect(isSessionLost(rpcError(Code.PermissionDenied, 'NOT_APPROVER'))).toBe(true)
+    expect(isSessionLost(rpcError(Code.FailedPrecondition, 'ITEM_NOT_PENDING'))).toBe(false)
+    expect(isSessionLost(new Error('offline'))).toBe(false)
   })
 })

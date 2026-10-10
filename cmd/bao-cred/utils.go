@@ -13,16 +13,11 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
-	"time"
 
 	openbao "github.com/openbao/openbao/api/v2"
 )
 
-type progressFunc func(string)
-
-var errRequestClosed = errors.New("request rejected or expired")
-
-func readCredentials(ctx context.Context, client *openbao.Client, path string, pollInterval time.Duration, progress progressFunc) (map[string]any, error) {
+func readCredentials(ctx context.Context, client *openbao.Client, path string) (map[string]any, error) {
 	secret, err := client.Logical().ReadWithContext(ctx, path)
 	if err != nil {
 		return nil, fmt.Errorf("read %q: %w", path, err)
@@ -32,81 +27,12 @@ func readCredentials(ctx context.Context, client *openbao.Client, path string, p
 		return nil, fmt.Errorf("read %q: empty response", path)
 	}
 
-	if secret.WrapInfo == nil || secret.WrapInfo.Token == "" {
-		return secret.Data, nil
-	}
-
-	if secret.WrapInfo.Accessor == "" {
-		return nil, errors.New("wrapped response has no accessor")
-	}
-
-	if progress != nil {
-		progress("approval requested; waiting")
-	}
-
-	ticker := time.NewTicker(pollInterval)
-	defer ticker.Stop()
-	attempt := 0
-	for {
-		attempt++
-		approved, statusErr := controlGroupStatus(ctx, client, secret.WrapInfo.Accessor)
-		if statusErr != nil {
-			if errors.Is(statusErr, errRequestClosed) {
-				return nil, errRequestClosed
-			}
-
-			return nil, fmt.Errorf("check approval: %w", statusErr)
-		}
-
-		if approved {
-			unwrapped, unwrapErr := client.Logical().UnwrapWithContext(ctx, secret.WrapInfo.Token)
-			if unwrapErr != nil {
-				return nil, fmt.Errorf("unwrap approved response: %w", unwrapErr)
-			}
-
-			if unwrapped == nil {
-				return nil, errors.New("unwrap approved response: empty response")
-			}
-
-			if progress != nil {
-				progress("approved")
-			}
-
-			return unwrapped.Data, nil
-		}
-
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-ticker.C:
-			if progress != nil && attempt%12 == 0 {
-				progress("still waiting for approval")
-			}
-		}
-	}
+	return secret.Data, nil
 }
 
-func controlGroupStatus(ctx context.Context, client *openbao.Client, accessor string) (bool, error) {
-	secret, err := client.Logical().WriteWithContext(ctx, "sys/control-group/request", map[string]any{"accessor": accessor})
-	if err != nil {
-		var responseErr *openbao.ResponseError
-		if errors.As(err, &responseErr) && (responseErr.StatusCode == http.StatusBadRequest || responseErr.StatusCode == http.StatusNotFound) {
-			return false, errRequestClosed
-		}
-
-		return false, err
-	}
-
-	if secret == nil {
-		return false, errors.New("empty control-group status response")
-	}
-
-	approved, ok := secret.Data["approved"].(bool)
-	if !ok {
-		return false, fmt.Errorf("control-group status has invalid approved value %T", secret.Data["approved"])
-	}
-
-	return approved, nil
+func isPermissionDenied(err error) bool {
+	responseErr, ok := errors.AsType[*openbao.ResponseError](err)
+	return ok && responseErr.StatusCode == http.StatusForbidden
 }
 
 type mapping struct {

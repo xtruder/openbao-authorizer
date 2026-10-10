@@ -3,24 +3,29 @@ SHELL := /bin/bash
 .PHONY: e2e app openbao
 
 ROOT := $(abspath ..)
-OPENBAO_VERSION := 2.7.0-beta20260909
+OPENBAO_VERSION := 2.7.1
 OPENBAO_TAG := v$(OPENBAO_VERSION)
 MACHINE := $(shell uname -m)
 ifeq ($(MACHINE),x86_64)
 OPENBAO_ARCH := amd64
-OPENBAO_SHA256 := 7531048975e8f669b83c28f0f949e11fde0587d1064ea77d612f88cd0713fd11
+OPENBAO_SHA256 := 0e2f1ce10d124e03112b50dd2fbec6b78003783253bc3a91587938f39d1e2243
 else ifeq ($(MACHINE),aarch64)
 OPENBAO_ARCH := arm64
-OPENBAO_SHA256 := 96558560ab53008a9b03d1872d7b219a2133b2fc5b9fa9fd5501abbdcf63271b
+OPENBAO_SHA256 := 2b3807d90f224df05d4fe1fdede7f052d2227596c648a56bd291381f8fd01840
 endif
 OPENBAO_CACHE := $(ROOT)/.e2e/openbao
 OPENBAO_ARCHIVE := openbao_$(OPENBAO_VERSION)_linux_$(OPENBAO_ARCH).tar.gz
 OPENBAO_RELEASE_URL := https://github.com/openbao/openbao/releases/download/$(OPENBAO_TAG)
 OPENBAO_BINARY := $(OPENBAO_CACHE)/bin/$(OPENBAO_TAG)/linux_$(OPENBAO_ARCH)/bao
 APP_BINARY := $(ROOT)/bin/openbao-authorizer
+BAO_CRED_BINARY := $(ROOT)/bin/bao-cred
+BUN_BINARY := $(shell command -v bun)
 
 e2e: app openbao
-	OPENBAO_E2E_APP_BINARY="$(APP_BINARY)" OPENBAO_E2E_BAO_BINARY="$(OPENBAO_BINARY)" go test -tags=e2e -count=1 -v .
+	@if [[ -z "$(BUN_BINARY)" ]]; then echo "bun is required to run the opencode plugin's mint CLI" >&2; exit 1; fi
+	OPENBAO_E2E_APP_BINARY="$(APP_BINARY)" OPENBAO_E2E_BAO_BINARY="$(OPENBAO_BINARY)" \
+		OPENBAO_E2E_BAO_CRED_BINARY="$(BAO_CRED_BINARY)" OPENBAO_E2E_BUN_BINARY="$(BUN_BINARY)" \
+		go test -tags=e2e -count=1 -v .
 
 app:
 	$(MAKE) -C "$(ROOT)" build

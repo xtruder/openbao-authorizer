@@ -1,53 +1,48 @@
-// Package httpapi exposes the same-origin application API.
+// Package httpapi serves the ConnectRPC API: the bearer-token AgentService and
+// the same-origin, cookie-authenticated ApproverService.
 package httpapi
 
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
-	"mime"
 	"net/http"
-	"net/url"
-	"reflect"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/xtruder/openbao-authorizer/internal/approvalcontext"
+	"connectrpc.com/connect"
+
+	"github.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1/authorizerv1connect"
+	"github.com/xtruder/openbao-authorizer/internal/grants"
 	"github.com/xtruder/openbao-authorizer/internal/openbao"
 	"github.com/xtruder/openbao-authorizer/internal/store"
 )
 
 const (
 	maxBodyBytes      = 1 << 20
-	defaultSessionTTL = 30 * 24 * time.Hour
+	defaultSessionTTL = 168 * time.Hour
+	// DefaultHeartbeatInterval keeps idle streams alive through proxies.
+	DefaultHeartbeatInterval = 25 * time.Second
+	// streamDeadlineSlack is added to the heartbeat interval when a stream
+	// extends its write deadline, so a stalled client is cut off but a live
+	// one never is.
+	streamDeadlineSlack = 30 * time.Second
 )
 
-// OpenBao is the API surface needed by authenticated handlers.
+// OpenBao is the API surface needed to authenticate Approvers.
 type OpenBao interface {
-	LoginUserpass(context.Context, string, string) (openbao.AuthToken, error)
-	RenewSelf(context.Context, string) error
+	LoginUserpass(context.Context, string, string) (string, error)
 	RevokeSelf(context.Context, string) error
-	RevokeAccessor(context.Context, string) error
 	LookupSelf(context.Context, string) (openbao.Identity, error)
-	Authorize(context.Context, string, string) (bool, error)
-	ControlGroupRequest(context.Context, string) (openbao.ControlGroupRequest, error)
-	Read(context.Context, string) (json.RawMessage, error)
 }
 
-// Store is the persistence surface needed by the HTTP API.
+// Store is the persistence surface needed by the API.
 type Store interface {
-	List(context.Context) ([]store.Request, error)
-	Accessor(context.Context, string) (string, error)
-	Upsert(context.Context, string, openbao.ControlGroupRequest, store.UpsertOptions) (string, bool, error)
-	SetApproved(context.Context, string, bool) error
-	TransitionStatus(context.Context, string, store.RequestStatus, store.RequestStatus) (bool, error)
 	PutSession(context.Context, store.Session) error
+	Session(context.Context, string, time.Time) (store.Session, error)
 	DeleteSession(context.Context, string) error
 	PutSubscription(context.Context, store.Subscription) error
 	DeleteSubscriptionForEntity(context.Context, string, string) error
@@ -58,145 +53,42 @@ type Store interface {
 type Options struct {
 	OpenBao              OpenBao
 	Store                Store
+	Grants               *grants.Service
 	Events               *EventBus
 	Logger               *slog.Logger
 	PublicOrigin         string
 	VAPIDPublicKey       string
 	ApproverPolicy       string
-	ExposeRequestData    bool
-	ApprovalContext      *approvalcontext.Resolver
 	InsecureCookies      bool
-	Sessions             *Sessions
 	ValidatePushEndpoint func(context.Context, string) error
+	// SessionTTL defaults to 168h.
+	SessionTTL time.Duration
+	// HeartbeatInterval defaults to DefaultHeartbeatInterval.
+	HeartbeatInterval time.Duration
 }
 
 type server struct {
 	bao                  OpenBao
 	store                Store
+	grants               *grants.Service
 	events               *EventBus
 	logger               *slog.Logger
 	publicOrigin         string
 	vapidPublicKey       string
 	approverPolicy       string
-	exposeRequestData    bool
-	approvalContext      *approvalcontext.Resolver
 	insecureCookies      bool
-	sessions             *Sessions
 	validatePushEndpoint func(context.Context, string) error
-	// OpenBao decisions are externally stateful and must not race each other.
-	decisionMu sync.Mutex
+	sessionTTL           time.Duration
+	heartbeatInterval    time.Duration
+
+	sessionsMu sync.Mutex
+	// sessionDeleted is closed and replaced whenever a session is deleted, so
+	// live streams end on logout or re-login without polling.
+	sessionDeleted chan struct{}
 }
 
-type session struct {
-	Token     string
-	CSRFToken string
-	Identity  openbao.Identity
-	ExpiresAt time.Time
-}
-
-// Sessions holds opaque server-side human-token sessions.
-type Sessions struct {
-	mu       sync.RWMutex
-	sessions map[string]session
-}
-
-// NewSessions creates an empty session registry.
-func NewSessions() *Sessions { return &Sessions{sessions: make(map[string]session)} }
-
-// Restore loads encrypted durable sessions into the process-local registry.
-func (s *Sessions) Restore(records []store.Session) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, record := range records {
-		s.sessions[record.ID] = session{
-			Token: record.Token, CSRFToken: record.CSRFToken,
-			Identity: record.Identity, ExpiresAt: record.ExpiresAt,
-		}
-	}
-}
-
-// AllActiveTokens returns each distinct token for a non-expired session.
-func (s *Sessions) AllActiveTokens(now time.Time) []string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	unique := make(map[string]struct{})
-	for _, value := range s.sessions {
-		if now.Before(value.ExpiresAt) {
-			unique[value.Token] = struct{}{}
-		}
-	}
-
-	tokens := make([]string, 0, len(unique))
-	for token := range unique {
-		tokens = append(tokens, token)
-	}
-
-	return tokens
-}
-
-// DeleteToken removes sessions that use a revoked or expired OpenBao token.
-func (s *Sessions) DeleteToken(token string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for id, value := range s.sessions {
-		if value.Token == token {
-			delete(s.sessions, id)
-		}
-	}
-}
-
-// ActiveTokens returns every unexpired token for an entity. Push delivery must
-// treat all of them as candidate proofs of an active, eligible session.
-func (s *Sessions) ActiveTokens(entityID string) []string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	now := time.Now()
-	tokens := make([]string, 0, 1)
-	for _, value := range s.sessions {
-		if value.Identity.EntityID == entityID && now.Before(value.ExpiresAt) {
-			tokens = append(tokens, value.Token)
-		}
-	}
-
-	return tokens
-}
-
-// DeleteEntity removes every session belonging to an entity.
-func (s *Sessions) DeleteEntity(entityID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for id, value := range s.sessions {
-		if value.Identity.EntityID == entityID {
-			delete(s.sessions, id)
-		}
-	}
-}
-
-// DeleteExpired removes expired sessions so stored OpenBao tokens do not linger
-// in memory after their cookie is gone. Returns the entity IDs that lost their
-// last session.
-func (s *Sessions) DeleteExpired(now time.Time) []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	lastForEntity := make(map[string]string)
-	for id, value := range s.sessions {
-		if now.After(value.ExpiresAt) {
-			delete(s.sessions, id)
-			continue
-		}
-
-		lastForEntity[value.Identity.EntityID] = id
-	}
-
-	removed := make([]string, 0, len(lastForEntity))
-	for entityID := range lastForEntity {
-		removed = append(removed, entityID)
-	}
-
-	return removed
-}
-
-// New constructs the HTTP API handler.
+// New constructs the HTTP API handler. It serves the services under /api, so
+// it is meant to be mounted at /api/ on the application mux.
 func New(options Options) http.Handler {
 	logger := options.Logger
 	if logger == nil {
@@ -208,656 +100,72 @@ func New(options Options) http.Handler {
 		events = NewEventBus()
 	}
 
-	sessions := options.Sessions
-	if sessions == nil {
-		sessions = NewSessions()
+	sessionTTL := options.SessionTTL
+	if sessionTTL <= 0 {
+		sessionTTL = defaultSessionTTL
 	}
 
-	contexts := options.ApprovalContext
-	if contexts == nil {
-		contexts, _ = approvalcontext.New(nil)
+	heartbeat := options.HeartbeatInterval
+	if heartbeat <= 0 {
+		heartbeat = DefaultHeartbeatInterval
 	}
 
 	s := &server{
 		bao:                  options.OpenBao,
 		store:                options.Store,
+		grants:               options.Grants,
 		events:               events,
 		logger:               logger,
 		publicOrigin:         strings.TrimSuffix(options.PublicOrigin, "/"),
 		vapidPublicKey:       options.VAPIDPublicKey,
 		approverPolicy:       options.ApproverPolicy,
-		exposeRequestData:    options.ExposeRequestData,
-		approvalContext:      contexts,
 		insecureCookies:      options.InsecureCookies,
-		sessions:             sessions,
 		validatePushEndpoint: options.ValidatePushEndpoint,
+		sessionTTL:           sessionTTL,
+		heartbeatInterval:    heartbeat,
+		sessionDeleted:       make(chan struct{}),
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/v1/session", s.login)
-	mux.HandleFunc("GET /api/v1/session", s.authenticated(s.currentSession))
-	mux.HandleFunc("DELETE /api/v1/session", s.authenticated(s.logout))
-	mux.HandleFunc("GET /api/v1/requests", s.authenticated(s.listRequests))
-	mux.HandleFunc("POST /api/v1/requests/{id}/approve", s.authenticated(s.approve))
-	mux.HandleFunc("POST /api/v1/requests/{id}/reject", s.authenticated(s.reject))
-	mux.HandleFunc("GET /api/v1/events", s.authenticated(s.streamEvents))
-	mux.HandleFunc("GET /api/v1/push/public-key", s.authenticated(s.pushPublicKey))
-	mux.HandleFunc("POST /api/v1/push/subscriptions", s.authenticated(s.putSubscription))
-	mux.HandleFunc("DELETE /api/v1/push/subscriptions", s.authenticated(s.deleteSubscription))
-	return s.securityHeaders(mux)
+	mux.Handle(authorizerv1connect.NewAgentServiceHandler(agentService{s},
+		connect.WithReadMaxBytes(maxBodyBytes),
+		connect.WithInterceptors(streamHeaders{}, authInterceptor(s.authorizeAgent)),
+	))
+	mux.Handle(authorizerv1connect.NewApproverServiceHandler(approverService{s},
+		connect.WithReadMaxBytes(maxBodyBytes),
+		connect.WithInterceptors(streamHeaders{}, authInterceptor(s.authorizeApprover)),
+	))
+	return s.securityHeaders(withRequestInfo(http.StripPrefix("/api", mux)))
 }
 
-func (s *server) login(w http.ResponseWriter, r *http.Request) {
-	if !s.validMutation(w, r, true) {
-		return
-	}
+// requestInfo carries what interceptors and streams need from the HTTP layer
+// but connect does not expose: the Host for same-origin checks and the
+// response controller for per-stream deadlines.
+type requestInfo struct {
+	host       string
+	controller *http.ResponseController
+}
 
-	var payload struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
-	if !decodeJSON(w, r, &payload) {
-		return
-	}
+type requestInfoKey struct{}
 
-	payload.Username = strings.TrimSpace(payload.Username)
-	if payload.Username == "" || payload.Password == "" {
-		writeError(w, http.StatusBadRequest, "username and password are required")
-		return
-	}
-
-	auth, err := s.bao.LoginUserpass(r.Context(), payload.Username, payload.Password)
-	payload.Password = ""
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "OpenBao username or password is invalid")
-		return
-	}
-
-	keepToken := false
-	defer func() {
-		if !keepToken {
-			if revokeErr := s.bao.RevokeSelf(r.Context(), auth.Token); revokeErr != nil {
-				s.logger.Warn("revoke rejected OpenBao login token", "error", revokeErr)
-			}
-		}
-	}()
-	if !auth.Renewable {
-		writeError(w, http.StatusServiceUnavailable, "OpenBao approver login must issue a renewable token")
-		return
-	}
-
-	identity, err := s.bao.LookupSelf(r.Context(), auth.Token)
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "OpenBao token is invalid")
-		return
-	}
-
-	if identity.EntityID == "" {
-		writeError(w, http.StatusForbidden, "OpenBao token is not associated with an identity entity")
-		return
-	}
-
-	if s.approverPolicy == "" || !identity.HasPolicy(s.approverPolicy) {
-		writeError(w, http.StatusForbidden, "OpenBao identity is not an application approver")
-		return
-	}
-
-	sessionID, err := randomToken()
-	if err != nil {
-		s.internalError(w, err)
-		return
-	}
-
-	csrfToken, err := randomToken()
-	if err != nil {
-		s.internalError(w, err)
-		return
-	}
-
-	ttl := defaultSessionTTL
-	value := session{Token: auth.Token, CSRFToken: csrfToken, Identity: identity, ExpiresAt: time.Now().Add(ttl)}
-	if err := s.store.PutSession(r.Context(), store.Session{
-		ID: sessionID, Token: value.Token, CSRFToken: value.CSRFToken,
-		Identity: value.Identity, ExpiresAt: value.ExpiresAt,
-	}); err != nil {
-		s.internalError(w, err)
-		return
-	}
-
-	s.sessions.mu.Lock()
-	s.sessions.sessions[sessionID] = value
-	s.sessions.mu.Unlock()
-	keepToken = true
-	// #nosec G124 -- Secure is disabled only in explicit local development mode.
-	http.SetCookie(w, &http.Cookie{
-		Name:     s.cookieName(),
-		Value:    sessionID,
-		Path:     "/",
-		MaxAge:   int(ttl.Seconds()),
-		Expires:  value.ExpiresAt,
-		HttpOnly: true,
-		Secure:   !s.insecureCookies,
-		SameSite: http.SameSiteStrictMode,
+func withRequestInfo(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		info := requestInfo{host: r.Host, controller: http.NewResponseController(w)}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestInfoKey{}, info)))
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"identity": identity, "csrfToken": csrfToken})
 }
 
-func (s *server) currentSession(w http.ResponseWriter, _ *http.Request, value session) {
-	writeJSON(w, http.StatusOK, map[string]any{"identity": value.Identity, "csrfToken": value.CSRFToken})
+func requestInfoFrom(ctx context.Context) requestInfo {
+	info, _ := ctx.Value(requestInfoKey{}).(requestInfo)
+	return info
 }
 
-func (s *server) logout(w http.ResponseWriter, r *http.Request, value session) {
-	if !s.validMutationWithCSRF(w, r, value) {
-		return
+// extendStreamDeadline pushes the write deadline past the next heartbeat.
+// The server-wide write timeout would otherwise cut every stream short, while
+// a client that stops reading is still cut off.
+func (s *server) extendStreamDeadline(ctx context.Context) {
+	if controller := requestInfoFrom(ctx).controller; controller != nil {
+		_ = controller.SetWriteDeadline(time.Now().Add(s.heartbeatInterval + streamDeadlineSlack))
 	}
-
-	cookie, _ := r.Cookie(s.cookieName())
-	if cookie != nil {
-		s.deleteSession(r.Context(), cookie.Value)
-	}
-
-	if err := s.bao.RevokeSelf(r.Context(), value.Token); err != nil {
-		s.logger.Warn("revoke OpenBao token on logout", "error", err)
-	}
-
-	if err := s.store.DeleteSubscriptionsByEntity(r.Context(), value.Identity.EntityID); err != nil {
-		s.logger.Error("delete push subscriptions on logout", "error", err)
-	}
-
-	// #nosec G124 -- Secure is disabled only in explicit local development mode.
-	http.SetCookie(w, &http.Cookie{Name: s.cookieName(), Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: !s.insecureCookies, SameSite: http.SameSiteStrictMode})
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *server) listRequests(w http.ResponseWriter, r *http.Request, _ session) {
-	requests, err := s.store.List(r.Context())
-	if err != nil {
-		s.internalError(w, err)
-		return
-	}
-
-	for index := range requests {
-		if !s.exposeRequestData {
-			requests[index].Data = nil
-		}
-	}
-
-	writeJSON(w, http.StatusOK, requests)
-}
-
-func (s *server) approve(w http.ResponseWriter, r *http.Request, value session) {
-	if !s.validMutationWithCSRF(w, r, value) {
-		return
-	}
-
-	s.decisionMu.Lock()
-	defer s.decisionMu.Unlock()
-
-	accessor, err := s.store.Accessor(r.Context(), r.PathValue("id"))
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "request not found")
-		return
-	}
-
-	if err != nil {
-		s.internalError(w, err)
-		return
-	}
-
-	requests, err := s.store.List(r.Context())
-	if err != nil {
-		s.internalError(w, err)
-		return
-	}
-
-	var stored *store.Request
-	for index := range requests {
-		if requests[index].ID == r.PathValue("id") {
-			stored = &requests[index]
-			break
-		}
-	}
-
-	if stored == nil {
-		writeError(w, http.StatusNotFound, "request not found")
-		return
-	}
-
-	if stored.Status != store.RequestPending {
-		writeError(w, http.StatusConflict, "request is no longer pending")
-		return
-	}
-
-	currentContext := stored.ApprovalContext
-	contextPath, hasContext := s.approvalContext.Resolve(stored.Path)
-	if hasContext {
-		contextData, contextErr := s.bao.Read(r.Context(), contextPath)
-		currentContext = &openbao.ApprovalContext{Available: contextErr == nil, Data: contextData}
-		request := openbao.ControlGroupRequest{
-			Approved: stored.Approved, Operation: stored.Operation, Path: stored.Path, Data: stored.Data,
-			ApprovalContext: currentContext, Entity: stored.Entity, Authorizations: stored.Authorizations,
-		}
-		if _, _, upsertErr := s.store.Upsert(r.Context(), accessor, request, store.UpsertOptions{ApprovalContext: store.ReplaceApprovalContext}); upsertErr != nil {
-			s.internalError(w, upsertErr)
-			return
-		}
-
-		if contextErr != nil {
-			s.logger.Warn("refresh approval context", "path", stored.Path, "error", contextErr)
-			writeError(w, http.StatusConflict, "approval context could not be refreshed; review the request again")
-			return
-		}
-
-		if !sameApprovalContext(stored.ApprovalContext, currentContext) {
-			writeError(w, http.StatusConflict, "approval context changed; review the request again")
-			return
-		}
-	}
-
-	approved, err := s.bao.Authorize(r.Context(), value.Token, accessor)
-	if err != nil {
-		if s.writeOpenBaoError(w, "approval", err) {
-			return
-		}
-
-		s.internalError(w, err)
-		return
-	}
-
-	fresh, err := s.bao.ControlGroupRequest(r.Context(), accessor)
-	if err == nil {
-		if fresh.ApprovalContext == nil {
-			fresh.ApprovalContext = currentContext
-		}
-
-		_, _, err = s.store.Upsert(r.Context(), accessor, fresh, store.UpsertOptions{ApprovalContext: store.ReplaceApprovalContext})
-	} else {
-		err = s.store.SetApproved(r.Context(), r.PathValue("id"), approved)
-	}
-
-	if errors.Is(err, store.ErrStatusChanged) {
-		writeError(w, http.StatusConflict, "request is no longer pending")
-		return
-	}
-
-	if err != nil {
-		s.internalError(w, err)
-		return
-	}
-
-	requests, err = s.store.List(r.Context())
-	if err != nil {
-		s.internalError(w, err)
-		return
-	}
-
-	for _, request := range requests {
-		if request.ID == r.PathValue("id") {
-			if request.Status == store.RequestRejected || request.Status == store.RequestExpired {
-				writeError(w, http.StatusConflict, "request is no longer pending")
-				return
-			}
-
-			_ = s.events.Publish("status", map[string]any{"id": request.ID, "status": request.Status})
-			if !s.exposeRequestData {
-				request.Data = nil
-			}
-
-			writeJSON(w, http.StatusOK, request)
-			return
-		}
-	}
-
-	writeError(w, http.StatusNotFound, "request not found")
-}
-
-func (s *server) reject(w http.ResponseWriter, r *http.Request, value session) {
-	if !s.validMutationWithCSRF(w, r, value) {
-		return
-	}
-
-	s.decisionMu.Lock()
-	defer s.decisionMu.Unlock()
-
-	id := r.PathValue("id")
-	accessor, err := s.store.Accessor(r.Context(), id)
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "request not found")
-		return
-	}
-
-	if err != nil {
-		s.internalError(w, err)
-		return
-	}
-
-	requests, err := s.store.List(r.Context())
-	if err != nil {
-		s.internalError(w, err)
-		return
-	}
-
-	var rejected *store.Request
-	for index := range requests {
-		if requests[index].ID == id {
-			rejected = &requests[index]
-			break
-		}
-	}
-
-	if rejected == nil {
-		writeError(w, http.StatusNotFound, "request not found")
-		return
-	}
-
-	if rejected.Status != store.RequestPending {
-		writeError(w, http.StatusConflict, "request is no longer pending")
-		return
-	}
-
-	status := store.RequestRejected
-	revokeErr := s.bao.RevokeAccessor(r.Context(), accessor)
-	if revokeErr != nil {
-		var httpErr *openbao.HTTPError
-		if errors.As(revokeErr, &httpErr) && (httpErr.StatusCode == http.StatusBadRequest || httpErr.StatusCode == http.StatusNotFound) {
-			status = store.RequestExpired
-		} else {
-			if s.writeOpenBaoError(w, "request revocation", revokeErr) {
-				return
-			}
-
-			s.internalError(w, revokeErr)
-			return
-		}
-	}
-
-	changed, err := s.store.TransitionStatus(r.Context(), id, store.RequestPending, status)
-	if err != nil {
-		s.internalError(w, err)
-		return
-	}
-
-	if !changed && status == store.RequestRejected {
-		// The scanner can observe successful revocation before this handler records it.
-		changed, err = s.store.TransitionStatus(r.Context(), id, store.RequestExpired, store.RequestRejected)
-		if err != nil {
-			s.internalError(w, err)
-			return
-		}
-	}
-
-	if !changed {
-		writeError(w, http.StatusConflict, "request is no longer pending")
-		return
-	}
-
-	rejected.Status = status
-	rejected.Approved = false
-	_ = s.events.Publish("status", map[string]any{"id": id, "status": status})
-	if status == store.RequestExpired {
-		writeError(w, http.StatusConflict, "request has expired")
-		return
-	}
-
-	if !s.exposeRequestData {
-		rejected.Data = nil
-	}
-
-	writeJSON(w, http.StatusOK, rejected)
-}
-
-func sameApprovalContext(left, right *openbao.ApprovalContext) bool {
-	if left == nil || right == nil {
-		return left == right
-	}
-
-	if left.Available != right.Available {
-		return false
-	}
-
-	var leftData, rightData any
-	if json.Unmarshal(left.Data, &leftData) != nil || json.Unmarshal(right.Data, &rightData) != nil {
-		return false
-	}
-
-	return reflect.DeepEqual(leftData, rightData)
-}
-
-func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, value session) {
-	cookie, cookieErr := r.Cookie(s.cookieName())
-	if cookieErr != nil {
-		writeError(w, http.StatusUnauthorized, "authentication required")
-		return
-	}
-
-	sessionID := cookie.Value
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeError(w, http.StatusInternalServerError, "streaming is unavailable")
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Accel-Buffering", "no")
-	channel, unsubscribe := s.events.Subscribe()
-	defer unsubscribe()
-	heartbeat := time.NewTicker(20 * time.Second)
-	defer heartbeat.Stop()
-	sessionLive := time.NewTimer(time.Until(value.ExpiresAt))
-	defer sessionLive.Stop()
-	_, _ = fmt.Fprint(w, ": connected\n\n")
-	flusher.Flush()
-	for {
-		select {
-		case event := <-channel:
-			_, _ = fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", event.ID, event.Type, event.Data)
-			flusher.Flush()
-		case <-heartbeat.C:
-			// A stream stays authorized only while its application session
-			// still exists; logout or entity wipe ends it immediately.
-			s.sessions.mu.RLock()
-			_, alive := s.sessions.sessions[sessionID]
-			s.sessions.mu.RUnlock()
-			if !alive {
-				return
-			}
-
-			identity, err := s.bao.LookupSelf(r.Context(), value.Token)
-			if err != nil || !identity.HasPolicy(s.approverPolicy) {
-				return
-			}
-
-			_, _ = fmt.Fprint(w, ": heartbeat\n\n")
-			flusher.Flush()
-		case <-sessionLive.C:
-			s.deleteSession(r.Context(), sessionID)
-			return
-		case <-r.Context().Done():
-			return
-		}
-	}
-}
-
-func (s *server) pushPublicKey(w http.ResponseWriter, _ *http.Request, _ session) {
-	if s.vapidPublicKey == "" {
-		writeError(w, http.StatusNotFound, "Web Push is not configured")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"publicKey": s.vapidPublicKey})
-}
-
-func (s *server) putSubscription(w http.ResponseWriter, r *http.Request, value session) {
-	if !s.validMutationWithCSRF(w, r, value) {
-		return
-	}
-
-	var payload struct {
-		Endpoint string `json:"endpoint"`
-		Keys     struct {
-			P256DH string `json:"p256dh"`
-			Auth   string `json:"auth"`
-		} `json:"keys"`
-	}
-	if !decodeJSON(w, r, &payload) {
-		return
-	}
-
-	endpoint, err := url.Parse(payload.Endpoint)
-	if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" || len(payload.Endpoint) > 4096 {
-		writeError(w, http.StatusBadRequest, "invalid push subscription")
-		return
-	}
-
-	p256dh, p256dhErr := base64.RawURLEncoding.DecodeString(strings.TrimRight(payload.Keys.P256DH, "="))
-	auth, authErr := base64.RawURLEncoding.DecodeString(strings.TrimRight(payload.Keys.Auth, "="))
-	if p256dhErr != nil || authErr != nil || len(p256dh) != 65 || len(auth) != 16 {
-		writeError(w, http.StatusBadRequest, "invalid push subscription keys")
-		return
-	}
-
-	if s.validatePushEndpoint == nil {
-		writeError(w, http.StatusBadRequest, "push endpoint is not allowed")
-		return
-	}
-
-	if validateErr := s.validatePushEndpoint(r.Context(), payload.Endpoint); validateErr != nil {
-		s.logger.Warn("rejected push endpoint", "host", endpoint.Hostname(), "error", validateErr)
-		writeError(w, http.StatusBadRequest, "push endpoint is not allowed")
-		return
-	}
-
-	if err := s.store.PutSubscription(r.Context(), store.Subscription{
-		EntityID: value.Identity.EntityID, Endpoint: payload.Endpoint, P256DH: payload.Keys.P256DH, Auth: payload.Keys.Auth, ExpiresAt: value.ExpiresAt,
-	}); err != nil {
-		s.internalError(w, err)
-		return
-	}
-
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *server) deleteSubscription(w http.ResponseWriter, r *http.Request, value session) {
-	if !s.validMutationWithCSRF(w, r, value) {
-		return
-	}
-
-	var payload struct {
-		Endpoint string `json:"endpoint"`
-	}
-	if !decodeJSON(w, r, &payload) || payload.Endpoint == "" {
-		return
-	}
-
-	if err := s.store.DeleteSubscriptionForEntity(r.Context(), value.Identity.EntityID, payload.Endpoint); err != nil {
-		s.internalError(w, err)
-		return
-	}
-
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *server) authenticated(next func(http.ResponseWriter, *http.Request, session)) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		cookie, err := r.Cookie(s.cookieName())
-		if err != nil {
-			writeError(w, http.StatusUnauthorized, "authentication required")
-			return
-		}
-
-		s.sessions.mu.RLock()
-		value, ok := s.sessions.sessions[cookie.Value]
-		s.sessions.mu.RUnlock()
-		if !ok || time.Now().After(value.ExpiresAt) {
-			if ok {
-				s.deleteSession(r.Context(), cookie.Value)
-			}
-
-			writeError(w, http.StatusUnauthorized, "authentication required")
-			return
-		}
-
-		identity, lookupErr := s.bao.LookupSelf(r.Context(), value.Token)
-		if lookupErr != nil {
-			s.deleteSession(r.Context(), cookie.Value)
-			writeError(w, http.StatusUnauthorized, "OpenBao session is no longer valid")
-			return
-		}
-
-		if !identity.HasPolicy(s.approverPolicy) {
-			s.deleteSession(r.Context(), cookie.Value)
-			writeError(w, http.StatusForbidden, "OpenBao identity is no longer an application approver")
-			return
-		}
-
-		value.Identity = identity
-		// Refresh only when the same session still exists; a concurrent logout
-		// or entity wipe must not be resurrected here.
-		s.sessions.mu.Lock()
-		if current, exists := s.sessions.sessions[cookie.Value]; exists && current.CSRFToken == value.CSRFToken {
-			s.sessions.sessions[cookie.Value] = value
-		}
-
-		s.sessions.mu.Unlock()
-		next(w, r, value)
-	}
-}
-
-func (s *server) deleteSession(ctx context.Context, id string) {
-	s.sessions.mu.Lock()
-	delete(s.sessions.sessions, id)
-	s.sessions.mu.Unlock()
-	if err := s.store.DeleteSession(ctx, id); err != nil {
-		s.logger.Error("delete durable session", "error", err)
-	}
-}
-
-func (s *server) validMutationWithCSRF(w http.ResponseWriter, r *http.Request, value session) bool {
-	if !s.validMutation(w, r, true) {
-		return false
-	}
-
-	if !constantTimeEqual(r.Header.Get("X-CSRF-Token"), value.CSRFToken) {
-		writeError(w, http.StatusForbidden, "invalid CSRF token")
-		return false
-	}
-
-	return true
-}
-
-func (s *server) validMutation(w http.ResponseWriter, r *http.Request, requireJSON bool) bool {
-	if requireJSON {
-		mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-		if err != nil || mediaType != "application/json" {
-			writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
-			return false
-		}
-	}
-
-	if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
-		writeError(w, http.StatusForbidden, "cross-site request rejected")
-		return false
-	}
-
-	origin := strings.TrimSuffix(r.Header.Get("Origin"), "/")
-	if origin != "" {
-		expected := s.publicOrigin
-		if expected == "" {
-			scheme := "https"
-			if s.insecureCookies {
-				scheme = "http"
-			}
-
-			expected = scheme + "://" + r.Host
-		}
-
-		if origin != expected {
-			writeError(w, http.StatusForbidden, "origin rejected")
-			return false
-		}
-	}
-
-	return true
 }
 
 func (s *server) securityHeaders(next http.Handler) http.Handler {
@@ -879,47 +187,42 @@ func (s *server) cookieName() string {
 	return "__Host-openbao-authorizer-session"
 }
 
-func (s *server) internalError(w http.ResponseWriter, err error) {
-	s.logger.Error("request failed", "error", err)
-	writeError(w, http.StatusInternalServerError, "internal server error")
-}
-
-func (s *server) writeOpenBaoError(w http.ResponseWriter, action string, err error) bool {
-	var httpErr *openbao.HTTPError
-	if !errors.As(err, &httpErr) {
-		return false
+func (s *server) sessionCookie(value string, expiresAt time.Time) *http.Cookie {
+	// #nosec G124 -- Secure is disabled only in explicit local development mode.
+	cookie := &http.Cookie{
+		Name:     s.cookieName(),
+		Value:    value,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   !s.insecureCookies,
+		SameSite: http.SameSiteStrictMode,
+	}
+	if value == "" {
+		cookie.MaxAge = -1
+		return cookie
 	}
 
-	s.logger.Error("OpenBao request failed", "action", action, "error", err)
-	message := fmt.Sprintf("OpenBao %s failed (HTTP %d)", action, httpErr.StatusCode)
-	if len(httpErr.Errors) > 0 {
-		message += ": " + strings.Join(httpErr.Errors, "; ")
+	cookie.MaxAge = int(time.Until(expiresAt).Seconds())
+	cookie.Expires = expiresAt
+	return cookie
+}
+
+func (s *server) deleteSession(ctx context.Context, id string) {
+	if err := s.store.DeleteSession(ctx, id); err != nil {
+		s.logger.Error("delete session", "error", err)
 	}
 
-	writeError(w, http.StatusBadGateway, message)
-	return true
+	s.sessionsMu.Lock()
+	defer s.sessionsMu.Unlock()
+	close(s.sessionDeleted)
+	s.sessionDeleted = make(chan struct{})
 }
 
-func decodeJSON(w http.ResponseWriter, r *http.Request, output any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(output); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
-		return false
-	}
-
-	return true
-}
-
-func writeJSON(w http.ResponseWriter, status int, value any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
-}
-
-func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{"error": message})
+// sessionDeletions returns a channel closed on the next session deletion.
+func (s *server) sessionDeletions() <-chan struct{} {
+	s.sessionsMu.Lock()
+	defer s.sessionsMu.Unlock()
+	return s.sessionDeleted
 }
 
 func randomToken() (string, error) {
@@ -929,17 +232,4 @@ func randomToken() (string, error) {
 	}
 
 	return hex.EncodeToString(buffer), nil
-}
-
-func constantTimeEqual(left, right string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-
-	var different byte
-	for index := range len(left) {
-		different |= left[index] ^ right[index]
-	}
-
-	return different == 0
 }

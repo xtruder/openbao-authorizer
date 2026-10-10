@@ -1,64 +1,96 @@
 package httpapi
 
 import (
-	"encoding/json"
-	"fmt"
+	"context"
+	"log/slog"
 	"sync"
-	"sync/atomic"
+	"time"
 )
 
-// Event is a live application event delivered over SSE.
-type Event struct {
-	ID   uint64          `json:"id"`
-	Type string          `json:"type"`
-	Data json.RawMessage `json:"data"`
-}
+// pushTimeout bounds one Web Push fan-out, which runs after the agent's
+// request has been answered.
+const pushTimeout = 30 * time.Second
 
-// EventBus is a process-local fan-out bus. REST remains the source of truth.
+// EventBus is a process-local change signal for live streams. It carries no
+// payload: streams re-read the store and send full snapshots, so coalescing
+// several changes into one wake-up loses nothing.
 type EventBus struct {
-	next        atomic.Uint64
-	mu          sync.RWMutex
-	subscribers map[chan Event]struct{}
+	mu          sync.Mutex
+	subscribers map[chan struct{}]struct{}
 }
 
 // NewEventBus creates an event bus.
 func NewEventBus() *EventBus {
-	return &EventBus{subscribers: make(map[chan Event]struct{})}
+	return &EventBus{subscribers: make(map[chan struct{}]struct{})}
 }
 
-// Publish broadcasts an event without blocking scanner progress.
-func (b *EventBus) Publish(eventType string, value any) error {
-	data, err := json.Marshal(value)
-	if err != nil {
-		return fmt.Errorf("encode event: %w", err)
-	}
-
-	event := Event{ID: b.next.Add(1), Type: eventType, Data: data}
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+// Publish wakes every subscriber without blocking the publisher.
+func (b *EventBus) Publish() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	for subscriber := range b.subscribers {
 		select {
-		case subscriber <- event:
+		case subscriber <- struct{}{}:
 		default:
 		}
 	}
-
-	return nil
 }
 
-// Subscribe registers a bounded live-event channel.
-func (b *EventBus) Subscribe() (<-chan Event, func()) {
-	channel := make(chan Event, 16)
+// Subscribe registers a change channel that holds at most one pending wake-up.
+func (b *EventBus) Subscribe() (<-chan struct{}, func()) {
+	channel := make(chan struct{}, 1)
 	b.mu.Lock()
 	b.subscribers[channel] = struct{}{}
 	b.mu.Unlock()
 	return channel, func() {
 		b.mu.Lock()
-		if _, ok := b.subscribers[channel]; ok {
-			delete(b.subscribers, channel)
-			close(channel)
-		}
-
+		delete(b.subscribers, channel)
 		b.mu.Unlock()
 	}
+}
+
+// PushSender delivers a generic Web Push hint for a Grant Request.
+type PushSender interface {
+	NewRequest(context.Context, string) error
+}
+
+// Notifier wakes live streams on Grant changes and pushes new pending items.
+type Notifier struct {
+	Events *EventBus
+	Push   PushSender
+	Logger *slog.Logger
+}
+
+// RequestChanged wakes live streams, plus sends Web Push when the request
+// added items no Approver has seen. Push runs in the background so slow push
+// services never delay the agent that filed the request.
+func (n *Notifier) RequestChanged(ctx context.Context, id string, newPending bool) error {
+	n.Events.Publish()
+	if !newPending || n.Push == nil {
+		return nil
+	}
+
+	go func() {
+		pushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pushTimeout)
+		defer cancel()
+		if err := n.Push.NewRequest(pushCtx, id); err != nil {
+			n.logger().Warn("send push notifications", "error", err)
+		}
+	}()
+
+	return nil
+}
+
+func (n *Notifier) logger() *slog.Logger {
+	if n.Logger == nil {
+		return slog.Default()
+	}
+
+	return n.Logger
+}
+
+// GrantChanged wakes live streams.
+func (n *Notifier) GrantChanged(context.Context, string) error {
+	n.Events.Publish()
+	return nil
 }

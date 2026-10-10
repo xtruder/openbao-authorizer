@@ -17,85 +17,41 @@ import (
 
 const maxResponseBytes = 4 << 20
 
-// ErrNotControlGroup marks an accessor that is not a control-group wrapping token.
-var ErrNotControlGroup = errors.New("not a control-group accessor")
-
-// IsNotControlGroup reports whether err represents an ordinary token accessor.
-func IsNotControlGroup(err error) bool { return errors.Is(err, ErrNotControlGroup) }
-
 // Config configures an OpenBao API client.
 type Config struct {
-	Address      string
-	ScannerToken string
-	Namespace    string
-	HTTPClient   *http.Client
+	Address string
+	// Token is the authorizer's own credential. It performs every OpenBao write;
+	// human and session tokens are only used to identify their callers.
+	Token      string
+	Namespace  string
+	HTTPClient *http.Client
 }
 
 // Client is a minimal, testable OpenBao API client.
 type Client struct {
-	baseURL      *url.URL
-	scannerToken string
-	namespace    string
-	httpClient   *http.Client
+	baseURL    *url.URL
+	token      string
+	namespace  string
+	httpClient *http.Client
 }
 
 // Entity is an OpenBao identity entity.
 type Entity struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-}
-
-// UnmarshalJSON accepts OpenBao's current capitalized ID field and the documented lowercase form.
-func (e *Entity) UnmarshalJSON(data []byte) error {
-	var value struct {
-		UpperID string `json:"ID"`
-		LowerID string `json:"id"`
-		Name    string `json:"name"`
-	}
-	if err := json.Unmarshal(data, &value); err != nil {
-		return err
-	}
-
-	e.ID = value.LowerID
-	if e.ID == "" {
-		e.ID = value.UpperID
-	}
-
-	e.Name = value.Name
-	return nil
-}
-
-// Authorization describes an existing approval.
-type Authorization struct {
-	EntityID   string `json:"entity_id"`
-	EntityName string `json:"entity_name"`
-}
-
-// ApprovalContext is plugin-agnostic metadata shown before approval.
-type ApprovalContext struct {
-	Available bool            `json:"available"`
-	Data      json.RawMessage `json:"data,omitempty"`
-}
-
-// ControlGroupRequest is the reviewable state returned by OpenBao.
-type ControlGroupRequest struct {
-	Approved        bool             `json:"approved"`
-	Operation       string           `json:"request_operation"`
-	Path            string           `json:"request_path"`
-	Data            json.RawMessage  `json:"request_data"`
-	ApprovalContext *ApprovalContext `json:"approval_context,omitempty"`
-	Entity          Entity           `json:"request_entity"`
-	Authorizations  []Authorization  `json:"authorizations"`
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Policies []string `json:"policies"`
 }
 
 // Identity is the authenticated identity associated with a token.
 type Identity struct {
-	EntityID         string   `json:"entity_id"`
-	DisplayName      string   `json:"display_name"`
-	Policies         []string `json:"policies"`
-	TokenPolicies    []string `json:"token_policies"`
-	IdentityPolicies []string `json:"identity_policies"`
-	TTL              int      `json:"ttl"`
+	EntityID         string            `json:"entity_id"`
+	DisplayName      string            `json:"display_name"`
+	Policies         []string          `json:"policies"`
+	TokenPolicies    []string          `json:"token_policies"`
+	IdentityPolicies []string          `json:"identity_policies"`
+	TTL              int               `json:"ttl"`
+	Role             string            `json:"role"`
+	Meta             map[string]string `json:"meta"`
 }
 
 // HasPolicy reports whether the token or its identity grants policy.
@@ -144,137 +100,111 @@ func New(config Config) (*Client, error) {
 	}
 
 	return &Client{
-		baseURL:      baseURL,
-		scannerToken: config.ScannerToken,
-		namespace:    config.Namespace,
-		httpClient:   client,
+		baseURL:    baseURL,
+		token:      config.Token,
+		namespace:  config.Namespace,
+		httpClient: client,
 	}, nil
-}
-
-// AuthToken is a renewable human token returned by an OpenBao auth method.
-type AuthToken struct {
-	Token     string
-	Renewable bool
-	TTL       time.Duration
 }
 
 // LoginUserpass exchanges an operator username and password for a human token.
 // The password is sent only to OpenBao and is never retained by the client.
-func (c *Client) LoginUserpass(ctx context.Context, username, password string) (AuthToken, error) {
+func (c *Client) LoginUserpass(ctx context.Context, username, password string) (string, error) {
 	if username == "" || strings.ContainsAny(username, "/\\") {
-		return AuthToken{}, errors.New("invalid OpenBao username")
+		return "", errors.New("invalid OpenBao username")
 	}
 
 	var envelope struct {
 		Auth struct {
-			ClientToken   string `json:"client_token"`
-			Renewable     bool   `json:"renewable"`
-			LeaseDuration int    `json:"lease_duration"`
+			ClientToken string `json:"client_token"`
 		} `json:"auth"`
 	}
 	path := "/v1/auth/userpass/login/" + url.PathEscape(username)
 	if err := c.call(ctx, http.MethodPost, path, "", map[string]string{"password": password}, &envelope, ""); err != nil {
-		return AuthToken{}, err
+		return "", err
 	}
 
 	if envelope.Auth.ClientToken == "" {
-		return AuthToken{}, errors.New("OpenBao userpass login returned no token")
+		return "", errors.New("OpenBao userpass login returned no token")
 	}
 
-	return AuthToken{
-		Token: envelope.Auth.ClientToken, Renewable: envelope.Auth.Renewable,
-		TTL: time.Duration(envelope.Auth.LeaseDuration) * time.Second,
-	}, nil
+	return envelope.Auth.ClientToken, nil
 }
 
-// RenewSelf renews a human token issued by a renewable auth role.
-func (c *Client) RenewSelf(ctx context.Context, token string) error {
-	var envelope struct {
-		Auth struct {
-			ClientToken string `json:"client_token"`
-			Renewable   bool   `json:"renewable"`
-		} `json:"auth"`
-	}
-	if err := c.call(ctx, http.MethodPost, "/v1/auth/token/renew-self", token, map[string]string{}, &envelope, ""); err != nil {
-		return err
-	}
-
-	if envelope.Auth.ClientToken == "" || !envelope.Auth.Renewable {
-		return errors.New("OpenBao token renewal returned a non-renewable token")
-	}
-
-	return nil
-}
-
-// RevokeSelf revokes a human token when its application session is closed.
+// RevokeSelf revokes a human token once login has identified its caller.
 func (c *Client) RevokeSelf(ctx context.Context, token string) error {
 	return c.call(ctx, http.MethodPost, "/v1/auth/token/revoke-self", token, map[string]string{}, nil, "")
 }
 
-// RevokeAccessor revokes a control-group wrapping token using the scanner token.
-func (c *Client) RevokeAccessor(ctx context.Context, accessor string) error {
-	return c.call(ctx, http.MethodPost, "/v1/auth/token/revoke-accessor", c.scannerToken, map[string]string{"accessor": accessor}, nil, "")
+// ReadEntity reads an identity entity with the authorizer token.
+func (c *Client) ReadEntity(ctx context.Context, id string) (Entity, error) {
+	var envelope struct {
+		Data *Entity `json:"data"`
+	}
+	if err := c.call(ctx, http.MethodGet, "/v1/identity/entity/id/"+url.PathEscape(id), c.token, nil, &envelope, ""); err != nil {
+		return Entity{}, err
+	}
+
+	if envelope.Data == nil {
+		return Entity{}, &HTTPError{StatusCode: http.StatusNotFound}
+	}
+
+	return *envelope.Data, nil
 }
 
-// ListAccessors lists all service-token accessors using the dedicated scanner token.
-func (c *Client) ListAccessors(ctx context.Context) ([]string, error) {
-	var envelope struct {
-		Data struct {
-			Keys []string `json:"keys"`
-		} `json:"data"`
+// SetEntityPolicies replaces the policies attached directly to an entity.
+func (c *Client) SetEntityPolicies(ctx context.Context, id string, policies []string) error {
+	// A non-nil slice so an empty list encodes as [] and detaches every policy.
+	payload := map[string][]string{"policies": append([]string{}, policies...)}
+	return c.call(ctx, http.MethodPost, "/v1/identity/entity/id/"+url.PathEscape(id), c.token, payload, nil, "")
+}
+
+// WritePolicy creates or replaces an ACL policy that OpenBao drops at expiration.
+func (c *Client) WritePolicy(ctx context.Context, name, policy string, expiration time.Time) error {
+	payload := map[string]string{"policy": policy, "expiration": expiration.UTC().Format(time.RFC3339)}
+	return c.call(ctx, http.MethodPost, "/v1/sys/policies/acl/"+url.PathEscape(name), c.token, payload, nil, "")
+}
+
+// DeletePolicy deletes an ACL policy; a missing policy is not an error.
+func (c *Client) DeletePolicy(ctx context.Context, name string) error {
+	err := c.call(ctx, http.MethodDelete, "/v1/sys/policies/acl/"+url.PathEscape(name), c.token, nil, nil, "")
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+		return nil
 	}
-	if err := c.call(ctx, http.MethodGet, "/v1/auth/token/accessors", c.scannerToken, nil, &envelope, "LIST"); err != nil {
+
+	return err
+}
+
+// CapabilitiesSelf returns token's capabilities on each path, including those
+// inherited from its identity.
+func (c *Client) CapabilitiesSelf(ctx context.Context, token string, paths []string) (map[string][]string, error) {
+	var envelope struct {
+		Data map[string]json.RawMessage `json:"data"`
+	}
+	if err := c.call(ctx, http.MethodPost, "/v1/sys/capabilities-self", token, map[string][]string{"paths": paths}, &envelope, ""); err != nil {
 		return nil, err
 	}
 
-	return envelope.Data.Keys, nil
-}
-
-// ControlGroupRequest reviews a candidate accessor with the scanner token.
-func (c *Client) ControlGroupRequest(ctx context.Context, accessor string) (ControlGroupRequest, error) {
-	var envelope struct {
-		Data ControlGroupRequest `json:"data"`
-	}
-	err := c.call(ctx, http.MethodPost, "/v1/sys/control-group/request", c.scannerToken, map[string]string{"accessor": accessor}, &envelope, "")
-	if err != nil {
-		var httpErr *HTTPError
-		if errors.As(err, &httpErr) && (httpErr.StatusCode == http.StatusBadRequest || httpErr.StatusCode == http.StatusNotFound) {
-			return ControlGroupRequest{}, fmt.Errorf("%w: %w", ErrNotControlGroup, err)
+	result := make(map[string][]string, len(paths))
+	for _, path := range paths {
+		raw, ok := envelope.Data[path]
+		if !ok {
+			continue
 		}
 
-		return ControlGroupRequest{}, err
+		var capabilities []string
+		if err := json.Unmarshal(raw, &capabilities); err != nil {
+			return nil, fmt.Errorf("decode capabilities for %q: %w", path, err)
+		}
+
+		result[path] = capabilities
 	}
 
-	return envelope.Data, nil
+	return result, nil
 }
 
-// Read fetches configured approval context using the scanner credential.
-func (c *Client) Read(ctx context.Context, path string) (json.RawMessage, error) {
-	var envelope struct {
-		Data json.RawMessage `json:"data"`
-	}
-	if err := c.call(ctx, http.MethodGet, "/v1/"+path, c.scannerToken, nil, &envelope, ""); err != nil {
-		return nil, err
-	}
-
-	return envelope.Data, nil
-}
-
-// Authorize records approval using a human approver's OpenBao token.
-func (c *Client) Authorize(ctx context.Context, humanToken, accessor string) (bool, error) {
-	var envelope struct {
-		Data struct {
-			Approved bool `json:"approved"`
-		} `json:"data"`
-	}
-	if err := c.call(ctx, http.MethodPost, "/v1/sys/control-group/authorize", humanToken, map[string]string{"accessor": accessor}, &envelope, ""); err != nil {
-		return false, err
-	}
-
-	return envelope.Data.Approved, nil
-}
-
-// LookupSelf validates a human token and returns its identity metadata.
+// LookupSelf validates a token and returns its identity metadata.
 func (c *Client) LookupSelf(ctx context.Context, token string) (Identity, error) {
 	var envelope struct {
 		Data Identity `json:"data"`

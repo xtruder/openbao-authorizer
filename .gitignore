@@ -1,5 +1,7 @@
 # Binaries and generated output
 /bin/
+/cmd/*/bao-cred
+/cmd/*/openbao-authorizer
 /dist/
 web/dist/
 web/node_modules/

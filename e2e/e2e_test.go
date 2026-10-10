@@ -8,30 +8,45 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
-	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/durationpb"
+
+	authorizerv1 "github.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1"
+	"github.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1/authorizerv1connect"
 )
 
 const (
-	rootToken       = "openbao-e2e-root"
-	alicePassword   = "alice-e2e-password"
-	bobPassword     = "bob-e2e-password"
-	requesterPolicy = "e2e-requester"
-	approverPolicy  = "e2e-approver"
-	scannerPolicy   = "e2e-scanner"
+	rootToken        = "openbao-e2e-root"
+	approverPassword = "approver-e2e-password"
+	approverPolicy   = "openbao-authorizer-approver"
+	authorizerPolicy = "openbao-authorizer"
+	sessionPolicy    = "opencode-session"
+	minterPolicy     = "opencode-minter"
+	tokenRole        = "opencode-session"
+	aliasPrefix      = "opencode-session-"
 )
 
-func TestOpenBaoControlGroupWorkflow(t *testing.T) {
+// Exit codes documented by bao-cred.
+const (
+	exitDenied  = 3
+	exitPending = 4
+)
+
+func TestSessionGrantWorkflow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("real-process OpenBao E2E is disabled by -short")
 	}
@@ -68,8 +83,9 @@ func TestOpenBaoControlGroupWorkflow(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Minute)
 	defer cancel()
 	baoBinary := requiredExecutable(t, "OPENBAO_E2E_BAO_BINARY")
-
 	appBinary := requiredExecutable(t, "OPENBAO_E2E_APP_BINARY")
+	baoCredBinary := requiredExecutable(t, "OPENBAO_E2E_BAO_CRED_BINARY")
+	bunBinary := requiredExecutable(t, "OPENBAO_E2E_BUN_BINARY")
 	processPaths := isolatedProcessPaths{home: isolatedHome, temporary: temporaryDirectory}
 
 	baoLog := filepath.Join(runtimeDirectory, "openbao.log")
@@ -102,140 +118,54 @@ func TestOpenBaoControlGroupWorkflow(t *testing.T) {
 		process: baoProcess,
 		port:    baoPort,
 	}
+	baoAddress := strings.TrimSuffix(bao.baseURL, "/v1")
 	mustCall(t, ctx, bao, "", http.MethodGet, "sys/health", nil, http.StatusOK)
-	t.Logf("OpenBao process %d owns its kernel-assigned listener", baoProcess.pid)
 
+	// Secrets that sessions ask for, plus the OpenBao objects the plan's setup defines.
 	mustCall(t, ctx, bao, rootToken, http.MethodPost, "sys/mounts/kv", map[string]any{
 		"type": "kv", "options": map[string]string{"version": "2"},
 	}, http.StatusOK, http.StatusNoContent)
-	mountsResponse := mustCall(t, ctx, bao, rootToken, http.MethodGet, "sys/mounts", nil, http.StatusOK)
-	var mountsEnvelope struct {
-		Data map[string]json.RawMessage `json:"data"`
-	}
-	decodeResponse(t, mountsResponse, &mountsEnvelope)
-	if _, exists := mountsEnvelope.Data["github/"]; exists {
-		t.Fatal("E2E OpenBao unexpectedly has the GitHub plugin mounted")
+	for _, name := range []string{"alpha", "beta", "gamma", "delta", "epsilon"} {
+		mustCall(t, ctx, bao, rootToken, http.MethodPost, "kv/data/e2e/"+name, map[string]any{
+			"data": map[string]string{"value": "secret-" + name},
+		}, http.StatusOK)
 	}
 
-	t.Log("OpenBao E2E uses built-in mounts only; no GitHub plugin is mounted")
+	writePolicy(ctx, t, bao, authorizerPolicy, readRepositoryFile(t, repositoryRoot, "config/authorizer-policy.hcl"))
+	writePolicy(ctx, t, bao, approverPolicy, readRepositoryFile(t, repositoryRoot, "config/approver-policy.hcl"))
+	writePolicy(ctx, t, bao, sessionPolicy, "# Baseline Session Token policy: no access beyond default.\n")
+	writePolicy(ctx, t, bao, minterPolicy, fmt.Sprintf("path \"auth/token/create/%s\" {\n  capabilities = [\"update\"]\n}\n", tokenRole))
+	mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/token/roles/"+tokenRole, map[string]any{
+		"allowed_policies": []string{sessionPolicy}, "orphan": true, "renewable": true, "token_period": "24h",
+		"allowed_entity_aliases": []string{aliasPrefix + "*"},
+	}, http.StatusOK, http.StatusNoContent)
+	mustCall(t, ctx, bao, rootToken, http.MethodPost, "sys/auth/approle", map[string]string{"type": "approle"}, http.StatusOK, http.StatusNoContent)
+	mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/approle/role/opencode-minter", map[string]any{
+		"token_policies": []string{minterPolicy}, "token_ttl": "15m",
+	}, http.StatusOK, http.StatusNoContent)
+	roleIDFile := filepath.Join(runtimeDirectory, "minter-role-id")
+	secretIDFile := filepath.Join(runtimeDirectory, "minter-secret-id")
+	writeSecretFile(t, roleIDFile, responseString(t, mustCall(t, ctx, bao, rootToken, http.MethodGet, "auth/approle/role/opencode-minter/role-id", nil, http.StatusOK), "role_id"))
+	writeSecretFile(t, secretIDFile, responseString(t, mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/approle/role/opencode-minter/secret-id", map[string]any{}, http.StatusOK), "secret_id"))
+
 	mustCall(t, ctx, bao, rootToken, http.MethodPost, "sys/auth/userpass", map[string]string{"type": "userpass"}, http.StatusOK, http.StatusNoContent)
-	writePolicy(ctx, t, bao, repositoryRoot, requesterPolicy, "requester.hcl")
-	writePolicy(ctx, t, bao, repositoryRoot, approverPolicy, "approver.hcl")
-	writePolicy(ctx, t, bao, repositoryRoot, scannerPolicy, "scanner.hcl")
+	mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/userpass/users/approver", map[string]any{
+		"password": approverPassword, "token_policies": []string{approverPolicy},
+	}, http.StatusOK, http.StatusNoContent)
+	authorizerToken := createToken(ctx, t, bao, map[string]any{"policies": []string{authorizerPolicy}, "no_default_policy": true, "ttl": "1h"})
+	authorizerTokenFile := filepath.Join(runtimeDirectory, "authorizer-token")
+	writeSecretFile(t, authorizerTokenFile, authorizerToken)
 
-	authResponse := mustCall(t, ctx, bao, rootToken, http.MethodGet, "sys/auth", nil, http.StatusOK)
-	var authMounts struct {
-		Data map[string]struct {
-			Accessor string `json:"accessor"`
-		} `json:"data"`
-	}
-	decodeResponse(t, authResponse, &authMounts)
-	userpassAccessor := authMounts.Data["userpass/"].Accessor
-	if userpassAccessor == "" {
-		t.Fatal("userpass mount response omitted its accessor")
-	}
-
-	mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/userpass/users/alice", map[string]string{"password": alicePassword}, http.StatusOK, http.StatusNoContent)
-	mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/userpass/users/bob", map[string]string{"password": bobPassword, "token_period": "24h"}, http.StatusOK, http.StatusNoContent)
-
-	aliceEntityID := createEntity(ctx, t, bao, "Alice")
-	bobEntityID := createEntity(ctx, t, bao, "Bob")
-	createEntityAlias(ctx, t, bao, "alice", userpassAccessor, aliceEntityID)
-	createEntityAlias(ctx, t, bao, "bob", userpassAccessor, bobEntityID)
-	createIdentityGroup(ctx, t, bao, "e2e-requesters", aliceEntityID, requesterPolicy)
-	createIdentityGroup(ctx, t, bao, "e2e-approvers", bobEntityID, approverPolicy)
-
-	alice := loginUserpass(ctx, t, bao, "alice", alicePassword)
-	assertIdentityLogin(t, "Alice", alice, aliceEntityID, requesterPolicy)
-	bob := loginUserpass(ctx, t, bao, "bob", bobPassword)
-	assertIdentityLogin(t, "Bob", bob, bobEntityID, approverPolicy)
-
-	scannerCreate := mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/token/create-orphan", map[string]any{
-		"policies": []string{scannerPolicy}, "no_default_policy": true, "ttl": "20m",
-	}, http.StatusOK)
-	var scannerEnvelope loginEnvelope
-	decodeResponse(t, scannerCreate, &scannerEnvelope)
-	scannerToken := scannerEnvelope.Auth.ClientToken
-	if scannerToken == "" {
-		t.Fatal("scanner token creation returned an empty token")
-	}
-
-	lookup := mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/token/lookup", map[string]string{"token": scannerToken}, http.StatusOK)
-	var lookupEnvelope struct {
-		Data struct {
-			Policies []string `json:"policies"`
-		} `json:"data"`
-	}
-	decodeResponse(t, lookup, &lookupEnvelope)
-	if len(lookupEnvelope.Data.Policies) != 1 || lookupEnvelope.Data.Policies[0] != scannerPolicy {
-		t.Fatalf("scanner policies = %v, want only %q", lookupEnvelope.Data.Policies, scannerPolicy)
-	}
-
-	marker := fmt.Sprintf("marker-%d", time.Now().UnixNano())
-	deferredWrite := mustCall(t, ctx, bao, alice.Auth.ClientToken, http.MethodPost, "kv/data/payroll", map[string]any{
-		"data": map[string]string{"status": "approved", "marker": marker},
-	}, http.StatusOK)
-	var wrapping struct {
-		WrapInfo struct {
-			Token    string `json:"token"`
-			Accessor string `json:"accessor"`
-		} `json:"wrap_info"`
-	}
-	decodeResponse(t, deferredWrite, &wrapping)
-	if wrapping.WrapInfo.Token == "" || wrapping.WrapInfo.Accessor == "" {
-		t.Fatal("protected write did not return a wrapping token and accessor")
-	}
-
-	mustCall(t, ctx, bao, rootToken, http.MethodGet, "kv/data/payroll", nil, http.StatusNotFound)
-
-	accessorList := mustCall(t, ctx, bao, scannerToken, "LIST", "auth/token/accessors", nil, http.StatusOK)
-	var accessors struct {
-		Data struct {
-			Keys []string `json:"keys"`
-		} `json:"data"`
-	}
-	decodeResponse(t, accessorList, &accessors)
-	if !slices.Contains(accessors.Data.Keys, wrapping.WrapInfo.Accessor) {
-		t.Fatal("scanner LIST did not include the control-group wrapping accessor")
-	}
-
-	accessorPayload := map[string]string{"accessor": wrapping.WrapInfo.Accessor}
-	pending := inspectControlGroup(ctx, t, bao, scannerToken, accessorPayload)
-	if pending.Approved || pending.RequestPath != "kv/data/payroll" || pending.RequestOperation != "create" || pending.RequestEntity.Name != "Alice" {
-		t.Fatalf("unexpected pending request: %+v", pending)
-	}
-
-	if pending.RequestData.Data.Marker != marker {
-		t.Fatalf("scanner request marker = %q, want %q", pending.RequestData.Data.Marker, marker)
-	}
-
-	mustCall(t, ctx, bao, scannerToken, http.MethodPost, "sys/control-group/authorize", accessorPayload, http.StatusForbidden)
-	unchanged := inspectControlGroup(ctx, t, bao, scannerToken, accessorPayload)
-	if unchanged.Approved || len(unchanged.Authorizations) != 0 {
-		t.Fatalf("denied scanner authorization changed state: %+v", unchanged)
-	}
-
-	t.Log("least-privilege scanner listed and inspected the request but was denied authorization")
-
-	appLog := filepath.Join(runtimeDirectory, "app.log")
 	encryptionKey := make([]byte, 32)
 	if _, randomErr := rand.Read(encryptionKey); randomErr != nil {
 		t.Fatalf("generate application encryption key: %v", randomErr)
 	}
 
+	encryptionKeyFile := filepath.Join(runtimeDirectory, "encryption-key")
+	writeSecretFile(t, encryptionKeyFile, base64.StdEncoding.EncodeToString(encryptionKey))
 	staticDirectory := filepath.Join(runtimeDirectory, "static")
 	if mkdirErr := os.Mkdir(staticDirectory, 0o755); mkdirErr != nil {
 		t.Fatalf("create static directory: %v", mkdirErr)
-	}
-
-	encryptionKeyFile := filepath.Join(runtimeDirectory, "encryption-key")
-	if writeErr := os.WriteFile(encryptionKeyFile, []byte(base64.StdEncoding.EncodeToString(encryptionKey)), 0o600); writeErr != nil {
-		t.Fatalf("write encryption key: %v", writeErr)
-	}
-
-	scannerTokenFile := filepath.Join(runtimeDirectory, "scanner-token")
-	if writeErr := os.WriteFile(scannerTokenFile, []byte(scannerToken), 0o600); writeErr != nil {
-		t.Fatalf("write scanner token: %v", writeErr)
 	}
 
 	appConfig := filepath.Join(runtimeDirectory, "app.hcl")
@@ -251,24 +181,24 @@ storage {
   encryption_key_file = %q
 }
 openbao {
-  address            = %q
-  namespace          = ""
-  ca_file            = ""
-  scanner_token_file = %q
-  approver_policy    = %q
+  address               = %q
+  authorizer_token_file = %q
+  approver_policy       = %q
+  session_token_role    = %q
 }
-scanner {
-  interval    = "1s"
-  concurrency = 8
+grants {
+  default_ttl = "1h"
+  pending_ttl = "10m"
 }
-requests {
-  expose_data = false
+grantable "e2e-kv" {
+  path         = "kv/data/e2e/*"
+  capabilities = ["read"]
+  max_ttl      = "2h"
 }
-`, staticDirectory, filepath.Join(runtimeDirectory, "app.db"), encryptionKeyFile, strings.TrimSuffix(bao.baseURL, "/v1"), scannerTokenFile, approverPolicy)
-	if writeErr := os.WriteFile(appConfig, []byte(configuration), 0o600); writeErr != nil {
-		t.Fatalf("write application config: %v", writeErr)
-	}
+`, staticDirectory, filepath.Join(runtimeDirectory, "app.db"), encryptionKeyFile, baoAddress, authorizerTokenFile, approverPolicy, tokenRole)
+	writeSecretFile(t, appConfig, configuration)
 
+	appLog := filepath.Join(runtimeDirectory, "app.log")
 	appProcess, err := startManagedProcess(appLog, repositoryRoot, processPaths.environment(), appBinary, "-config", appConfig)
 	if err != nil {
 		t.Fatalf("start application: %v", err)
@@ -294,82 +224,184 @@ requests {
 		port:    appPort,
 	}
 	mustCall(t, ctx, application, "", http.MethodGet, "healthz", nil, http.StatusOK)
-	loginResponse := mustCall(t, ctx, application, "", http.MethodPost, "api/v1/session", map[string]string{"username": "bob", "password": bobPassword}, http.StatusOK)
-	var appSession struct {
-		CSRFToken string `json:"csrfToken"`
-		Identity  struct {
-			EntityID string `json:"entity_id"`
-		} `json:"identity"`
-	}
-	decodeResponse(t, loginResponse, &appSession)
-	if appSession.CSRFToken == "" || appSession.Identity.EntityID != bobEntityID {
-		t.Fatalf("application login returned unexpected session: %+v", appSession)
-	}
+	approver := newApproverClient(ctx, t, application)
 
-	requestID := waitForApplicationRequest(t, ctx, application, "kv/data/payroll")
-	approvalHeaders := map[string]string{"X-CSRF-Token": appSession.CSRFToken}
-	approval := mustCallWithHeaders(t, ctx, application, "", http.MethodPost, "api/v1/requests/"+url.PathEscape(requestID)+"/approve", map[string]any{}, approvalHeaders, http.StatusOK)
-	var approvedApplicationRequest struct {
-		Approved bool `json:"approved"`
+	mint := sessionMinter{
+		bun:     bunBinary,
+		cli:     filepath.Join(repositoryRoot, "integrations", "opencode", "src", "mint-cli.ts"),
+		root:    repositoryRoot,
+		paths:   processPaths,
+		address: baoAddress,
+		roleID:  roleIDFile,
+		secret:  secretIDFile,
 	}
-	decodeResponse(t, approval, &approvedApplicationRequest)
-	if !approvedApplicationRequest.Approved {
-		t.Fatal("application approval response was not approved")
+	sessionA := mint.mint(ctx, t, "e2e-session-a", "E2E session A")
+	cred := baoCred{binary: baoCredBinary, paths: processPaths, address: baoAddress, authorizer: application.baseURL}
+
+	if sessionA.EntityAlias != aliasPrefix+"e2e-session-a" || sessionA.EntityID == "" {
+		t.Fatalf("minted session A = %+v", sessionA)
 	}
 
-	t.Log("application discovered the request, logged in Bob, and approved through its CSRF-protected API")
+	assertRead(ctx, t, bao, sessionA.Token, "alpha", http.StatusForbidden)
+	t.Log("session A minted through the plugin's mint CLI; its baseline token cannot read kv/data/e2e/alpha")
 
-	approved := inspectControlGroup(ctx, t, bao, scannerToken, accessorPayload)
-	if !approved.Approved || len(approved.Authorizations) != 1 {
-		t.Fatalf("expected one human authorization, got %+v", approved)
+	// A batch where the approver approves one item and rejects another, and the
+	// authorizer refuses two before anyone sees them.
+	batch := cred.start(ctx, sessionA.Token,
+		"request", "-reason", "e2e: deploy needs alpha and beta",
+		"-item", "kv/data/e2e/alpha=read",
+		"-item", "kv/data/e2e/beta=read",
+		"-item", "kv/data/outside/rules=read",
+		"-item", "sys/policies/acl/agent-grant-x=read",
+		"-timeout", "2m",
+	)
+	pending := approver.waitForPending(ctx, t, "kv/data/e2e/alpha", "kv/data/e2e/beta")
+	if pending.GetReason() != "e2e: deploy needs alpha and beta" || pending.GetSession().GetId() != "e2e-session-a" || pending.GetSession().GetTitle() != "E2E session A" {
+		t.Fatalf("approver view of the request = %+v", pending)
 	}
 
-	mustCall(t, ctx, bao, rootToken, http.MethodGet, "kv/data/payroll", nil, http.StatusNotFound)
-	mustCall(t, ctx, bao, wrapping.WrapInfo.Token, http.MethodPost, "sys/wrapping/unwrap", map[string]any{}, http.StatusOK, http.StatusNoContent)
+	approver.decide(ctx, t, pending, map[string]authorizerv1.Decision{"kv/data/e2e/alpha": authorizerv1.Decision_DECISION_APPROVE, "kv/data/e2e/beta": authorizerv1.Decision_DECISION_REJECT}, nil)
+	result := batch.wait(t)
+	if result.exitCode != exitDenied {
+		t.Fatalf("bao-cred request exit = %d, want %d\nstdout: %s\nstderr: %s", result.exitCode, exitDenied, result.stdout, result.stderr)
+	}
 
-	secretResponse := mustCall(t, ctx, bao, rootToken, http.MethodGet, "kv/data/payroll", nil, http.StatusOK)
-	var secret struct {
+	states := itemStates(t, result.stdout)
+	want := map[string]string{
+		"kv/data/e2e/alpha":              "approved",
+		"kv/data/e2e/beta":               "rejected",
+		"kv/data/outside/rules":          "refused",
+		"sys/policies/acl/agent-grant-x": "refused",
+	}
+	for path, state := range want {
+		if states[path] != state {
+			t.Fatalf("item states = %v, want %v", states, want)
+		}
+	}
+
+	assertRead(ctx, t, bao, sessionA.Token, "alpha", http.StatusOK)
+	assertRead(ctx, t, bao, sessionA.Token, "beta", http.StatusForbidden)
+	read := cred.run(ctx, t, sessionA.Token, "-field", "data.value", "kv/data/e2e/alpha")
+	if read.exitCode != 0 || read.stdout != "secret-alpha" {
+		t.Fatalf("bao-cred read = %+v", read)
+	}
+
+	var entity struct {
 		Data struct {
-			Data struct {
-				Status string `json:"status"`
-				Marker string `json:"marker"`
-			} `json:"data"`
+			Policies []string `json:"policies"`
 		} `json:"data"`
 	}
-	decodeResponse(t, secretResponse, &secret)
-	if secret.Data.Data.Status != "approved" || secret.Data.Data.Marker != marker {
-		t.Fatalf("resulting secret = %+v, want approved marker %q", secret.Data.Data, marker)
+	decodeResponse(t, mustCall(t, ctx, bao, rootToken, http.MethodGet, "identity/entity/id/"+sessionA.EntityID, nil, http.StatusOK), &entity)
+	grantPolicies := slices.DeleteFunc(entity.Data.Policies, func(name string) bool { return !strings.HasPrefix(name, "agent-grant-") })
+	if len(grantPolicies) != 1 {
+		t.Fatalf("session A entity policies = %v, want exactly one agent-grant- policy", entity.Data.Policies)
 	}
 
-	rejectedWrite := mustCall(t, ctx, bao, alice.Auth.ClientToken, http.MethodPost, "kv/data/payroll", map[string]any{
-		"data": map[string]string{"status": "must-not-run", "marker": "rejected"},
-	}, http.StatusOK)
-	var rejectedWrapping struct {
-		WrapInfo struct {
-			Token    string `json:"token"`
-			Accessor string `json:"accessor"`
-		} `json:"wrap_info"`
-	}
-	decodeResponse(t, rejectedWrite, &rejectedWrapping)
-	if rejectedWrapping.WrapInfo.Token == "" || rejectedWrapping.WrapInfo.Accessor == "" {
-		t.Fatal("second protected write did not return wrapping details")
+	t.Log("approved item works for session A's existing token through its one session policy; rejected and refused items do not")
+
+	// Asking again for something OpenBao already allows needs no approver.
+	repeat := cred.run(ctx, t, sessionA.Token, "request", "-reason", "e2e: again", "-item", "kv/data/e2e/alpha=read", "-timeout", "30s")
+	if repeat.exitCode != 0 || itemStates(t, repeat.stdout)["kv/data/e2e/alpha"] != "already_granted" {
+		t.Fatalf("repeated request = %+v", repeat)
 	}
 
-	rejectedID := waitForApplicationRequest(t, ctx, application, "kv/data/payroll")
-	rejection := mustCallWithHeaders(t, ctx, application, "", http.MethodPost, "api/v1/requests/"+url.PathEscape(rejectedID)+"/reject", map[string]any{}, approvalHeaders, http.StatusOK)
-	var rejectedApplicationRequest struct {
-		Status string `json:"status"`
-	}
-	decodeResponse(t, rejection, &rejectedApplicationRequest)
-	if rejectedApplicationRequest.Status != "rejected" {
-		t.Fatalf("application rejection status = %q", rejectedApplicationRequest.Status)
+	if requests := approver.list(ctx, t, authorizerv1.GrantRequestFilter_GRANT_REQUEST_FILTER_PENDING); len(requests) != 0 {
+		t.Fatalf("already granted item reached approvers: %+v", requests)
 	}
 
-	mustCall(t, ctx, bao, scannerToken, http.MethodPost, "sys/control-group/request", map[string]string{"accessor": rejectedWrapping.WrapInfo.Accessor}, http.StatusBadRequest, http.StatusNotFound)
+	// A request filed without waiting can be resumed by its ID.
+	filed := cred.run(ctx, t, sessionA.Token, "request", "-reason", "e2e: gamma", "-item", "kv/data/e2e/gamma=read", "-no-wait")
+	if filed.exitCode != exitPending {
+		t.Fatalf("no-wait request = %+v", filed)
+	}
 
-	t.Log("application rejected a second request and revoked its wrapping token")
+	gamma := approver.waitForPending(ctx, t, "kv/data/e2e/gamma")
+	approver.decide(ctx, t, gamma, map[string]authorizerv1.Decision{"kv/data/e2e/gamma": authorizerv1.Decision_DECISION_APPROVE}, nil)
+	resumed := cred.run(ctx, t, sessionA.Token, "request", "-wait", requestID(t, filed.stdout), "-timeout", "30s")
+	if resumed.exitCode != 0 || itemStates(t, resumed.stdout)["kv/data/e2e/gamma"] != "approved" {
+		t.Fatalf("resumed wait = %+v", resumed)
+	}
 
-	t.Log("real OpenBao control-group workflow passed")
+	assertRead(ctx, t, bao, sessionA.Token, "gamma", http.StatusOK)
+	t.Log("already-granted items skip approval; a request filed with -no-wait resumes with -wait")
+
+	// Grants belong to the session, not to other sessions; subagents share their root's grants.
+	sessionB := mint.mint(ctx, t, "e2e-session-b", "E2E session B")
+	if sessionB.EntityID == sessionA.EntityID {
+		t.Fatal("sessions A and B share an entity")
+	}
+
+	assertRead(ctx, t, bao, sessionB.Token, "alpha", http.StatusForbidden)
+	child := mint.mint(ctx, t, "e2e-subagent", "", "e2e-session-a")
+	if child.RootSessionID != "e2e-session-a" || child.EntityID != sessionA.EntityID || child.Token == sessionA.Token {
+		t.Fatalf("subagent token = %+v", child)
+	}
+
+	assertRead(ctx, t, bao, child.Token, "alpha", http.StatusOK)
+	t.Log("session B cannot use A's grant; a subagent of A can")
+
+	// A short-lived Grant's block lapses through OpenBao's own expiration while
+	// the other blocks of the session policy keep working.
+	short := cred.start(ctx, sessionA.Token, "request", "-reason", "e2e: brief delta", "-item", "kv/data/e2e/delta=read", "-ttl", "5s", "-timeout", "2m")
+	delta := approver.waitForPending(ctx, t, "kv/data/e2e/delta")
+	approver.decide(ctx, t, delta, map[string]authorizerv1.Decision{"kv/data/e2e/delta": authorizerv1.Decision_DECISION_APPROVE}, nil)
+	if result := short.wait(t); result.exitCode != 0 {
+		t.Fatalf("short grant request = %+v", result)
+	}
+
+	assertRead(ctx, t, bao, sessionA.Token, "delta", http.StatusOK)
+	waitForRead(ctx, t, bao, sessionA.Token, "delta", http.StatusForbidden, 20*time.Second)
+	assertRead(ctx, t, bao, sessionA.Token, "alpha", http.StatusOK)
+	t.Log("a 5s Grant stopped working after it expired; alpha still works")
+
+	// Revoking a Grant takes effect immediately.
+	grantID := approver.activeGrant(ctx, t, "e2e-session-a", "kv/data/e2e/gamma")
+	if _, err := approver.rpc.RevokeGrant(ctx, connect.NewRequest(&authorizerv1.RevokeGrantRequest{GrantId: grantID})); err != nil {
+		t.Fatalf("revoke Grant: %v", err)
+	}
+
+	assertRead(ctx, t, bao, sessionA.Token, "gamma", http.StatusForbidden)
+	assertRead(ctx, t, bao, sessionA.Token, "alpha", http.StatusOK)
+	t.Log("revoking one Grant removed only that access")
+
+	// A read with -reason files a request on permission denied and retries after approval.
+	autoRead := cred.start(ctx, sessionA.Token, "-reason", "e2e: read epsilon", "-field", "data.value", "-timeout", "2m", "kv/data/e2e/epsilon")
+	epsilon := approver.waitForPending(ctx, t, "kv/data/e2e/epsilon")
+	approver.decide(ctx, t, epsilon, map[string]authorizerv1.Decision{"kv/data/e2e/epsilon": authorizerv1.Decision_DECISION_APPROVE}, nil)
+	if result := autoRead.wait(t); result.exitCode != 0 || result.stdout != "secret-epsilon" {
+		t.Fatalf("auto-requesting read = %+v", result)
+	}
+
+	withoutReason := cred.run(ctx, t, sessionB.Token, "kv/data/e2e/epsilon")
+	if withoutReason.exitCode != 1 || !strings.Contains(withoutReason.stderr, "-reason") {
+		t.Fatalf("denied read without -reason = %+v", withoutReason)
+	}
+
+	grants := cred.run(ctx, t, sessionA.Token, "grants")
+	if grants.exitCode != 0 || !strings.Contains(grants.stdout, "kv/data/e2e/alpha") || !strings.Contains(grants.stdout, "kv/data/e2e/epsilon") || strings.Contains(grants.stdout, "kv/data/e2e/gamma") {
+		t.Fatalf("bao-cred grants = %+v", grants)
+	}
+
+	t.Log("bao-cred -reason requested access on denial and read the secret after approval")
+
+	// Only Session Identities may request Grants, and the authorizer token can
+	// change nothing on an entity except its policies.
+	humanToken := responseAuthToken(t, mustCall(t, ctx, bao, "", http.MethodPost, "auth/userpass/login/approver", map[string]string{"password": approverPassword}, http.StatusOK))
+	agent := authorizerv1connect.NewAgentServiceClient(application.rpcHTTPClient(), application.baseURL+"/api")
+	humanRequest := connect.NewRequest(&authorizerv1.CreateGrantRequestRequest{
+		Reason: "human", Items: []*authorizerv1.PermissionItemInput{{Path: "kv/data/e2e/alpha", Capabilities: []string{"read"}}},
+	})
+	humanRequest.Header().Set("Authorization", "Bearer "+humanToken)
+	if _, err := agent.CreateGrantRequest(ctx, humanRequest); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("human token on the Agent API: %v, want permission_denied", err)
+	}
+
+	mustCall(t, ctx, bao, authorizerToken, http.MethodPost, "identity/entity/id/"+sessionA.EntityID, map[string]any{"name": "renamed"}, http.StatusForbidden)
+	mustCall(t, ctx, bao, authorizerToken, http.MethodPost, "identity/entity/id/"+sessionA.EntityID, map[string]any{"disabled": true}, http.StatusForbidden)
+	mustCall(t, ctx, bao, authorizerToken, http.MethodPost, "sys/policies/acl/not-a-grant", map[string]string{"policy": "path \"kv/*\" { capabilities = [\"read\"] }"}, http.StatusForbidden)
+	t.Log("human tokens are refused by the Agent API; the authorizer token cannot rename or disable entities or write other policies")
+
+	t.Log("real OpenBao session-grant workflow passed")
 }
 
 type isolatedProcessPaths struct {
@@ -394,29 +426,274 @@ type liveAPI struct {
 	port    int
 }
 
-type loginEnvelope struct {
-	Auth struct {
-		ClientToken      string   `json:"client_token"`
-		EntityID         string   `json:"entity_id"`
-		IdentityPolicies []string `json:"identity_policies"`
-	} `json:"auth"`
+type mintedSession struct {
+	SessionID     string `json:"session_id"`
+	RootSessionID string `json:"root_session_id"`
+	EntityAlias   string `json:"entity_alias"`
+	Token         string `json:"token"`
+	EntityID      string `json:"entity_id"`
 }
 
-type controlGroupEnvelope struct {
-	Data struct {
-		Approved         bool   `json:"approved"`
-		RequestPath      string `json:"request_path"`
-		RequestOperation string `json:"request_operation"`
-		RequestData      struct {
-			Data struct {
-				Marker string `json:"marker"`
-			} `json:"data"`
-		} `json:"request_data"`
-		RequestEntity struct {
-			Name string `json:"name"`
-		} `json:"request_entity"`
-		Authorizations []json.RawMessage `json:"authorizations"`
-	} `json:"data"`
+// sessionMinter runs the opencode plugin's mint CLI, so the E2E exercises the
+// same minting code the plugin uses.
+type sessionMinter struct {
+	bun     string
+	cli     string
+	root    string
+	paths   isolatedProcessPaths
+	address string
+	roleID  string
+	secret  string
+}
+
+func (m sessionMinter) mint(ctx context.Context, t *testing.T, sessionID, title string, parents ...string) mintedSession {
+	t.Helper()
+	arguments := []string{m.cli, "--session-id", sessionID, "--address", m.address, "--role-id-file", m.roleID, "--secret-id-file", m.secret, "--directory", m.root}
+	if title != "" {
+		arguments = append(arguments, "--title", title)
+	}
+
+	for _, parent := range parents {
+		arguments = append(arguments, "--parent", parent)
+	}
+
+	result := runProcess(ctx, m.paths.environment(), m.bun, arguments...)
+	if result.exitCode != 0 {
+		t.Fatalf("mint session %s: exit %d: %s", sessionID, result.exitCode, result.stderr)
+	}
+
+	var session mintedSession
+	decodeResponse(t, []byte(result.stdout), &session)
+	if session.Token == "" {
+		t.Fatalf("mint session %s returned no token", sessionID)
+	}
+
+	return session
+}
+
+type baoCred struct {
+	binary     string
+	paths      isolatedProcessPaths
+	address    string
+	authorizer string
+}
+
+func (c baoCred) environment(token string) []string {
+	return c.paths.environment("BAO_ADDR="+c.address, "BAO_TOKEN="+token, "OPENBAO_AUTHORIZER_URL="+c.authorizer)
+}
+
+func (c baoCred) run(ctx context.Context, t *testing.T, token string, arguments ...string) processResult {
+	t.Helper()
+	return runProcess(ctx, c.environment(token), c.binary, arguments...)
+}
+
+func (c baoCred) start(ctx context.Context, token string, arguments ...string) *backgroundProcess {
+	done := make(chan processResult, 1)
+	go func() { done <- runProcess(ctx, c.environment(token), c.binary, arguments...) }()
+	return &backgroundProcess{done: done}
+}
+
+type processResult struct {
+	stdout   string
+	stderr   string
+	exitCode int
+}
+
+type backgroundProcess struct {
+	done chan processResult
+}
+
+func (p *backgroundProcess) wait(t *testing.T) processResult {
+	t.Helper()
+	select {
+	case result := <-p.done:
+		return result
+	case <-time.After(3 * time.Minute):
+		t.Fatal("background process did not finish")
+		return processResult{}
+	}
+}
+
+func runProcess(ctx context.Context, environment []string, binary string, arguments ...string) processResult {
+	command := exec.CommandContext(ctx, binary, arguments...)
+	command.Env = environment
+	var stdout, stderr bytes.Buffer
+	command.Stdout, command.Stderr = &stdout, &stderr
+	err := command.Run()
+	result := processResult{stdout: stdout.String(), stderr: stderr.String()}
+	if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
+		result.exitCode = exitErr.ExitCode()
+	} else if err != nil {
+		result.exitCode = -1
+		result.stderr += err.Error()
+	}
+
+	return result
+}
+
+// approverClient drives the Approver API through the generated Connect client,
+// as the PWA does: a same-origin cookie session.
+type approverClient struct {
+	rpc authorizerv1connect.ApproverServiceClient
+}
+
+func newApproverClient(ctx context.Context, t *testing.T, application *liveAPI) *approverClient {
+	t.Helper()
+	client := &approverClient{rpc: authorizerv1connect.NewApproverServiceClient(application.rpcHTTPClient(), application.baseURL+"/api")}
+	if _, err := client.rpc.Login(ctx, connect.NewRequest(&authorizerv1.LoginRequest{Username: "approver", Password: approverPassword})); err != nil {
+		t.Fatalf("approver login: %v", err)
+	}
+
+	return client
+}
+
+func (a *approverClient) list(ctx context.Context, t *testing.T, filter authorizerv1.GrantRequestFilter) []*authorizerv1.GrantRequest {
+	t.Helper()
+	response, err := a.rpc.ListGrantRequests(ctx, connect.NewRequest(&authorizerv1.ListGrantRequestsRequest{Filter: filter}))
+	if err != nil {
+		t.Fatalf("list Grant Requests: %v", err)
+	}
+
+	return response.Msg.GetGrantRequests()
+}
+
+// waitForPending reads the WatchEvents stream until a pending request holds
+// every given path, so the E2E covers the push path the PWA relies on.
+func (a *approverClient) waitForPending(ctx context.Context, t *testing.T, paths ...string) *authorizerv1.GrantRequest {
+	t.Helper()
+	watchContext, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	stream, err := a.rpc.WatchEvents(watchContext, connect.NewRequest(&authorizerv1.WatchEventsRequest{}))
+	if err != nil {
+		t.Fatalf("watch approver events: %v", err)
+	}
+
+	defer func() { _ = stream.Close() }()
+	for stream.Receive() {
+		for _, request := range stream.Msg().GetSnapshot().GetPendingRequests() {
+			pending := map[string]bool{}
+			for _, item := range request.GetItems() {
+				pending[item.GetPath()] = item.GetState() == authorizerv1.ItemState_ITEM_STATE_PENDING
+			}
+
+			if !slices.ContainsFunc(paths, func(path string) bool { return !pending[path] }) {
+				return request
+			}
+		}
+	}
+
+	t.Fatalf("no pending request for %v on the event stream: %v", paths, stream.Err())
+	return nil
+}
+
+func (a *approverClient) decide(ctx context.Context, t *testing.T, request *authorizerv1.GrantRequest, decisions map[string]authorizerv1.Decision, ttls map[string]time.Duration) {
+	t.Helper()
+	items := make([]*authorizerv1.ItemDecision, 0, len(decisions))
+	for _, item := range request.GetItems() {
+		decision, ok := decisions[item.GetPath()]
+		if !ok || item.GetState() != authorizerv1.ItemState_ITEM_STATE_PENDING {
+			continue
+		}
+
+		entry := &authorizerv1.ItemDecision{ItemId: item.GetId(), Decision: decision}
+		if ttl, ok := ttls[item.GetPath()]; ok {
+			entry.Ttl = durationpb.New(ttl)
+		}
+
+		items = append(items, entry)
+	}
+
+	if _, err := a.rpc.DecideItems(ctx, connect.NewRequest(&authorizerv1.DecideItemsRequest{GrantRequestId: request.GetId(), Decisions: items})); err != nil {
+		t.Fatalf("decide items: %v", err)
+	}
+}
+
+func (a *approverClient) activeGrant(ctx context.Context, t *testing.T, sessionID, path string) string {
+	t.Helper()
+	response, err := a.rpc.ListGrants(ctx, connect.NewRequest(&authorizerv1.ListGrantsRequest{}))
+	if err != nil {
+		t.Fatalf("list Grants: %v", err)
+	}
+
+	for _, grant := range response.Msg.GetGrants() {
+		if grant.GetPath() == path && grant.GetSession().GetId() == sessionID {
+			return grant.GetId()
+		}
+	}
+
+	t.Fatalf("no active Grant for %s in session %s: %v", path, sessionID, response.Msg.GetGrants())
+	return ""
+}
+
+// rpcHTTPClient checks listener ownership around every RPC, like callAPI does.
+func (api *liveAPI) rpcHTTPClient() *http.Client {
+	return &http.Client{Jar: api.client.Jar, Transport: ownedTransport{api: api}}
+}
+
+type ownedTransport struct {
+	api *liveAPI
+}
+
+func (o ownedTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if err := o.api.process.assertOwnsLoopbackPort(o.api.port); err != nil {
+		return nil, fmt.Errorf("refuse RPC without listener ownership: %w", err)
+	}
+
+	return http.DefaultTransport.RoundTrip(request)
+}
+
+type requestOutput struct {
+	ID    string `json:"id"`
+	Items []struct {
+		Path  string `json:"path"`
+		State string `json:"state"`
+	} `json:"items"`
+}
+
+func parseRequestOutput(t *testing.T, stdout string) requestOutput {
+	t.Helper()
+	var output requestOutput
+	decodeResponse(t, []byte(stdout), &output)
+	return output
+}
+
+func itemStates(t *testing.T, stdout string) map[string]string {
+	t.Helper()
+	states := map[string]string{}
+	for _, item := range parseRequestOutput(t, stdout).Items {
+		states[item.Path] = item.State
+	}
+
+	return states
+}
+
+func requestID(t *testing.T, stdout string) string {
+	t.Helper()
+	id := parseRequestOutput(t, stdout).ID
+	if id == "" {
+		t.Fatalf("bao-cred output has no request id: %s", stdout)
+	}
+
+	return id
+}
+
+func assertRead(ctx context.Context, t *testing.T, api *liveAPI, token, name string, expected int) {
+	t.Helper()
+	mustCall(t, ctx, api, token, http.MethodGet, "kv/data/e2e/"+name, nil, expected)
+}
+
+func waitForRead(ctx context.Context, t *testing.T, api *liveAPI, token, name string, expected int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, status, err := callAPI(ctx, api, token, http.MethodGet, "kv/data/e2e/"+name, nil, nil); err == nil && status == expected {
+			return
+		}
+
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	t.Fatalf("reading kv/data/e2e/%s did not return HTTP %d within %s", name, expected, timeout)
 }
 
 func testRepositoryRoot(t *testing.T) string {
@@ -467,121 +744,60 @@ func registerProcessCleanup(t *testing.T, name string, process *managedProcess) 
 	})
 }
 
-func writePolicy(ctx context.Context, t *testing.T, api *liveAPI, repositoryRoot, name, fixture string) {
+func readRepositoryFile(t *testing.T, repositoryRoot, path string) string {
 	t.Helper()
-	contents, err := os.ReadFile(filepath.Join(repositoryRoot, "e2e", "policies", fixture))
+	contents, err := os.ReadFile(filepath.Join(repositoryRoot, path))
 	if err != nil {
-		t.Fatalf("read %s policy: %v", name, err)
+		t.Fatalf("read %s: %v", path, err)
 	}
 
-	mustCall(t, ctx, api, rootToken, http.MethodPut, "sys/policies/acl/"+name, map[string]string{"policy": string(contents)}, http.StatusOK, http.StatusNoContent)
+	return string(contents)
 }
 
-func createEntity(ctx context.Context, t *testing.T, api *liveAPI, name string) string {
+func writeSecretFile(t *testing.T, path, contents string) {
 	t.Helper()
-	response := mustCall(t, ctx, api, rootToken, http.MethodPost, "identity/entity", map[string]string{"name": name}, http.StatusOK)
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func writePolicy(ctx context.Context, t *testing.T, api *liveAPI, name, policy string) {
+	t.Helper()
+	mustCall(t, ctx, api, rootToken, http.MethodPut, "sys/policies/acl/"+name, map[string]string{"policy": policy}, http.StatusOK, http.StatusNoContent)
+}
+
+func createToken(ctx context.Context, t *testing.T, api *liveAPI, payload map[string]any) string {
+	t.Helper()
+	return responseAuthToken(t, mustCall(t, ctx, api, rootToken, http.MethodPost, "auth/token/create-orphan", payload, http.StatusOK))
+}
+
+func responseAuthToken(t *testing.T, contents []byte) string {
+	t.Helper()
 	var envelope struct {
-		Data struct {
-			ID string `json:"id"`
-		} `json:"data"`
+		Auth struct {
+			ClientToken string `json:"client_token"`
+		} `json:"auth"`
 	}
-	decodeResponse(t, response, &envelope)
-	if envelope.Data.ID == "" {
-		t.Fatalf("create entity %s returned no ID", name)
-	}
-
-	return envelope.Data.ID
-}
-
-func createEntityAlias(ctx context.Context, t *testing.T, api *liveAPI, name, mountAccessor, entityID string) {
-	t.Helper()
-	mustCall(t, ctx, api, rootToken, http.MethodPost, "identity/entity-alias", map[string]string{
-		"name": name, "mount_accessor": mountAccessor, "canonical_id": entityID,
-	}, http.StatusOK)
-}
-
-func createIdentityGroup(ctx context.Context, t *testing.T, api *liveAPI, name, entityID, policy string) {
-	t.Helper()
-	mustCall(t, ctx, api, rootToken, http.MethodPost, "identity/group", map[string]any{
-		"name": name, "type": "internal", "member_entity_ids": []string{entityID}, "policies": []string{policy},
-	}, http.StatusOK)
-}
-
-func loginUserpass(ctx context.Context, t *testing.T, api *liveAPI, username, password string) loginEnvelope {
-	t.Helper()
-	response := mustCall(t, ctx, api, "", http.MethodPost, "auth/userpass/login/"+username, map[string]string{"password": password}, http.StatusOK)
-	var envelope loginEnvelope
-	decodeResponse(t, response, &envelope)
+	decodeResponse(t, contents, &envelope)
 	if envelope.Auth.ClientToken == "" {
-		t.Fatalf("%s login returned no token", username)
+		t.Fatalf("response has no client token: %s", contents)
 	}
 
-	return envelope
+	return envelope.Auth.ClientToken
 }
 
-func assertIdentityLogin(t *testing.T, name string, login loginEnvelope, entityID, policy string) {
+func responseString(t *testing.T, contents []byte, field string) string {
 	t.Helper()
-	if login.Auth.EntityID != entityID {
-		t.Fatalf("%s login entity = %q, want %q", name, login.Auth.EntityID, entityID)
+	var envelope struct {
+		Data map[string]any `json:"data"`
+	}
+	decodeResponse(t, contents, &envelope)
+	value, _ := envelope.Data[field].(string)
+	if value == "" {
+		t.Fatalf("response has no %s", field)
 	}
 
-	if !slices.Contains(login.Auth.IdentityPolicies, policy) {
-		t.Fatalf("%s identity policies = %v, want %q", name, login.Auth.IdentityPolicies, policy)
-	}
-}
-
-func inspectControlGroup(ctx context.Context, t *testing.T, api *liveAPI, token string, payload map[string]string) controlGroupEnvelopeData {
-	t.Helper()
-	response := mustCall(t, ctx, api, token, http.MethodPost, "sys/control-group/request", payload, http.StatusOK)
-	var envelope controlGroupEnvelope
-	decodeResponse(t, response, &envelope)
-	return envelope.Data
-}
-
-type controlGroupEnvelopeData = struct {
-	Approved         bool   `json:"approved"`
-	RequestPath      string `json:"request_path"`
-	RequestOperation string `json:"request_operation"`
-	RequestData      struct {
-		Data struct {
-			Marker string `json:"marker"`
-		} `json:"data"`
-	} `json:"request_data"`
-	RequestEntity struct {
-		Name string `json:"name"`
-	} `json:"request_entity"`
-	Authorizations []json.RawMessage `json:"authorizations"`
-}
-
-func waitForApplicationRequest(t *testing.T, ctx context.Context, application *liveAPI, path string) string { //nolint:revive // testing.T stays first in test helpers.
-	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		response, status, err := callAPI(ctx, application, "", http.MethodGet, "api/v1/requests", nil, nil)
-		if err == nil && status == http.StatusOK {
-			var requests []struct {
-				ID     string `json:"id"`
-				Path   string `json:"path"`
-				Status string `json:"status"`
-			}
-			if json.Unmarshal(response, &requests) == nil {
-				for _, request := range requests {
-					if request.Path == path && request.ID != "" && request.Status == "pending" {
-						return request.ID
-					}
-				}
-			}
-		}
-
-		select {
-		case <-ctx.Done():
-			t.Fatalf("wait for application request: %v", ctx.Err())
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
-
-	t.Fatalf("application did not discover %s within 30 seconds", path)
-	return ""
+	return value
 }
 
 func mustCall(t *testing.T, ctx context.Context, api *liveAPI, token, method, path string, payload any, expected ...int) []byte { //nolint:revive // testing.T stays first in test helpers.

@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { api, ApiError } from './api'
+import { timestampDate, type Timestamp } from '@bufbuild/protobuf/wkt'
+import { ConnectError } from '@connectrpc/connect'
+import { createApproverClient, errorReason, getErrorMessage, isSessionLost, type ApproverClient, type Session } from './api'
+import { formatDuration, parseDuration } from './duration'
+import { Decision, type DashboardSnapshot, type Identity } from './gen/openbao/authorizer/v1/approver_pb'
+import { ItemState, type AgentSession, type Grant, type GrantRequest, type PermissionItem } from './gen/openbao/authorizer/v1/types_pb'
 import { pushEnrollmentErrorMessage } from './push'
 import {
-  ArrowLeftIcon,
   BellIcon,
   CheckIcon,
   ChevronIcon,
@@ -16,24 +20,18 @@ import {
   UserIcon,
   WifiOffIcon,
 } from './components/Icons'
-import type { ApprovalContext, ApprovalRequest, ConnectionState, Identity, RequestFilter, Session } from './types'
+import type { ConnectionState, DashboardTab } from './types'
 
-function isSessionLost(error: unknown) {
-  return error instanceof ApiError && (error.status === 401 || error.status === 403)
-}
+const defaultClient = createApproverClient()
 
 type AuthState =
   | { status: 'checking' }
   | { status: 'signed-out' }
+  | { status: 'unavailable'; message: string }
   | { status: 'signed-in'; session: Session }
 
-function getErrorMessage(error: unknown, fallback: string) {
-  return error instanceof Error ? error.message : fallback
-}
-
-function identityName(identity: Identity) {
-  const candidate = identity.name ?? identity.displayName ?? identity.display_name ?? identity.alias
-  return typeof candidate === 'string' && candidate.trim() ? candidate : 'Authenticated operator'
+function identityName(identity: Identity | undefined) {
+  return identity?.displayName.trim() || 'Authenticated operator'
 }
 
 function initials(value: string) {
@@ -45,35 +43,15 @@ function initials(value: string) {
     .join('') || 'OP'
 }
 
-function formatDate(value: string) {
-  const date = new Date(value)
-  if (Number.isNaN(date.valueOf())) return value
+function formatDate(value: Timestamp | undefined) {
+  if (!value) return ''
+  const date = timestampDate(value)
   return new Intl.DateTimeFormat(undefined, {
     month: 'short',
     day: 'numeric',
     hour: 'numeric',
     minute: '2-digit',
   }).format(date)
-}
-
-function formatOperation(operation: string) {
-  return operation ? operation.charAt(0).toUpperCase() + operation.slice(1).toLowerCase() : 'Unknown'
-}
-
-function authorizationLabel(value: unknown) {
-  if (typeof value === 'string') return value
-  if (value && typeof value === 'object') {
-    const record = value as Record<string, unknown>
-    const candidate = record.name ?? record.entity_name ?? record.path ?? record.id ?? record.entity_id
-    if (typeof candidate === 'string') return candidate
-  }
-  return JSON.stringify(value)
-}
-
-function isApprovalRequest(value: unknown): value is ApprovalRequest {
-  if (!value || typeof value !== 'object') return false
-  const request = value as Partial<ApprovalRequest>
-  return typeof request.id === 'string' && typeof request.path === 'string' && ['pending', 'approved', 'rejected', 'expired'].includes(request.status ?? '')
 }
 
 function Brand({ compact = false }: { compact?: boolean }) {
@@ -102,7 +80,19 @@ function LoadingScreen() {
   )
 }
 
-function Login({ onAuthenticated }: { onAuthenticated: (session: Session) => void }) {
+function SessionUnavailable({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <main className="grid min-h-svh place-items-center bg-ink px-6 text-white">
+      <div className="flex max-w-sm flex-col items-center gap-5 text-center">
+        <Brand />
+        <p role="alert" className="text-sm text-zinc-300">{message}</p>
+        <button type="button" onClick={onRetry} className="secondary-button">Retry</button>
+      </div>
+    </main>
+  )
+}
+
+function Login({ client, onAuthenticated }: { client: ApproverClient; onAuthenticated: (session: Session) => void }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
@@ -115,9 +105,9 @@ function Login({ onAuthenticated }: { onAuthenticated: (session: Session) => voi
     setSubmitting(true)
     setError('')
     try {
-      const session = await api.createSession(username.trim(), password)
+      const response = await client.login({ username: username.trim(), password })
       setPassword('')
-      onAuthenticated(session)
+      onAuthenticated({ identity: response.identity })
     } catch (caught) {
       setError(getErrorMessage(caught, 'Unable to sign in. Check your username and password.'))
     } finally {
@@ -138,13 +128,13 @@ function Login({ onAuthenticated }: { onAuthenticated: (session: Session) => voi
             Sensitive changes.<br /><span className="text-brand">Human judgment.</span>
           </h1>
           <p className="mt-7 max-w-lg text-lg leading-8 text-zinc-400">
-            Review control group requests, inspect the full context, and authorize critical operations from one secure workspace.
+            Review what AI agent sessions ask for, decide each permission on its own, and revoke access at any time.
           </p>
           <div className="mt-12 grid max-w-xl grid-cols-3 gap-3">
             {[
               ['01', 'Authenticate'],
-              ['02', 'Review context'],
-              ['03', 'Authorize'],
+              ['02', 'Review request'],
+              ['03', 'Grant access'],
             ].map(([number, label]) => (
               <div key={number} className="border-t border-white/15 pt-4">
                 <span className="font-mono text-xs text-brand">{number}</span>
@@ -164,7 +154,7 @@ function Login({ onAuthenticated }: { onAuthenticated: (session: Session) => voi
               <KeyIcon className="size-6" />
             </div>
             <h2 className="text-3xl font-semibold tracking-[-0.035em] text-white">Operator sign in</h2>
-            <p className="mt-3 leading-7 text-zinc-400">Sign in with your OpenBao username and password. Your secure session stays active for background approval notifications.</p>
+            <p className="mt-3 leading-7 text-zinc-400">Sign in with your OpenBao username and password. Your secure session stays active for background access-request notifications.</p>
           </div>
 
           <form onSubmit={submit} className="space-y-5">
@@ -244,176 +234,170 @@ function ConnectionBadge({ state }: { state: ConnectionState }) {
   )
 }
 
-const statusLabels = {
-  pending: 'Pending',
-  approved: 'Approved',
-  rejected: 'Rejected',
-  expired: 'Expired',
-} as const
+// Slugs match the status-* classes in index.css.
+const stateStyles: Record<ItemState, { label: string; slug: string }> = {
+  [ItemState.UNSPECIFIED]: { label: 'Unknown', slug: 'unspecified' },
+  [ItemState.PENDING]: { label: 'Pending', slug: 'pending' },
+  [ItemState.ALREADY_GRANTED]: { label: 'Already granted', slug: 'already_granted' },
+  [ItemState.APPROVED]: { label: 'Approved', slug: 'approved' },
+  [ItemState.REJECTED]: { label: 'Rejected', slug: 'rejected' },
+  [ItemState.REFUSED]: { label: 'Refused', slug: 'refused' },
+  [ItemState.EXPIRED]: { label: 'Expired', slug: 'expired' },
+  [ItemState.REVOKED]: { label: 'Revoked', slug: 'revoked' },
+}
 
-const statusIconClasses = {
-  pending: 'border-amber-200 bg-amber-50 text-amber-700',
-  approved: 'border-emerald-200 bg-emerald-50 text-emerald-700',
-  rejected: 'border-red-200 bg-red-50 text-red-700',
-  expired: 'border-zinc-200 bg-zinc-50 text-zinc-500',
-} as const
+function sessionLabel(session: AgentSession) {
+  return session.title.trim() || `Session ${session.id}`
+}
 
-function RequestRow({ request, selected, onSelect }: { request: ApprovalRequest; selected: boolean; onSelect: (trigger: HTMLButtonElement) => void }) {
+function SessionDetails({ session }: { session: AgentSession | undefined }) {
+  if (!session) return null
   return (
-    <button data-review-trigger type="button" onClick={(event) => onSelect(event.currentTarget)} className={`request-row ${selected ? 'selected' : ''}`} aria-label={`Open request ${request.path}`} aria-current={selected ? 'true' : undefined}>
-      <div className="flex min-w-0 flex-1 gap-3.5 sm:gap-5">
-        <div className={`mt-0.5 grid size-10 shrink-0 place-items-center rounded-sm border ${statusIconClasses[request.status]}`}>
-          {request.status === 'approved' ? <CheckIcon className="size-5" /> : request.status === 'rejected' ? <CloseIcon className="size-5" /> : <ClockIcon className="size-5" />}
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="mb-2 flex flex-wrap items-center gap-2">
-            <span className={`status-pill status-${request.status}`}>{statusLabels[request.status]}</span>
-            <span className="operation-pill">{formatOperation(request.operation)}</span>
-          </div>
-          <h3 className="truncate font-mono text-[13px] font-semibold text-zinc-900 sm:text-sm" title={request.path}>{request.path}</h3>
-          <div className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-zinc-500">
-            <span className="inline-flex items-center gap-1.5"><UserIcon className="size-3.5" />{request.entity.name || request.entity.id}</span>
-            <span className="inline-flex items-center gap-1.5"><ClockIcon className="size-3.5" />Updated {formatDate(request.lastSeen)}</span>
-          </div>
-        </div>
-      </div>
-    </button>
+    <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-zinc-500">
+      <span className="inline-flex min-w-0 items-center gap-1.5 font-medium text-zinc-800"><UserIcon className="size-3.5 shrink-0" /><span className="truncate">{sessionLabel(session)}</span></span>
+      <span className="font-mono text-[11px]" title="Agent session ID">{session.id}</span>
+      {session.directory && <span className="min-w-0 truncate font-mono text-[11px]" title={session.directory}>{session.directory}</span>}
+    </div>
   )
 }
 
-function EmptyState({ filter }: { filter: RequestFilter }) {
+function ItemRow({ item, busy, disabled, onDecide }: {
+  item: PermissionItem
+  busy: boolean
+  disabled: boolean
+  onDecide?: (item: PermissionItem, decision: Decision, ttl?: string) => void
+}) {
+  const resolvedTtl = formatDuration(item.ttl)
+  const [ttl, setTtl] = useState(resolvedTtl)
+  const pending = item.state === ItemState.PENDING && onDecide
+  const style = stateStyles[item.state] ?? stateStyles[ItemState.UNSPECIFIED]
+
+  function approve() {
+    const trimmed = ttl.trim()
+    // Only send a TTL the approver actually changed; the server rejects longer ones.
+    onDecide?.(item, Decision.APPROVE, trimmed && trimmed !== resolvedTtl ? trimmed : undefined)
+  }
+
+  return (
+    <li className="item-row">
+      <div className="min-w-0 flex-1">
+        <div className="mb-1.5 flex flex-wrap items-center gap-2">
+          <span className={`status-pill status-${style.slug}`}>{style.label}</span>
+          {item.capabilities.map((capability) => <span key={capability} className="operation-pill">{capability}</span>)}
+        </div>
+        <p className="break-all font-mono text-[13px] font-semibold text-zinc-900">{item.path}</p>
+        <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500">
+          {item.reason && <span>{item.reason}</span>}
+          {!pending && resolvedTtl && item.state !== ItemState.REFUSED && <span>TTL {resolvedTtl}</span>}
+          {item.decidedBy && <span>By {item.decidedBy}</span>}
+          {item.expiresAt && item.state !== ItemState.PENDING && <span className="inline-flex items-center gap-1"><ClockIcon className="size-3.5" />{item.state === ItemState.REVOKED ? 'Was due to expire' : 'Expires'} {formatDate(item.expiresAt)}</span>}
+          {item.expiresAt && item.state === ItemState.PENDING && <span className="inline-flex items-center gap-1"><ClockIcon className="size-3.5" />Undecided after {formatDate(item.expiresAt)}</span>}
+        </div>
+      </div>
+      {pending && (
+        <div className="item-actions">
+          <label className="ttl-field">
+            <span>TTL</span>
+            <input
+              type="text"
+              value={ttl}
+              onChange={(event) => setTtl(event.target.value)}
+              aria-label={`TTL for ${item.path}`}
+              title="Shorten the grant, for example 30m or 2h"
+              inputMode="text"
+              autoCapitalize="none"
+              spellCheck={false}
+            />
+          </label>
+          <button type="button" onClick={() => onDecide?.(item, Decision.REJECT)} disabled={disabled} className="reject-button compact" aria-label={`Reject ${item.path}`}>
+            <CloseIcon className="size-4" />Reject
+          </button>
+          <button type="button" onClick={approve} disabled={disabled} className="approve-button compact" aria-label={`Approve ${item.path}`}>
+            {busy ? <span className="button-spinner dark" /> : <CheckIcon className="size-4" />}Approve
+          </button>
+        </div>
+      )}
+    </li>
+  )
+}
+
+function RequestCard({ request, highlighted, busyItemId, error, onDecide }: {
+  request: GrantRequest
+  highlighted: boolean
+  busyItemId: string | null
+  error: string
+  onDecide?: (request: GrantRequest, item: PermissionItem, decision: Decision, ttl?: string) => void
+}) {
+  const headingRef = useRef<HTMLHeadingElement>(null)
+
+  useEffect(() => {
+    if (!highlighted) return
+    headingRef.current?.scrollIntoView?.({ block: 'center' })
+    headingRef.current?.focus()
+  }, [highlighted])
+
+  return (
+    <article className={`request-card ${highlighted ? 'highlighted' : ''}`} aria-labelledby={`request-${request.id}`}>
+      <header className="request-card-header">
+        <SessionDetails session={request.session} />
+        <h3 ref={headingRef} id={`request-${request.id}`} tabIndex={-1} className="mt-3 text-[15px] font-medium leading-6 text-zinc-950 whitespace-pre-wrap break-words">{request.reason}</h3>
+        <p className="mt-1.5 inline-flex items-center gap-1.5 text-xs text-zinc-400"><ClockIcon className="size-3.5" />Requested {formatDate(request.createdAt)}</p>
+      </header>
+      {error && <div role="alert" className="mx-4 mt-3 rounded-sm border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-700 sm:mx-6">{error}</div>}
+      <ul className="divide-y divide-zinc-100" aria-label="Permission items">
+        {request.items.map((item) => (
+          <ItemRow
+            key={`${item.id}-${item.state}`}
+            item={item}
+            busy={busyItemId === item.id}
+            disabled={busyItemId !== null}
+            onDecide={onDecide ? (target, decision, ttl) => onDecide(request, target, decision, ttl) : undefined}
+          />
+        ))}
+      </ul>
+    </article>
+  )
+}
+
+function GrantRow({ grant, busy, disabled, onRevoke }: { grant: Grant; busy: boolean; disabled: boolean; onRevoke: (grant: Grant) => void }) {
+  return (
+    <li className="item-row">
+      <div className="min-w-0 flex-1">
+        <div className="mb-1.5 flex flex-wrap items-center gap-2">
+          {grant.capabilities.map((capability) => <span key={capability} className="operation-pill">{capability}</span>)}
+        </div>
+        <p className="break-all font-mono text-[13px] font-semibold text-zinc-900">{grant.path}</p>
+        <div className="mt-2"><SessionDetails session={grant.session} /></div>
+        <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500">
+          <span className="inline-flex items-center gap-1"><ClockIcon className="size-3.5" />Expires {formatDate(grant.expiresAt)}</span>
+          {grant.approvedBy && <span>Approved by {grant.approvedBy}</span>}
+        </div>
+      </div>
+      <div className="item-actions">
+        <button type="button" onClick={() => onRevoke(grant)} disabled={disabled} className="reject-button compact" aria-label={`Revoke ${grant.path}`}>
+          {busy ? <span className="button-spinner dark" /> : <CloseIcon className="size-4" />}Revoke
+        </button>
+      </div>
+    </li>
+  )
+}
+
+function EmptyState({ tab }: { tab: DashboardTab }) {
   const content = {
-    pending: ['Queue is clear', 'New control group requests will appear here as they arrive.'],
-    approved: ['No approved requests', 'Requests you approve will be collected here.'],
-    rejected: ['No rejected requests', 'Requests you reject will be collected here.'],
-    expired: ['No expired requests', 'Requests that expire before a decision will be collected here.'],
-  }[filter]
+    pending: ['Queue is clear', 'New access requests from agent sessions will appear here as they arrive.'],
+    history: ['No decided requests', 'Requests leave the queue once every item is decided, refused or expired.'],
+    grants: ['No active grants', 'Approved permissions appear here until they expire or you revoke them.'],
+  }[tab]
   return (
     <div className="grid min-h-[390px] place-items-center px-6 py-16 text-center">
       <div>
         <div className="mx-auto grid size-14 place-items-center rounded-full border border-zinc-200 bg-zinc-50 text-zinc-400">
-          {filter === 'pending' ? <InboxIcon className="size-6" /> : filter === 'approved' ? <CheckIcon className="size-6" /> : filter === 'rejected' ? <CloseIcon className="size-6" /> : <ClockIcon className="size-6" />}
+          {tab === 'pending' ? <InboxIcon className="size-6" /> : tab === 'history' ? <ClockIcon className="size-6" /> : <KeyIcon className="size-6" />}
         </div>
         <h3 className="mt-5 text-base font-semibold text-zinc-900">{content[0]}</h3>
         <p className="mx-auto mt-2 max-w-xs text-sm leading-6 text-zinc-500">{content[1]}</p>
       </div>
     </div>
-  )
-}
-
-function ApprovalContextView({ context }: { context: ApprovalContext }) {
-  if (!context.available) {
-    return (
-      <div role="alert" className="rounded-sm border border-red-200 bg-red-50 px-3 py-3 text-sm text-red-700">
-        Approval context could not be loaded. Do not approve this request.
-      </div>
-    )
-  }
-  return (
-    <div>
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <h3 className="detail-label">Approval context</h3>
-        <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-400">Read from OpenBao</span>
-      </div>
-      <pre className="json-block"><code>{JSON.stringify(context.data, null, 2)}</code></pre>
-    </div>
-  )
-}
-
-function RequestDetail({ request, onBack, onApprove, onReject, submitting, actionError }: {
-  request: ApprovalRequest
-  onBack: () => void
-  onApprove: () => void
-  onReject: () => void
-  submitting: boolean
-  actionError: string
-}) {
-  const headingRef = useRef<HTMLHeadingElement>(null)
-
-  useEffect(() => {
-    headingRef.current?.focus()
-  }, [])
-
-  return (
-    <section className="detail-panel" aria-labelledby="request-detail-title">
-      <div className="detail-header">
-        <button type="button" onClick={onBack} className="icon-button lg:hidden" aria-label="Back to requests"><ArrowLeftIcon className="size-5" /></button>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className={`status-pill status-${request.status}`}>{request.status === 'pending' ? 'Pending review' : statusLabels[request.status]}</span>
-            <span className="operation-pill">{formatOperation(request.operation)}</span>
-          </div>
-          <h2 ref={headingRef} id="request-detail-title" tabIndex={-1} className="mt-3 break-all font-mono text-base font-semibold leading-6 text-zinc-950">{request.path}</h2>
-        </div>
-        <button type="button" onClick={onBack} className="icon-button hidden lg:grid" aria-label="Close request details"><CloseIcon className="size-4" /></button>
-      </div>
-
-      <div className="detail-scroll">
-        <div className="detail-section grid gap-4 sm:grid-cols-2">
-          <div>
-            <p className="detail-label">Requested by</p>
-            <div className="mt-2 flex items-center gap-2.5">
-              <div className="grid size-8 place-items-center rounded-full bg-zinc-900 text-[10px] font-semibold text-white">{initials(request.entity.name || request.entity.id)}</div>
-              <div className="min-w-0">
-                <p className="truncate text-sm font-medium text-zinc-900">{request.entity.name || 'Unknown entity'}</p>
-                <p className="truncate font-mono text-[11px] text-zinc-500">{request.entity.id}</p>
-              </div>
-            </div>
-          </div>
-          <div>
-            <p className="detail-label">Activity</p>
-            <dl className="mt-2 space-y-1.5 text-xs">
-              <div className="flex justify-between gap-3"><dt className="text-zinc-500">First seen</dt><dd className="font-medium text-zinc-700">{formatDate(request.firstSeen)}</dd></div>
-              <div className="flex justify-between gap-3"><dt className="text-zinc-500">Last seen</dt><dd className="font-medium text-zinc-700">{formatDate(request.lastSeen)}</dd></div>
-            </dl>
-          </div>
-        </div>
-
-        {request.approvalContext && (
-          <div className="detail-section">
-            <ApprovalContextView context={request.approvalContext} />
-          </div>
-        )}
-
-        <div className="detail-section">
-          <div className="mb-3 flex items-center justify-between gap-3">
-            <h3 className="detail-label">Request payload</h3>
-            <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-400">JSON</span>
-          </div>
-          {request.data === undefined ? (
-            <p className="rounded-sm border border-zinc-200 bg-zinc-50 px-3 py-3 text-sm text-zinc-500">Redacted by the server. Enable request payload exposure only when the submitted fields are safe to display.</p>
-          ) : (
-            <pre className="json-block"><code>{JSON.stringify(request.data, null, 2) ?? 'null'}</code></pre>
-          )}
-        </div>
-
-        <div className="detail-section">
-          <h3 className="detail-label">Required authorizations</h3>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {request.authorizations.length ? request.authorizations.map((authorization, index) => (
-              <span key={`${authorizationLabel(authorization)}-${index}`} className="authorization-chip"><ShieldIcon className="size-3.5" />{authorizationLabel(authorization)}</span>
-            )) : <span className="text-sm text-zinc-500">No authorization metadata provided.</span>}
-          </div>
-        </div>
-
-        <div className="detail-section border-b-0">
-          <h3 className="detail-label">Request ID</h3>
-          <p className="mt-2 break-all font-mono text-xs text-zinc-600">{request.id}</p>
-        </div>
-      </div>
-
-      <div className="detail-footer">
-        {actionError && <div role="alert" className="mb-3 rounded-sm border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-700">{actionError}</div>}
-        {request.status !== 'pending' ? (
-          <div className={`flex w-full items-center justify-center gap-2 rounded-sm border px-4 py-3 text-sm font-semibold status-${request.status}`}>{request.status === 'approved' ? <CheckIcon className="size-4" /> : request.status === 'rejected' ? <CloseIcon className="size-4" /> : <ClockIcon className="size-4" />}{statusLabels[request.status]}</div>
-        ) : (
-          <div className="grid w-full grid-cols-2 gap-2">
-            <button type="button" onClick={onReject} disabled={submitting} className="reject-button"><CloseIcon className="size-4" />Reject request</button>
-            <button type="button" onClick={onApprove} disabled={submitting} className="approve-button"><ShieldIcon className="size-4" />Approve request</button>
-          </div>
-        )}
-      </div>
-    </section>
   )
 }
 
@@ -424,120 +408,164 @@ function urlBase64ToUint8Array(value: string) {
   return Uint8Array.from(raw, (character) => character.charCodeAt(0))
 }
 
-function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: () => void }) {
-  const [requests, setRequests] = useState<ApprovalRequest[]>([])
-  const [filter, setFilter] = useState<RequestFilter>('pending')
-  const [selectedId, setSelectedId] = useState<string | null>(null)
-  const detailTriggerRef = useRef<HTMLButtonElement | null>(null)
-  const hadSelectedDetailRef = useRef(false)
+const RECONNECT_BASE_DELAY_MS = 1_000
+const RECONNECT_MAX_DELAY_MS = 30_000
+// The server heartbeats every 25s, so a silent stream is a dead one that the
+// browser has not noticed, e.g. behind a proxy that dropped it.
+const STREAM_IDLE_TIMEOUT_MS = 60_000
+// Timers are throttled in background tabs, so a page coming back is checked
+// against a single missed heartbeat instead.
+const STREAM_STALE_MS = 30_000
+
+// Outside the effect because oxlint's effect-dependency check stops at for-await loops.
+async function forEachEvent<T>(events: AsyncIterable<T>, onEvent: (event: T) => void) {
+  for await (const event of events) onEvent(event)
+}
+
+function Dashboard({ client, session, onSignedOut }: { client: ApproverClient; session: Session; onSignedOut: () => void }) {
+  const [pending, setPending] = useState<GrantRequest[]>([])
+  const [history, setHistory] = useState<GrantRequest[]>([])
+  const [grants, setGrants] = useState<Grant[]>([])
+  const [tab, setTab] = useState<DashboardTab>('pending')
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState('')
   const [connection, setConnection] = useState<ConnectionState>(navigator.onLine ? 'connecting' : 'offline')
-  const [approving, setApproving] = useState(false)
-  const [rejecting, setRejecting] = useState(false)
-  const [approvalError, setApprovalError] = useState('')
-  const [rejectionError, setRejectionError] = useState('')
+  const [busyItemId, setBusyItemId] = useState<string | null>(null)
+  const [busyGrantId, setBusyGrantId] = useState<string | null>(null)
+  const [cardErrors, setCardErrors] = useState<Record<string, string>>({})
+  const [grantError, setGrantError] = useState('')
+  const [highlightedId, setHighlightedId] = useState<string | null>(null)
   const [signingOut, setSigningOut] = useState(false)
   const [signOutError, setSignOutError] = useState('')
   const [notificationStatus, setNotificationStatus] = useState<'idle' | 'enabling' | 'enabled' | 'disabling' | 'unsupported'>(() => {
     if (!('Notification' in window) || !('serviceWorker' in navigator) || !('PushManager' in window)) return 'unsupported'
-    return Notification.permission === 'granted' ? 'idle' : 'idle'
+    return 'idle'
   })
   const [notice, setNotice] = useState('')
   const linkedRequestId = useRef(new URLSearchParams(window.location.search).get('request'))
+  // Set by the stream effect. A fresh stream starts with a full snapshot, so restarting doubles as a refresh.
+  const stream = useRef({ restart: () => {}, stop: () => {} })
 
-  const loadRequests = useCallback(async (background = false) => {
-    if (background) setRefreshing(true)
-    else setLoading(true)
-    setError('')
-    try {
-      const next = await api.getRequests()
-      setRequests(next)
-    } catch (caught) {
-      if (isSessionLost(caught)) {
-        onSignedOut()
-        return
+  function restartStream(background = false) {
+    if (background && navigator.onLine) setRefreshing(true)
+    stream.current.restart()
+  }
+
+  useEffect(() => {
+    let controller: AbortController | null = null
+    let retryTimeout: number | null = null
+    let watchdog: number | null = null
+    let lastMessageAt = Date.now()
+    let failures = 0
+    let receivedSnapshot = false
+    let disposed = false
+
+    function stop() {
+      if (retryTimeout !== null) {
+        window.clearTimeout(retryTimeout)
+        retryTimeout = null
       }
-      setError(getErrorMessage(caught, 'Unable to load approval requests.'))
-    } finally {
+      clearWatchdog()
+      controller?.abort()
+      controller = null
+    }
+
+    function clearWatchdog() {
+      if (watchdog !== null) {
+        window.clearTimeout(watchdog)
+        watchdog = null
+      }
+    }
+
+    function armWatchdog() {
+      lastMessageAt = Date.now()
+      clearWatchdog()
+      watchdog = window.setTimeout(() => void connect(true), STREAM_IDLE_TIMEOUT_MS)
+    }
+
+    function applySnapshot(snapshot: DashboardSnapshot) {
+      receivedSnapshot = true
+      setPending(snapshot.pendingRequests)
+      setHistory(snapshot.decidedRequests)
+      setGrants(snapshot.activeGrants)
+      setError('')
       setLoading(false)
       setRefreshing(false)
     }
-  }, [onSignedOut])
 
-  useEffect(() => {
-    const timeout = window.setTimeout(() => void loadRequests(), 0)
-    return () => window.clearTimeout(timeout)
-  }, [loadRequests])
-
-  useEffect(() => {
-    let source: EventSource | null = null
-    let retryTimeout: number | null = null
-    let disposed = false
-
-    function connect(reconnecting = false) {
+    async function connect(reconnecting: boolean) {
       if (disposed || !navigator.onLine) return
-      if (retryTimeout !== null) {
-        window.clearTimeout(retryTimeout)
-        retryTimeout = null
-      }
-      source?.close()
+      stop()
+      const current = new AbortController()
+      controller = current
       setConnection(reconnecting ? 'reconnecting' : 'connecting')
-      const nextSource = new EventSource('/api/v1/events')
-      source = nextSource
-      nextSource.onopen = () => setConnection('connected')
-      nextSource.onerror = () => {
-        if (source !== nextSource) return
-        nextSource.close()
-        setConnection(navigator.onLine ? 'reconnecting' : 'offline')
-        if (navigator.onLine) {
-          retryTimeout = window.setTimeout(() => connect(true), 1_000)
+      armWatchdog()
+      try {
+        await forEachEvent(client.watchEvents({}, { signal: current.signal }), (response) => {
+          // Heartbeats only prove the stream is healthy.
+          armWatchdog()
+          failures = 0
+          setConnection('connected')
+          if (response.event.case === 'snapshot') applySnapshot(response.event.value)
+        })
+      } catch (caught) {
+        if (current.signal.aborted) return
+        if (isSessionLost(caught)) {
+          disposed = true
+          stop()
+          onSignedOut()
+          return
         }
+        if (!receivedSnapshot) setError(getErrorMessage(caught, 'Unable to load access requests.'))
       }
-
-      const handleUpdate = (event: MessageEvent<string>) => {
-        try {
-          const payload: unknown = JSON.parse(event.data)
-          if (isApprovalRequest(payload)) {
-            setRequests((current) => {
-              const exists = current.some((request) => request.id === payload.id)
-              return exists ? current.map((request) => request.id === payload.id ? payload : request) : [payload, ...current]
-            })
-            return
-          }
-        } catch {
-          // Refetch if the event only contains an ID or an unexpected payload.
-        }
-        void loadRequests(true)
-      }
-      nextSource.addEventListener('new-request', handleUpdate)
-      nextSource.addEventListener('status', handleUpdate)
+      if (disposed || current.signal.aborted) return
+      // A stream that ends cleanly is a drop too; the next snapshot is the truth.
+      clearWatchdog()
+      controller = null
+      setRefreshing(false)
+      setConnection(navigator.onLine ? 'reconnecting' : 'offline')
+      if (!navigator.onLine) return
+      const delay = Math.min(RECONNECT_BASE_DELAY_MS * 2 ** failures, RECONNECT_MAX_DELAY_MS)
+      failures += 1
+      retryTimeout = window.setTimeout(() => void connect(true), delay)
     }
 
     function onOnline() {
-      connect(true)
+      failures = 0
+      void connect(true)
     }
     function onOffline() {
       setConnection('offline')
-      source?.close()
-      if (retryTimeout !== null) {
-        window.clearTimeout(retryTimeout)
-        retryTimeout = null
-      }
+      stop()
+    }
+    function onVisibilityChange() {
+      if (document.visibilityState === 'visible' && Date.now() - lastMessageAt >= STREAM_STALE_MS) void connect(true)
     }
 
-    connect()
+    stream.current = {
+      restart: () => {
+        failures = 0
+        receivedSnapshot = false
+        void connect(true)
+      },
+      stop: () => {
+        disposed = true
+        stop()
+      },
+    }
+    void connect(false)
     window.addEventListener('online', onOnline)
     window.addEventListener('offline', onOffline)
+    document.addEventListener('visibilitychange', onVisibilityChange)
     return () => {
       disposed = true
-      source?.close()
-      if (retryTimeout !== null) window.clearTimeout(retryTimeout)
+      stop()
       window.removeEventListener('online', onOnline)
       window.removeEventListener('offline', onOffline)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
     }
-  }, [loadRequests])
+  }, [client, onSignedOut])
 
   useEffect(() => {
     if (!notice) return
@@ -545,84 +573,73 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
     return () => window.clearTimeout(timeout)
   }, [notice])
 
-  const counts = Object.fromEntries(['pending', 'approved', 'rejected', 'expired'].map((status) => [status, requests.filter((request) => request.status === status).length]))
-  const visibleRequests = useMemo(() => requests.filter((request) => request.status === filter), [filter, requests])
-  const selected = requests.find((request) => request.id === selectedId) ?? null
-  const operatorName = identityName(session.identity)
-
   useEffect(() => {
     if (loading || !linkedRequestId.current) return
-    const linkedRequest = requests.find((request) => request.id === linkedRequestId.current)
-    if (!linkedRequest) return
-    setFilter(linkedRequest.status)
-    setSelectedId(linkedRequest.id)
+    const id = linkedRequestId.current
+    const inPending = pending.some((request) => request.id === id)
+    const inHistory = history.some((request) => request.id === id)
+    if (!inPending && !inHistory) return
+    setTab(inPending ? 'pending' : 'history')
+    setHighlightedId(id)
     linkedRequestId.current = null
-  }, [loading, requests])
+  }, [loading, pending, history])
 
-  useEffect(() => {
-    if (selectedId) {
-      hadSelectedDetailRef.current = true
+  const operatorName = identityName(session.identity)
+  const pendingItemCount = useMemo(() => pending.reduce((count, request) => count + request.items.filter((item) => item.state === ItemState.PENDING).length, 0), [pending])
+
+  async function decide(request: GrantRequest, item: PermissionItem, decision: Decision, ttlText?: string) {
+    if (busyItemId) return
+    const ttl = ttlText ? parseDuration(ttlText) : undefined
+    if (ttlText && !ttl) {
+      setCardErrors((current) => ({ ...current, [request.id]: `Enter the TTL as a duration such as 30m or 2h, not "${ttlText}".` }))
       return
     }
-    if (hadSelectedDetailRef.current) {
-      hadSelectedDetailRef.current = false
-      const trigger = detailTriggerRef.current
-      if (trigger && trigger.isConnected) {
-        trigger.focus()
-      } else {
-        document.querySelector<HTMLElement>('[data-review-trigger]')?.focus()
-      }
-    }
-  }, [selectedId])
-
-  async function approve(targetRequest: ApprovalRequest) {
-    if (approving || rejecting) return
-    setApproving(true)
-    setApprovalError('')
+    setBusyItemId(item.id)
+    setCardErrors((current) => ({ ...current, [request.id]: '' }))
     try {
-      const refreshed = await api.approveRequest(targetRequest.id, session.csrfToken)
-      setRequests((current) => current.map((request) => request.id === refreshed.id ? refreshed : request))
-      // The action button is replaced by status, so focus cannot return to it.
-      setSelectedId(refreshed.id)
-      setNotice('Request approved successfully.')
+      const { grantRequest: updated } = await client.decideItems({
+        grantRequestId: request.id,
+        decisions: [{ itemId: item.id, decision, ttl }],
+      })
+      // The next snapshot also covers joined items in other requests and new grants.
+      if (updated) setPending((current) => current.map((candidate) => candidate.id === updated.id ? updated : candidate))
+      setNotice(decision === Decision.APPROVE ? `Granted ${item.path}.` : `Rejected ${item.path}.`)
     } catch (caught) {
       if (isSessionLost(caught)) {
         onSignedOut()
         return
       }
-      if (caught instanceof ApiError && caught.status === 409) {
-        await loadRequests(true)
-        setNotice(caught.message)
+      if (errorReason(caught) === 'ITEM_NOT_PENDING') {
+        setNotice(getErrorMessage(caught, 'That item was already decided.'))
         return
       }
-      setApprovalError(getErrorMessage(caught, 'Approval failed. Try again.'))
+      setCardErrors((current) => ({ ...current, [request.id]: getErrorMessage(caught, 'Decision failed. Try again.') }))
     } finally {
-      setApproving(false)
+      setBusyItemId(null)
     }
   }
 
-  async function reject(targetRequest: ApprovalRequest) {
-    if (approving || rejecting) return
-    setRejecting(true)
-    setRejectionError('')
+  async function revoke(grant: Grant) {
+    if (busyGrantId) return
+    setBusyGrantId(grant.id)
+    setGrantError('')
     try {
-      const refreshed = await api.rejectRequest(targetRequest.id, session.csrfToken)
-      setRequests((current) => current.map((request) => request.id === refreshed.id ? refreshed : request))
-      setSelectedId(refreshed.id)
-      setNotice('Request rejected and revoked.')
+      await client.revokeGrant({ grantId: grant.id })
+      setGrants((current) => current.filter((candidate) => candidate.id !== grant.id))
+      setNotice(`Revoked ${grant.path}.`)
     } catch (caught) {
       if (isSessionLost(caught)) {
         onSignedOut()
         return
       }
-      if (caught instanceof ApiError && caught.status === 409) {
-        await loadRequests(true)
-        setNotice(caught.message)
+      if (errorReason(caught) === 'GRANT_NOT_ACTIVE') {
+        setGrants((current) => current.filter((candidate) => candidate.id !== grant.id))
+        setNotice(getErrorMessage(caught, 'That grant is no longer active.'))
         return
       }
-      setRejectionError(getErrorMessage(caught, 'Rejection failed. Try again.'))
+      setGrantError(getErrorMessage(caught, 'Revocation failed. Try again.'))
     } finally {
-      setRejecting(false)
+      setBusyGrantId(null)
     }
   }
 
@@ -631,10 +648,12 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
     setSigningOut(true)
     setSignOutError('')
     try {
-      await api.deleteSession(session.csrfToken)
+      await client.logout({})
+      stream.current.stop()
       onSignedOut()
     } catch (caught) {
       if (isSessionLost(caught)) {
+        stream.current.stop()
         onSignedOut()
         return
       }
@@ -651,9 +670,10 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
       const permission = await Notification.requestPermission()
       if (permission !== 'granted') throw new Error('Notification permission was not granted.')
       const [{ publicKey }, registration] = await Promise.all([
-        api.getPushPublicKey(),
+        client.getPushPublicKey({}),
         navigator.serviceWorker.ready,
       ])
+      if (!publicKey) throw new Error('Push notifications are not configured on this server.')
       let subscription = await registration.pushManager.getSubscription()
       if (!subscription) {
         subscription = await registration.pushManager.subscribe({
@@ -665,15 +685,18 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
       if (!serialized.endpoint || !serialized.keys?.p256dh || !serialized.keys.auth) {
         throw new Error('The browser returned an incomplete push subscription.')
       }
-      await api.subscribeToPush({
+      await client.registerPushSubscription({
         endpoint: serialized.endpoint,
-        keys: { p256dh: serialized.keys.p256dh, auth: serialized.keys.auth },
-      }, session.csrfToken)
+        p256dh: serialized.keys.p256dh,
+        auth: serialized.keys.auth,
+      })
       setNotificationStatus('enabled')
       setNotice('Notifications enabled. Alerts never include request details.')
     } catch (caught) {
       setNotificationStatus('idle')
-      setNotice(pushEnrollmentErrorMessage(caught, navigator.userAgent))
+      setNotice(caught instanceof ConnectError
+        ? getErrorMessage(caught, 'Unable to enable notifications.')
+        : pushEnrollmentErrorMessage(caught, navigator.userAgent))
     }
   }
 
@@ -684,7 +707,7 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
       const registration = await navigator.serviceWorker.ready
       const subscription = await registration.pushManager.getSubscription()
       if (subscription) {
-        await api.unsubscribeFromPush(subscription.endpoint, session.csrfToken)
+        await client.deletePushSubscription({ endpoint: subscription.endpoint })
         await subscription.unsubscribe()
       }
       setNotificationStatus('idle')
@@ -694,6 +717,13 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
       setNotice(getErrorMessage(caught, 'Unable to disable notifications.'))
     }
   }
+
+  const tabs: { id: DashboardTab; label: string; count: number }[] = [
+    { id: 'pending', label: 'Pending', count: pendingItemCount },
+    { id: 'history', label: 'History', count: history.length },
+    { id: 'grants', label: 'Active grants', count: grants.length },
+  ]
+  const visibleCount = tab === 'pending' ? pending.length : tab === 'history' ? history.length : grants.length
 
   return (
     <>
@@ -725,21 +755,21 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
         </div>
       </header>
 
-      <main className="mx-auto max-w-[1600px] px-4 py-7 sm:px-6 sm:py-9 lg:px-8">
+      <main className="mx-auto max-w-[1100px] px-4 py-7 sm:px-6 sm:py-9 lg:px-8">
         <div className="mb-7 flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <p className="eyebrow text-zinc-500"><span className="size-1.5 rounded-full bg-brand-dark" />Control group queue</p>
-            <h1 className="mt-3 text-3xl font-semibold tracking-[-0.04em] text-zinc-950 sm:text-4xl">Approval requests</h1>
-            <p className="mt-2 text-sm leading-6 text-zinc-500">Review the context before authorizing privileged operations.</p>
+            <p className="eyebrow text-zinc-500"><span className="size-1.5 rounded-full bg-brand-dark" />Agent session grants</p>
+            <h1 className="mt-3 text-3xl font-semibold tracking-[-0.04em] text-zinc-950 sm:text-4xl">Access requests</h1>
+            <p className="mt-2 text-sm leading-6 text-zinc-500">Decide each permission an agent session asks for. Approved grants expire on their own.</p>
           </div>
-          <button type="button" onClick={() => void loadRequests(true)} disabled={refreshing} className="secondary-button self-start sm:self-auto">
+          <button type="button" onClick={() => restartStream(true)} disabled={refreshing} className="secondary-button self-start sm:self-auto">
             <RefreshIcon className={`size-4 ${refreshing ? 'animate-spin' : ''}`} />Refresh
           </button>
         </div>
 
         {error && (
           <div role="alert" className="mb-5 flex items-center justify-between gap-4 rounded-sm border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
-            <span>{error}</span><button type="button" onClick={() => void loadRequests()} className="font-semibold underline underline-offset-2">Retry</button>
+            <span>{error}</span><button type="button" onClick={() => restartStream()} className="font-semibold underline underline-offset-2">Retry</button>
           </div>
         )}
 
@@ -749,44 +779,43 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
           </div>
         )}
 
-        <div className={`dashboard-shell ${selected ? 'has-detail' : ''}`}>
-          <section className={`request-list-panel ${selected ? 'hidden lg:block' : ''}`} aria-label="Approval request queue">
-            <div className="list-toolbar">
-              <div className="filter-tabs" role="group" aria-label="Filter requests">
-                <button type="button" aria-pressed={filter === 'pending'} onClick={() => setFilter('pending')} className={filter === 'pending' ? 'active' : ''}>
-                  Pending <span>{counts.pending}</span>
+        <section className="dashboard-shell" aria-label="Access requests">
+          <div className="list-toolbar">
+            <div className="filter-tabs" role="group" aria-label="Views">
+              {tabs.map((entry) => (
+                <button key={entry.id} type="button" aria-pressed={tab === entry.id} onClick={() => setTab(entry.id)} className={tab === entry.id ? 'active' : ''}>
+                  {entry.label} <span>{entry.count}</span>
                 </button>
-                <button type="button" aria-pressed={filter === 'approved'} onClick={() => setFilter('approved')} className={filter === 'approved' ? 'active' : ''}>
-                  Approved <span>{counts.approved}</span>
-                </button>
-                <button type="button" aria-pressed={filter === 'rejected'} onClick={() => setFilter('rejected')} className={filter === 'rejected' ? 'active' : ''}>Rejected <span>{counts.rejected}</span></button>
-                <button type="button" aria-pressed={filter === 'expired'} onClick={() => setFilter('expired')} className={filter === 'expired' ? 'active' : ''}>Expired <span>{counts.expired}</span></button>
-              </div>
-              <p className="hidden text-xs text-zinc-400 sm:block">{visibleRequests.length} {visibleRequests.length === 1 ? 'request' : 'requests'}</p>
+              ))}
             </div>
+            <p className="hidden text-xs text-zinc-400 sm:block">{visibleCount} {tab === 'grants' ? (visibleCount === 1 ? 'grant' : 'grants') : (visibleCount === 1 ? 'request' : 'requests')}</p>
+          </div>
 
-            {loading ? (
-              <div className="space-y-px" aria-label="Loading requests" role="status">
-                {[0, 1, 2].map((item) => <div className="request-skeleton" key={item}><div className="size-10 animate-pulse rounded-sm bg-zinc-100" /><div className="flex-1 space-y-3"><div className="h-3 w-24 animate-pulse rounded bg-zinc-100" /><div className="h-3 w-2/3 animate-pulse rounded bg-zinc-100" /><div className="h-2.5 w-1/2 animate-pulse rounded bg-zinc-100" /></div></div>)}
-              </div>
-            ) : visibleRequests.length ? (
-              <div className="divide-y divide-zinc-100">
-                {visibleRequests.map((request) => <RequestRow key={request.id} request={request} selected={request.id === selectedId} onSelect={(trigger) => { detailTriggerRef.current = trigger; setSelectedId(request.id) }} />)}
-              </div>
-            ) : <EmptyState filter={filter} />}
-          </section>
+          {grantError && tab === 'grants' && <div role="alert" className="mx-4 mt-3 rounded-sm border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-700 sm:mx-6">{grantError}</div>}
 
-          {selected && <RequestDetail key={`${selected.id}-${selected.status}`} request={selected} submitting={approving || rejecting} actionError={approvalError || rejectionError} onBack={() => setSelectedId(null)} onApprove={() => { setApprovalError(''); setRejectionError(''); void approve(selected) }} onReject={() => { setApprovalError(''); setRejectionError(''); void reject(selected) }} />}
-          {!selected && (
-            <aside className="detail-placeholder hidden lg:grid">
-              <div className="max-w-xs text-center">
-                <div className="mx-auto grid size-12 place-items-center rounded-full border border-zinc-200 bg-white text-zinc-400"><ShieldIcon className="size-5" /></div>
-                <h2 className="mt-4 text-sm font-semibold text-zinc-800">Select a request to review</h2>
-                <p className="mt-2 text-xs leading-5 text-zinc-500">Inspect the operation, identity, payload, and required authorizations before taking action.</p>
-              </div>
-            </aside>
+          {loading ? (
+            <div className="space-y-px" aria-label="Loading requests" role="status">
+              {[0, 1, 2].map((item) => <div className="request-skeleton" key={item}><div className="size-10 animate-pulse rounded-sm bg-zinc-100" /><div className="flex-1 space-y-3"><div className="h-3 w-24 animate-pulse rounded bg-zinc-100" /><div className="h-3 w-2/3 animate-pulse rounded bg-zinc-100" /><div className="h-2.5 w-1/2 animate-pulse rounded bg-zinc-100" /></div></div>)}
+            </div>
+          ) : visibleCount === 0 ? <EmptyState tab={tab} /> : tab === 'grants' ? (
+            <ul className="divide-y divide-zinc-100" aria-label="Active grants">
+              {grants.map((grant) => <GrantRow key={grant.id} grant={grant} busy={busyGrantId === grant.id} disabled={busyGrantId !== null} onRevoke={(target) => void revoke(target)} />)}
+            </ul>
+          ) : (
+            <div className="request-card-list">
+              {(tab === 'pending' ? pending : history).map((request) => (
+                <RequestCard
+                  key={request.id}
+                  request={request}
+                  highlighted={request.id === highlightedId}
+                  busyItemId={busyItemId}
+                  error={cardErrors[request.id] ?? ''}
+                  onDecide={tab === 'pending' ? (target, item, decision, ttl) => void decide(target, item, decision, ttl) : undefined}
+                />
+              ))}
+            </div>
           )}
-        </div>
+        </section>
       </main>
 
         {notice && <div className="toast" role="status" aria-live="polite"><CheckIcon className="size-4 shrink-0 text-brand-dark" />{notice}</div>}
@@ -795,18 +824,44 @@ function Dashboard({ session, onSignedOut }: { session: Session; onSignedOut: ()
   )
 }
 
-export default function App() {
+export default function App({ client = defaultClient }: { client?: ApproverClient }) {
   const [auth, setAuth] = useState<AuthState>({ status: 'checking' })
+
+  const restoreSession = useCallback((isActive: () => boolean) => {
+    // Without a session cookie this fails and falls through to sign in.
+    client.getSession({})
+      .then((response) => {
+        if (!isActive()) return
+        setAuth({ status: 'signed-in', session: { identity: response.identity } })
+      })
+      .catch((caught: unknown) => {
+        if (!isActive()) return
+        // An unreachable server says nothing about the cookie, which may still
+        // hold a valid session; signing in again would orphan it.
+        if (!isSessionLost(caught)) {
+          setAuth({ status: 'unavailable', message: getErrorMessage(caught, 'Unable to check your session.') })
+          return
+        }
+        setAuth({ status: 'signed-out' })
+      })
+  }, [client])
 
   useEffect(() => {
     let active = true
-    api.getSession()
-      .then((session) => { if (active) setAuth({ status: 'signed-in', session }) })
-      .catch(() => { if (active) setAuth({ status: 'signed-out' }) })
+    restoreSession(() => active)
     return () => { active = false }
-  }, [])
+  }, [restoreSession])
+
+  const retryRestore = useCallback(() => {
+    setAuth({ status: 'checking' })
+    restoreSession(() => true)
+  }, [restoreSession])
+
+  const signedIn = useCallback((session: Session) => setAuth({ status: 'signed-in', session }), [])
+  const signedOut = useCallback(() => setAuth({ status: 'signed-out' }), [])
 
   if (auth.status === 'checking') return <LoadingScreen />
-  if (auth.status === 'signed-out') return <Login onAuthenticated={(session) => setAuth({ status: 'signed-in', session })} />
-  return <Dashboard session={auth.session} onSignedOut={() => setAuth({ status: 'signed-out' })} />
+  if (auth.status === 'unavailable') return <SessionUnavailable message={auth.message} onRetry={retryRestore} />
+  if (auth.status === 'signed-out') return <Login client={client} onAuthenticated={signedIn} />
+  return <Dashboard client={client} session={auth.session} onSignedOut={signedOut} />
 }

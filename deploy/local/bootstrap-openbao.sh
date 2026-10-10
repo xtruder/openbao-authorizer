@@ -9,8 +9,6 @@ umask 077
 : "${APP_CONFIG_FILE:?APP_CONFIG_FILE is required}"
 : "${APP_ENCRYPTION_KEY:?APP_ENCRYPTION_KEY is required}"
 : "${APPROVER_PASSWORD:?APPROVER_PASSWORD is required}"
-: "${REQUESTER_PASSWORD:?REQUESTER_PASSWORD is required}"
-: "${AGENT_PASSWORD:?AGENT_PASSWORD is required}"
 : "${PUBLIC_ORIGIN:?PUBLIC_ORIGIN is required}"
 : "${PLUGIN_DIRECTORY:?PLUGIN_DIRECTORY is required}"
 : "${GITHUB_PLUGIN_SHA256:?GITHUB_PLUGIN_SHA256 is required}"
@@ -29,15 +27,29 @@ done
 if ! "${OPENBAO_BIN}" auth list -format=json | jq -e 'has("userpass/")' >/dev/null; then
   "${OPENBAO_BIN}" auth enable userpass >/dev/null
 fi
+if ! "${OPENBAO_BIN}" auth list -format=json | jq -e 'has("approle/")' >/dev/null; then
+  "${OPENBAO_BIN}" auth enable approle >/dev/null
+fi
 if ! "${OPENBAO_BIN}" secrets list -format=json | jq -e 'has("kv/")' >/dev/null; then
   "${OPENBAO_BIN}" secrets enable -path=kv -version=2 kv >/dev/null
 fi
 
-"${OPENBAO_BIN}" policy write openbao-authorizer-scanner "${PROJECT_DIR}/config/scanner-policy.hcl" >/dev/null
-"${OPENBAO_BIN}" policy write openbao-authorizer-github-context "${PROJECT_DIR}/deploy/local/github-context-reader-policy.hcl" >/dev/null
+"${OPENBAO_BIN}" policy write openbao-authorizer "${PROJECT_DIR}/config/authorizer-policy.hcl" >/dev/null
 "${OPENBAO_BIN}" policy write openbao-authorizer-approver "${PROJECT_DIR}/config/approver-policy.hcl" >/dev/null
-"${OPENBAO_BIN}" policy write openbao-authorizer-requester "${PROJECT_DIR}/deploy/local/requester-policy.hcl" >/dev/null
-"${OPENBAO_BIN}" policy write openbao-authorizer-github-agent "${PROJECT_DIR}/deploy/local/github-agent-policy.hcl" >/dev/null
+"${OPENBAO_BIN}" policy write opencode-session "${PROJECT_DIR}/deploy/local/opencode-session-policy.hcl" >/dev/null
+"${OPENBAO_BIN}" policy write opencode-minter "${PROJECT_DIR}/deploy/local/opencode-minter-policy.hcl" >/dev/null
+
+# Session Tokens: one entity alias, and so one Session Identity, per agent
+# session. The authorizer accepts only tokens created through this role.
+"${OPENBAO_BIN}" write auth/token/roles/opencode-session \
+  allowed_policies=opencode-session orphan=true renewable=true token_period=24h \
+  allowed_entity_aliases='opencode-session-*' >/dev/null
+# The opencode plugin logs in with this AppRole only to mint Session Tokens.
+"${OPENBAO_BIN}" write auth/approle/role/opencode-minter \
+  token_policies=opencode-minter token_ttl=15m token_max_ttl=1h >/dev/null
+
+# Example secrets that the grantable rules in app.hcl let agents request.
+"${OPENBAO_BIN}" kv put -mount=kv opencode/example message="hello from OpenBao" >/dev/null
 
 plugin_binary="${PLUGIN_DIRECTORY}/openbao-plugin-secrets-github"
 actual_plugin_sha="$(sha256sum "${plugin_binary}" | cut -d' ' -f1)"
@@ -55,30 +67,14 @@ fi
 
 "${OPENBAO_BIN}" write auth/userpass/users/approver \
   password="${APPROVER_PASSWORD}" policies=openbao-authorizer-approver token_period=24h >/dev/null
-"${OPENBAO_BIN}" write auth/userpass/users/requester \
-  password="${REQUESTER_PASSWORD}" policies=openbao-authorizer-requester >/dev/null
-"${OPENBAO_BIN}" write auth/userpass/users/agent \
-  password="${AGENT_PASSWORD}" policies=openbao-authorizer-github-agent >/dev/null
 
 approver_login="$("${OPENBAO_BIN}" write -format=json auth/userpass/login/approver password="${APPROVER_PASSWORD}")"
-requester_login="$("${OPENBAO_BIN}" write -format=json auth/userpass/login/requester password="${REQUESTER_PASSWORD}")"
-agent_login="$("${OPENBAO_BIN}" write -format=json auth/userpass/login/agent password="${AGENT_PASSWORD}")"
 approver_entity="$(jq -er '.auth.entity_id' <<<"${approver_login}")"
-requester_entity="$(jq -er '.auth.entity_id' <<<"${requester_login}")"
-agent_entity="$(jq -er '.auth.entity_id' <<<"${agent_login}")"
-
 "${OPENBAO_BIN}" write identity/group \
   name=local-approvers type=internal \
   member_entity_ids="${approver_entity}" \
   policies=openbao-authorizer-approver >/dev/null
-"${OPENBAO_BIN}" write identity/group \
-  name=local-requesters type=internal \
-  member_entity_ids="${requester_entity}" \
-  policies=openbao-authorizer-requester >/dev/null
-"${OPENBAO_BIN}" write identity/group \
-  name=local-agents type=internal \
-  member_entity_ids="${agent_entity}" \
-  policies=openbao-authorizer-github-agent >/dev/null
+"${OPENBAO_BIN}" token revoke "$(jq -er '.auth.client_token' <<<"${approver_login}")" >/dev/null
 
 if [[ -n "${GITHUB_APP_ID:-}" || -e "${GITHUB_APP_PRIVATE_KEY_FILE}" ]]; then
   : "${GITHUB_APP_ID:?GITHUB_APP_ID is required when GitHub App setup is enabled}"
@@ -106,15 +102,22 @@ if [[ -n "${GITHUB_APP_ID:-}" || -e "${GITHUB_APP_PRIVATE_KEY_FILE}" ]]; then
   fi
 fi
 
-scanner_response="$("${OPENBAO_BIN}" write -format=json auth/token/create-orphan \
-  policies=openbao-authorizer-scanner,openbao-authorizer-github-context no_default_policy=true ttl=24h renewable=false)"
-scanner_token="$(jq -er '.auth.client_token' <<<"${scanner_response}")"
+# The authorizer does not renew its token; the dev server reprovisions it on
+# every restart, well within this TTL.
+authorizer_response="$("${OPENBAO_BIN}" write -format=json auth/token/create-orphan \
+  policies=openbao-authorizer no_default_policy=true ttl=720h renewable=false)"
+authorizer_token="$(jq -er '.auth.client_token' <<<"${authorizer_response}")"
+minter_role_id="$("${OPENBAO_BIN}" read -format=json auth/approle/role/opencode-minter/role-id | jq -er '.data.role_id')"
+minter_secret_id="$("${OPENBAO_BIN}" write -format=json -f auth/approle/role/opencode-minter/secret-id | jq -er '.data.secret_id')"
 
 config_directory="$(dirname "${APP_CONFIG_FILE}")"
 install -d -m 0700 "${config_directory}"
 printf '%s\n' "${APP_ENCRYPTION_KEY}" >"${config_directory}/encryption-key"
-printf '%s\n' "${scanner_token}" >"${config_directory}/scanner-token"
-chmod 0600 "${config_directory}/encryption-key" "${config_directory}/scanner-token"
+printf '%s\n' "${authorizer_token}" >"${config_directory}/authorizer-token"
+printf '%s\n' "${minter_role_id}" >"${config_directory}/opencode-minter-role-id"
+printf '%s\n' "${minter_secret_id}" >"${config_directory}/opencode-minter-secret-id"
+chmod 0600 "${config_directory}/encryption-key" "${config_directory}/authorizer-token" \
+  "${config_directory}/opencode-minter-role-id" "${config_directory}/opencode-minter-secret-id"
 
 temporary="${APP_CONFIG_FILE}.tmp.$$"
 cat >"${temporary}" <<EOF
@@ -129,22 +132,29 @@ storage {
   encryption_key_file = "encryption-key"
 }
 openbao {
-  address            = $(jq -Rn --arg value "${BAO_ADDR}" '$value')
-  namespace          = ""
-  ca_file            = ""
-  scanner_token_file = "scanner-token"
-  approver_policy    = "openbao-authorizer-approver"
+  address               = $(jq -Rn --arg value "${BAO_ADDR}" '$value')
+  authorizer_token_file = "authorizer-token"
+  approver_policy       = "openbao-authorizer-approver"
+  session_token_role    = "opencode-session"
 }
-scanner {
-  interval    = "5s"
-  concurrency = 8
+grants {
+  default_ttl = "8h"
+  pending_ttl = "24h"
 }
-requests {
-  expose_data = false
+grantable "local-kv" {
+  path         = "kv/data/opencode/*"
+  capabilities = ["read"]
+  max_ttl      = "24h"
 }
-approval_context "github-token" {
-  match_path = "github/token/{name}"
-  read_path  = "github/permissionset/{name}"
+grantable "local-kv-metadata" {
+  path         = "kv/metadata/opencode/*"
+  capabilities = ["read", "list"]
+  max_ttl      = "24h"
+}
+grantable "github-token" {
+  path         = "github/token/project-*"
+  capabilities = ["read"]
+  max_ttl      = "1h"
 }
 EOF
 if [[ -n "${VAPID_PUBLIC_KEY:-}" || -n "${VAPID_PRIVATE_KEY:-}" || -n "${VAPID_SUBJECT:-}" ]]; then
@@ -166,8 +176,3 @@ EOF
 fi
 chmod 0600 "${temporary}"
 mv -f "${temporary}" "${APP_CONFIG_FILE}"
-
-printf '%s\n' "${approver_login}" | jq -er '.auth.client_token' >"${config_directory}/approver-token"
-printf '%s\n' "${requester_login}" | jq -er '.auth.client_token' >"${config_directory}/requester-token"
-printf '%s\n' "${agent_login}" | jq -er '.auth.client_token' >"${config_directory}/agent-token"
-chmod 0600 "${config_directory}/approver-token" "${config_directory}/requester-token" "${config_directory}/agent-token"
