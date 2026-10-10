@@ -76,6 +76,9 @@ export function sessionEnv(options: OpenBaoOptions, token?: string): Record<stri
   const env: Record<string, string> = {
     BAO_ADDR: options.address,
     VAULT_ADDR: options.address,
+    // bao-cred would otherwise fall back to the human's `bao login` token file
+    // when a command gets no Session Token.
+    BAO_CRED_NO_TOKEN_FILE: "1",
   }
   if (token) for (const name of TOKEN_VARS) env[name] = token
   if (options.authorizerUrl) env.OPENBAO_AUTHORIZER_URL = options.authorizerUrl

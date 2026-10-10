@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -198,9 +200,27 @@ func TestRequesterTokenPriority(t *testing.T) {
 		t.Fatalf("VAULT_TOKEN: got %q, %v", got, err)
 	}
 
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	t.Setenv("VAULT_TOKEN", "")
-	if _, err := requesterToken(); err == nil || !strings.Contains(err.Error(), "BAO_TOKEN") {
+	t.Setenv("BAO_CRED_NO_TOKEN_FILE", "")
+	if _, err := requesterToken(); err == nil || !strings.Contains(err.Error(), "bao login") {
 		t.Fatalf("missing token error = %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(home, ".vault-token"), []byte("file-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, err := requesterToken(); err != nil || got != "file-token" {
+		t.Fatalf("token file: got %q, %v", got, err)
+	}
+
+	// Inside opencode the plugin disables the file, so a command without its
+	// Session Token never falls back to the human's token.
+	t.Setenv("BAO_CRED_NO_TOKEN_FILE", "1")
+	if got, err := requesterToken(); err == nil || got != "" {
+		t.Fatalf("disabled token file: got %q, %v", got, err)
 	}
 }
 

@@ -200,7 +200,7 @@ mints tokens. It has three commands: `read`, `request`, and `grants`; run
 
 | Setting | Source |
 |---|---|
-| Token | `BAO_TOKEN`, then `VAULT_TOKEN`; bao-cred fails if neither is set |
+| Token | `BAO_TOKEN`, then `VAULT_TOKEN`, then `~/.vault-token` as written by `bao login` (only the default token helper; skipped when `BAO_CRED_NO_TOKEN_FILE` is set, which the opencode plugin does) |
 | OpenBao client | Standard client variables such as `BAO_ADDR`, `BAO_NAMESPACE`, and `BAO_CACERT` |
 | Authorizer URL | `--authorizer`, then `OPENBAO_AUTHORIZER_URL`; needed only for `request`, `grants`, and `read --reason`. Give the bare origin; bao-cred calls the `GrantService` RPCs under `/api`. It must be HTTPS unless the host is loopback (`localhost`, `127.0.0.0/8`, `::1`), because the token is sent with every call; redirects to plain HTTP are refused |
 | Authorizer TLS | System roots plus any CA from `BAO_CACERT`, `BAO_CACERT_BYTES`, or `BAO_CAPATH`; `BAO_SKIP_VERIFY` is ignored for the authorizer |

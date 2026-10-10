@@ -18,3 +18,4 @@ A getter that can't resolve the session returns `undefined`, so the command runs
 
 - **The plugin relies on undocumented ordering in opencode.** If that ordering changes, commands get no token, never a wrong one. The live test in `integrations/opencode` catches this. If opencode adds a session ID to `create.before`, the getters can be replaced with plain assignments.
 - **Only agent `shell` tool commands get a token.** A user's `!command` and interactive terminals don't.
+- **bao-cred's token-file fallback is off in opencode.** Outside opencode, bao-cred falls back to the `~/.vault-token` that `bao login` writes. The plugin sets `BAO_CRED_NO_TOKEN_FILE=1` on every command, so a command without its Session Token still gets no token rather than the human's.

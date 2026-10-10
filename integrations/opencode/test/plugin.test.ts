@@ -33,6 +33,7 @@ describe("shell tool environment", () => {
     expect(env.BAO_ADDR).toBe(bao.address)
     expect(env.VAULT_ADDR).toBe(bao.address)
     expect(env.OPENBAO_AUTHORIZER_URL).toBe("https://authorizer.example.com")
+    expect(env.BAO_CRED_NO_TOKEN_FILE).toBe("1")
     expect(env.BAO_NAMESPACE).toBeUndefined()
     expect(state.alias).toBe("opencode-session-ses_root")
     expect(state.meta).toEqual({ session_id: "ses_root", title: "title ses_root", directory: "/work/ses_root" })
@@ -91,6 +92,7 @@ describe("fail closed", () => {
     expect("BAO_TOKEN" in env).toBe(false)
     expect("VAULT_TOKEN" in env).toBe(false)
     expect(env.BAO_ADDR).toBe(bao.address)
+    expect(env.BAO_CRED_NO_TOKEN_FILE).toBe("1")
   })
 
   test("a session whose mint failed gets no token and no inherited token", async () => {

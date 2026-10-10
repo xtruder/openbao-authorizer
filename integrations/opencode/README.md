@@ -10,7 +10,7 @@ This is an **opencode V2** plugin (`@opencode/plugin`). It doesn't load in openc
 
 - **Lazy minting.** The first time the agent runs the `shell` tool in a session, the plugin logs in with the minter AppRole and calls `auth/token/create/<tokenRole>` with `entity_alias=<aliasPrefix><rootSessionID>` and `meta={session_id, title, directory}`. It caches the AppRole token until it nears expiry. Resumed sessions mint on first use too.
 - **One identity per session tree.** A subagent session resolves to its root through `parentID`, so it uses the root's token and Session Identity, and sees the root's Grants.
-- **Environment.** Commands run by the `shell` tool get `BAO_ADDR`, `BAO_TOKEN`, `VAULT_ADDR`, `VAULT_TOKEN` and `OPENBAO_AUTHORIZER_URL`. They also get `BAO_NAMESPACE`/`VAULT_NAMESPACE` and `BAO_CACERT`/`VAULT_CACERT` when those are configured.
+- **Environment.** Commands run by the `shell` tool get `BAO_ADDR`, `BAO_TOKEN`, `VAULT_ADDR`, `VAULT_TOKEN` and `OPENBAO_AUTHORIZER_URL`, plus `BAO_CRED_NO_TOKEN_FILE=1`, so that bao-cred never falls back to the human's `~/.vault-token` when a command gets no Session Token. They also get `BAO_NAMESPACE`/`VAULT_NAMESPACE` and `BAO_CACERT`/`VAULT_CACERT` when those are configured.
 - **Renewal.** A token past half its period is renewed with `renew-self` before the next shell command. If renewal fails or the token has expired, the plugin mints a new one.
 - **Revocation.** Deleting a root session revokes its token. Grants stay on the Session Identity until they expire.
 - **Skill.** The plugin registers the bundled `openbao-access` skill through `ctx.skill.transform`.

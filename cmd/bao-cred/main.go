@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -20,8 +21,9 @@ import (
 	authorizerv1 "github.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1"
 )
 
-const rootLong = `Reads credentials from OpenBao with the Requester's token in BAO_TOKEN (or
-VAULT_TOKEN). When the token lacks access, bao-cred can file a Grant Request
+const rootLong = `Reads credentials from OpenBao with the Requester's token from BAO_TOKEN,
+VAULT_TOKEN, or else the token file ~/.vault-token written by bao login (skipped
+when BAO_CRED_NO_TOKEN_FILE is set). When the token lacks access, bao-cred can file a Grant Request
 with the authorizer and wait for an Approver to decide it.
 
 Request outcomes are printed as JSON on stdout; progress goes to stderr.
@@ -450,7 +452,23 @@ func requesterToken() (string, error) {
 		}
 	}
 
-	return "", errors.New("no token: set BAO_TOKEN (or VAULT_TOKEN)")
+	// The opencode plugin sets BAO_CRED_NO_TOKEN_FILE so that an agent command
+	// without its Session Token fails closed instead of using the human's
+	// `bao login` token.
+	if os.Getenv("BAO_CRED_NO_TOKEN_FILE") != "" {
+		return "", errors.New("no token: set BAO_TOKEN (or VAULT_TOKEN); the bao login token file is disabled by BAO_CRED_NO_TOKEN_FILE")
+	}
+
+	home, err := os.UserHomeDir()
+	if err == nil {
+		// `bao login` stores the token here with the default token helper.
+		contents, readErr := os.ReadFile(filepath.Join(home, ".vault-token")) // #nosec G304 -- fixed file in the user's home.
+		if token := strings.TrimSpace(string(contents)); readErr == nil && token != "" {
+			return token, nil
+		}
+	}
+
+	return "", errors.New("no token: set BAO_TOKEN (or VAULT_TOKEN), or run bao login")
 }
 
 func newOpenBaoClient(token string) (*openbao.Client, error) {
