@@ -23,8 +23,9 @@ import (
 
 const rootLong = `Reads credentials from OpenBao with the Requester's token from BAO_TOKEN,
 VAULT_TOKEN, or else the token file ~/.vault-token written by bao login (skipped
-when BAO_CRED_NO_TOKEN_FILE is set). When the token lacks access, bao-cred can file a Grant Request
-with the authorizer and wait for an Approver to decide it.
+when BAO_NO_TOKEN_FILE is set). When the token lacks access, bao-cred can file
+a Grant Request with the authorizer at BAO_AUTHORIZER_ADDR and wait for an
+Approver to decide it.
 
 Request outcomes are printed as JSON on stdout; progress goes to stderr.
 
@@ -196,7 +197,7 @@ hint.`,
 	flags.StringVar(&opts.output, "output", "", "atomically overwrite this file with mode 0600 instead of stdout")
 	flags.StringVar(&opts.reason, "reason", "",
 		"on permission denied, request read access with this reason and retry once")
-	flags.StringVar(&opts.authorizer, "authorizer", "", "authorizer base URL (default $OPENBAO_AUTHORIZER_URL)")
+	flags.StringVar(&opts.authorizer, "authorizer", "", "authorizer base URL (default $BAO_AUTHORIZER_ADDR)")
 	flags.DurationVar(&opts.timeout, "timeout", 15*time.Minute, "approval wait timeout")
 	flags.BoolVar(&opts.quiet, "quiet", false, "suppress progress messages")
 	return command
@@ -452,11 +453,11 @@ func requesterToken() (string, error) {
 		}
 	}
 
-	// The opencode plugin sets BAO_CRED_NO_TOKEN_FILE so that an agent command
+	// The opencode plugin sets BAO_NO_TOKEN_FILE so that an agent command
 	// without its Session Token fails closed instead of using the human's
 	// `bao login` token.
-	if os.Getenv("BAO_CRED_NO_TOKEN_FILE") != "" {
-		return "", errors.New("no token: set BAO_TOKEN (or VAULT_TOKEN); the bao login token file is disabled by BAO_CRED_NO_TOKEN_FILE")
+	if os.Getenv("BAO_NO_TOKEN_FILE") != "" {
+		return "", errors.New("no token: set BAO_TOKEN (or VAULT_TOKEN); the bao login token file is disabled by BAO_NO_TOKEN_FILE")
 	}
 
 	home, err := os.UserHomeDir()

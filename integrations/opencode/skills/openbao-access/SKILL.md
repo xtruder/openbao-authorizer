@@ -5,7 +5,7 @@ description: Use when a task needs a secret or credential from OpenBao/Vault (AP
 
 # OpenBao access
 
-Every shell command you run already has this session's OpenBao **Session Token** in its environment: `BAO_TOKEN`/`VAULT_TOKEN`, `BAO_ADDR`/`VAULT_ADDR` and `OPENBAO_AUTHORIZER_URL`. Don't log in, don't ask the user for a token, and don't export or overwrite these variables. Subagents share the same token and the same grants. If `BAO_TOKEN` is empty or unset, the session has no token (minting failed): tell the user instead of looking for another token.
+Every shell command you run already has this session's OpenBao **Session Token** in its environment: `BAO_TOKEN`/`VAULT_TOKEN`, `BAO_ADDR`/`VAULT_ADDR` and `BAO_AUTHORIZER_ADDR`. Don't log in, don't ask the user for a token, and don't export or overwrite these variables. Subagents share the same token and the same grants. If `BAO_TOKEN` is empty or unset, the session has no token (minting failed): tell the user instead of looking for another token.
 
 The token starts with almost no access. You gain access through **Grants**: a human Approver approves each requested path and capability, and the grant then applies to this same token until it expires. You never get a new token.
 

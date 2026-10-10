@@ -203,7 +203,7 @@ func TestRequesterTokenPriority(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("VAULT_TOKEN", "")
-	t.Setenv("BAO_CRED_NO_TOKEN_FILE", "")
+	t.Setenv("BAO_NO_TOKEN_FILE", "")
 	if _, err := requesterToken(); err == nil || !strings.Contains(err.Error(), "bao login") {
 		t.Fatalf("missing token error = %v", err)
 	}
@@ -218,7 +218,7 @@ func TestRequesterTokenPriority(t *testing.T) {
 
 	// Inside opencode the plugin disables the file, so a command without its
 	// Session Token never falls back to the human's token.
-	t.Setenv("BAO_CRED_NO_TOKEN_FILE", "1")
+	t.Setenv("BAO_NO_TOKEN_FILE", "1")
 	if got, err := requesterToken(); err == nil || got != "" {
 		t.Fatalf("disabled token file: got %q, %v", got, err)
 	}
@@ -311,7 +311,7 @@ func TestReadWithReasonWithoutAuthorizerURLFails(t *testing.T) {
 	setupEnvironment(t, "", openBao.URL)
 
 	err := run([]string{"read", "--reason", "deploy", "secret/app"}, &bytes.Buffer{}, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "OPENBAO_AUTHORIZER_URL") {
+	if err == nil || !strings.Contains(err.Error(), "BAO_AUTHORIZER_ADDR") {
 		t.Fatalf("error = %v", err)
 	}
 }
@@ -357,7 +357,7 @@ func setupEnvironment(t *testing.T, authorizerURL, openBaoURL string) {
 	t.Setenv("BAO_CACERT", "")
 	t.Setenv("BAO_CACERT_BYTES", "")
 	t.Setenv("BAO_CAPATH", "")
-	t.Setenv("OPENBAO_AUTHORIZER_URL", authorizerURL)
+	t.Setenv("BAO_AUTHORIZER_ADDR", authorizerURL)
 }
 
 func exitCode(err error) int {

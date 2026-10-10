@@ -10,7 +10,7 @@ export const PROBE_COMMAND = [
   '"${BAO_TOKEN-<unset>}"',
   '"${VAULT_TOKEN-<unset>}"',
   '"${BAO_ADDR-<unset>}"',
-  '"${OPENBAO_AUTHORIZER_URL-<unset>}"',
+  '"${BAO_AUTHORIZER_ADDR-<unset>}"',
 ].join(" ")
 
 export interface Probe {

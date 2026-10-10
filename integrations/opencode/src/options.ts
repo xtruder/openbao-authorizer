@@ -5,7 +5,7 @@ import path from "node:path"
 export interface OpenBaoOptions {
   /** OpenBao address, e.g. https://openbao.example.com:8200. */
   address: string
-  /** Authorizer base URL, injected as OPENBAO_AUTHORIZER_URL for bao-cred. */
+  /** Authorizer base URL, injected as BAO_AUTHORIZER_ADDR for bao-cred. */
   authorizerUrl?: string
   /** File holding the minter AppRole role_id. */
   roleIdFile: string
@@ -78,10 +78,10 @@ export function sessionEnv(options: OpenBaoOptions, token?: string): Record<stri
     VAULT_ADDR: options.address,
     // bao-cred would otherwise fall back to the human's `bao login` token file
     // when a command gets no Session Token.
-    BAO_CRED_NO_TOKEN_FILE: "1",
+    BAO_NO_TOKEN_FILE: "1",
   }
   if (token) for (const name of TOKEN_VARS) env[name] = token
-  if (options.authorizerUrl) env.OPENBAO_AUTHORIZER_URL = options.authorizerUrl
+  if (options.authorizerUrl) env.BAO_AUTHORIZER_ADDR = options.authorizerUrl
   if (options.namespace) {
     env.BAO_NAMESPACE = options.namespace
     env.VAULT_NAMESPACE = options.namespace

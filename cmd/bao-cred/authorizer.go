@@ -259,11 +259,11 @@ type authorizerClient struct {
 func newAuthorizerClient(explicitURL, token string) (*authorizerClient, error) {
 	raw := strings.TrimSpace(explicitURL)
 	if raw == "" {
-		raw = strings.TrimSpace(os.Getenv("OPENBAO_AUTHORIZER_URL"))
+		raw = strings.TrimSpace(os.Getenv("BAO_AUTHORIZER_ADDR"))
 	}
 
 	if raw == "" {
-		return nil, errors.New("authorizer URL is required; use --authorizer or set OPENBAO_AUTHORIZER_URL")
+		return nil, errors.New("authorizer URL is required; use --authorizer or set BAO_AUTHORIZER_ADDR")
 	}
 
 	parsed, err := url.Parse(raw)
@@ -620,7 +620,7 @@ request as JSON on stdout.`,
 	set.DurationVar(&flags.timeout, "timeout", 15*time.Minute, "approval wait timeout")
 	set.BoolVar(&flags.noWait, "no-wait", false, "print the filed request without waiting")
 	set.StringVar(&flags.waitID, "wait", "", "resume waiting on an existing Grant Request")
-	set.StringVar(&flags.authorizer, "authorizer", "", "authorizer base URL (default $OPENBAO_AUTHORIZER_URL)")
+	set.StringVar(&flags.authorizer, "authorizer", "", "authorizer base URL (default $BAO_AUTHORIZER_ADDR)")
 	set.BoolVar(&flags.quiet, "quiet", false, "suppress progress messages")
 	return command
 }
@@ -749,7 +749,7 @@ func newGrantsCommand() *cobra.Command {
 		},
 	}
 
-	command.Flags().StringVar(&authorizerURL, "authorizer", "", "authorizer base URL (default $OPENBAO_AUTHORIZER_URL)")
+	command.Flags().StringVar(&authorizerURL, "authorizer", "", "authorizer base URL (default $BAO_AUTHORIZER_ADDR)")
 	return command
 }
 

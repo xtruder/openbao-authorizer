@@ -543,7 +543,7 @@ type baoCred struct {
 }
 
 func (c baoCred) environment(token string) []string {
-	return c.paths.environment("BAO_ADDR="+c.address, "BAO_TOKEN="+token, "OPENBAO_AUTHORIZER_URL="+c.authorizer)
+	return c.paths.environment("BAO_ADDR="+c.address, "BAO_TOKEN="+token, "BAO_AUTHORIZER_ADDR="+c.authorizer)
 }
 
 func (c baoCred) run(ctx context.Context, t *testing.T, token string, arguments ...string) processResult {

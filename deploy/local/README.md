@@ -90,7 +90,7 @@ minter="$(bao write -field=token auth/approle/login \
 export BAO_TOKEN="$(BAO_TOKEN="${minter}" bao token create -role=opencode-session \
   -entity-alias=opencode-session-manual -metadata=title="Manual test" \
   -metadata=directory="${PWD}" -field=token)"
-export OPENBAO_AUTHORIZER_URL=http://127.0.0.1:18202
+export BAO_AUTHORIZER_ADDR=http://127.0.0.1:18202
 bao-cred read --reason "Try the local authorizer" kv/data/opencode/example
 ```
 

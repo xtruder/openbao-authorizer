@@ -125,7 +125,7 @@ try {
     check(!!minted && probe?.bao === minted, `${sid}: BAO_TOKEN is the token minted for alias opencode-session-${sid}`)
     check(probe?.vault === probe?.bao, `${sid}: VAULT_TOKEN equals BAO_TOKEN`)
     check(probe?.addr === bao.address, `${sid}: BAO_ADDR is the plugin's address`)
-    check(probe?.authz === "https://authorizer.example.com", `${sid}: OPENBAO_AUTHORIZER_URL is set`)
+    check(probe?.authz === "https://authorizer.example.com", `${sid}: BAO_AUTHORIZER_ADDR is set`)
   }
   const [a, b] = sessions
   const tokenA = a && bySession.get(a)?.bao
