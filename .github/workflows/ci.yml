@@ -176,12 +176,24 @@ jobs:
           build_flags: -trimpath
           ldflags: -s -w
           md5sum: false
-          sha256sum: true
+          sha256sum: false
           release_tag: ${{ github.ref_name }}
           overwrite: true
           asset_name: openbao-authorizer-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}
           compress_assets: auto
           multi_binaries: true
+
+      # sha256sum format ("<hash>  <file>"): Renovate maps the file name to the
+      # next release's archive. A bare hash makes it hash the .sha256 file
+      # itself, which put wrong checksums into the Homebrew formula.
+      - name: Upload checksum
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET: openbao-authorizer-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
+        run: |
+          gh release download "$GITHUB_REF_NAME" --pattern "$ASSET" --dir checksum
+          (cd checksum && sha256sum "$ASSET" > "$ASSET.sha256")
+          gh release upload "$GITHUB_REF_NAME" "checksum/$ASSET.sha256" --clobber
 
   github-release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
