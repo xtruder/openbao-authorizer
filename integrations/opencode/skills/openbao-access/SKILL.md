@@ -9,6 +9,16 @@ Every shell command you run already has this session's OpenBao **Session Token**
 
 The token starts with almost no access. You gain access through **Grants**: a human Approver approves each requested path and capability, and the grant then applies to this same token until it expires. You never get a new token.
 
+## Find what you may request
+
+When you don't already know the exact path, start here:
+
+```sh
+bao-cred grantable
+```
+
+It prints, as JSON, every rule for what may be requested: `path` (an OpenBao pattern: `+` is one segment, a trailing `*` any suffix), `capabilities`, `max_ttl`, `description`, and sometimes `paths`, concrete paths the authorizer found. Prefer a path from `paths` that fits the task. Otherwise build a concrete path that matches `path`, guided by `description`. A `discover_error` only means the list of concrete paths is unavailable; the pattern still applies. Then read it with `bao-cred read --reason ...` or request it with `bao-cred request`. Anything matching no rule is refused.
+
 ## Read a credential
 
 Hand the secret straight to the program that needs it, so it never appears in your output:

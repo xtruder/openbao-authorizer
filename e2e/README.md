@@ -41,7 +41,7 @@ The Go test:
 
 ## Verified workflow
 
-All credentials, OpenBao state and application state are disposable. The harness installs the repository's real `config/authorizer-policy.hcl` and `config/approver-policy.hcl`. It also creates the `opencode-session` token role, the baseline policy, the `opencode-minter` policy and AppRole, and two more AppRoles: `ci`, and `self-approver`, which also carries the approver policy. The application config has `requester "opencode"` (token role) and `requester "ci"` (`auth_mount = "approle"`) rules. Against the live processes, the test checks the following:
+All credentials, OpenBao state and application state are disposable. The harness installs the repository's real `config/authorizer-policy.hcl`, plus `list` on `kv/metadata/e2e` for the `e2e-kv` rule's `discover` path, and `config/approver-policy.hcl`. It also creates the `opencode-session` token role, the baseline policy, the `opencode-minter` policy and AppRole, and two more AppRoles: `ci`, and `self-approver`, which also carries the approver policy. The application config has `requester "opencode"` (token role) and `requester "ci"` (`auth_mount = "approle"`) rules. Against the live processes, the test checks the following:
 
 - **Approver sign-in:** OpenBao's `sys/config/cors` allows the application origin, and a CORS preflight from that origin succeeds. `GetLoginOptions` returns the OpenBao address and methods without a session. The test logs in to OpenBao with userpass directly, as the PWA does, and hands the token to `CreateSession`; afterwards the token is revoked.
 
@@ -61,6 +61,7 @@ All credentials, OpenBao state and application state are disposable. The harness
   - Revoking a Grant through the approver API takes effect at once and leaves other Grants intact.
 - **Request on denial:** `bao-cred read --reason … <path>` files a request when a read is denied, waits, and prints the secret after approval. Without `--reason` it fails with a hint.
 - **Grant listing:** `bao-cred grants` lists only the session's active Grants.
+- **Catalog:** `bao-cred grantable` shows the `e2e-kv` rule with the concrete paths discovered under `kv/metadata/e2e`, without the folder key. Reading one of them with `--reason` works after approval.
 - **Requester Rules:** an approver's userpass token gets `NOT_REQUESTER` from `GrantService`. A `ci` AppRole token matches the `ci` rule, files a request, and reads the path once it is approved; session A can't.
 - **Self-approval:** a `self-approver` AppRole token files a request, then signs in as an Approver; deciding its own request fails with `SELF_APPROVAL`.
 - **Authorizer token limits:** the authorizer token can't rename or disable an entity, or write a policy outside `agent-grant-*`.

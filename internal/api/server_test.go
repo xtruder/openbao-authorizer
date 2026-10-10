@@ -66,7 +66,7 @@ func newTestServer(t *testing.T, configs ...testConfig) *testServer {
 	events := NewEventBus()
 	service := grants.New(bao, database, &Notifier{Events: events}, grants.Config{
 		Policy: grants.Policy{DefaultTTL: 72 * time.Hour, Rules: []grants.Rule{
-			{Name: "kv", Path: "kv/data/*", Capabilities: []string{"read"}, MaxTTL: 8 * time.Hour},
+			{Name: "kv", Path: "kv/data/*", Capabilities: []string{"read"}, MaxTTL: 8 * time.Hour, Description: "App secrets", Discover: "kv/metadata"},
 		}},
 		PendingTTL: time.Hour,
 		Requesters: []grants.RequesterRule{{Name: "opencode", TokenRole: "opencode-session"}},
@@ -521,6 +521,41 @@ func TestGrantAPIRequiresRequesterToken(t *testing.T) {
 	_, err = server.grant.CreateGrantRequest(t.Context(), bearer("session-a", &authorizerv1.CreateGrantRequestRequest{Reason: strings.Repeat("x", maxBodyBytes+1), Items: message.Items}))
 	if connect.CodeOf(err) != connect.CodeResourceExhausted {
 		t.Fatalf("oversized body error = %v", err)
+	}
+}
+
+func TestGrantableCatalogForRequestersAndApprovers(t *testing.T) {
+	t.Parallel()
+
+	server := newTestServer(t, testConfig{options: func(options *Options) { options.PublicOrigin = "https://authorizer.example" }})
+	server.bao.SetList("kv/metadata", "b", "a", "folder/")
+	want := []*authorizerv1.Grantable{{
+		Name: "kv", Path: "kv/data/*", Capabilities: []string{"read"}, MaxTtl: durationpb.New(8 * time.Hour),
+		Description: "App secrets", Paths: []string{"kv/data/a", "kv/data/b"},
+	}}
+
+	_, err := server.grant.ListGrantables(t.Context(), connect.NewRequest(&authorizerv1.ListGrantablesRequest{}))
+	requireError(t, err, connect.CodeUnauthenticated, reasonInvalidToken)
+	_, err = server.grant.ListGrantables(t.Context(), bearer("human-token", &authorizerv1.ListGrantablesRequest{}))
+	requireError(t, err, connect.CodePermissionDenied, reasonNotRequester)
+
+	requesterView, err := server.grant.ListGrantables(t.Context(), bearer("session-a", &authorizerv1.ListGrantablesRequest{}))
+	if err != nil || !slices.EqualFunc(requesterView.Msg.GetGrantables(), want, func(a, b *authorizerv1.Grantable) bool { return proto.Equal(a, b) }) {
+		t.Fatalf("requester catalog = %v, %v", requesterView, err)
+	}
+
+	_, err = server.approver.ListGrantableRules(t.Context(), connect.NewRequest(&authorizerv1.ListGrantableRulesRequest{}))
+	requireError(t, err, connect.CodeUnauthenticated, reasonSessionExpired)
+
+	server.login()
+	crossOrigin := connect.NewRequest(&authorizerv1.ListGrantableRulesRequest{})
+	crossOrigin.Header().Set("Origin", server.url)
+	_, err = server.approver.ListGrantableRules(t.Context(), crossOrigin)
+	requireError(t, err, connect.CodePermissionDenied, reasonCrossOrigin)
+
+	approverView, err := server.approver.ListGrantableRules(t.Context(), connect.NewRequest(&authorizerv1.ListGrantableRulesRequest{}))
+	if err != nil || !slices.EqualFunc(approverView.Msg.GetGrantables(), want, func(a, b *authorizerv1.Grantable) bool { return proto.Equal(a, b) }) {
+		t.Fatalf("approver catalog = %v, %v", approverView, err)
 	}
 }
 

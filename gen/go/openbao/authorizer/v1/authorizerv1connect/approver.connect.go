@@ -56,6 +56,9 @@ const (
 	// ApproverServiceRevokeGrantProcedure is the fully-qualified name of the ApproverService's
 	// RevokeGrant RPC.
 	ApproverServiceRevokeGrantProcedure = "/openbao.authorizer.v1.ApproverService/RevokeGrant"
+	// ApproverServiceListGrantableRulesProcedure is the fully-qualified name of the ApproverService's
+	// ListGrantableRules RPC.
+	ApproverServiceListGrantableRulesProcedure = "/openbao.authorizer.v1.ApproverService/ListGrantableRules"
 	// ApproverServiceWatchEventsProcedure is the fully-qualified name of the ApproverService's
 	// WatchEvents RPC.
 	ApproverServiceWatchEventsProcedure = "/openbao.authorizer.v1.ApproverService/WatchEvents"
@@ -91,6 +94,8 @@ type ApproverServiceClient interface {
 	ListGrants(context.Context, *connect.Request[v1.ListGrantsRequest]) (*connect.Response[v1.ListGrantsResponse], error)
 	// RevokeGrant ends a Grant before its expiry.
 	RevokeGrant(context.Context, *connect.Request[v1.RevokeGrantRequest]) (*connect.Response[v1.RevokeGrantResponse], error)
+	// ListGrantableRules returns the same catalog Requesters see, read-only.
+	ListGrantableRules(context.Context, *connect.Request[v1.ListGrantableRulesRequest]) (*connect.Response[v1.ListGrantableRulesResponse], error)
 	// WatchEvents sends a full dashboard snapshot on connect and after every
 	// change, plus periodic heartbeats. It ends when the session ends.
 	WatchEvents(context.Context, *connect.Request[v1.WatchEventsRequest]) (*connect.ServerStreamForClient[v1.WatchEventsResponse], error)
@@ -159,6 +164,12 @@ func NewApproverServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(approverServiceMethods.ByName("RevokeGrant")),
 			connect.WithClientOptions(opts...),
 		),
+		listGrantableRules: connect.NewClient[v1.ListGrantableRulesRequest, v1.ListGrantableRulesResponse](
+			httpClient,
+			baseURL+ApproverServiceListGrantableRulesProcedure,
+			connect.WithSchema(approverServiceMethods.ByName("ListGrantableRules")),
+			connect.WithClientOptions(opts...),
+		),
 		watchEvents: connect.NewClient[v1.WatchEventsRequest, v1.WatchEventsResponse](
 			httpClient,
 			baseURL+ApproverServiceWatchEventsProcedure,
@@ -196,6 +207,7 @@ type approverServiceClient struct {
 	decideItems              *connect.Client[v1.DecideItemsRequest, v1.DecideItemsResponse]
 	listGrants               *connect.Client[v1.ListGrantsRequest, v1.ListGrantsResponse]
 	revokeGrant              *connect.Client[v1.RevokeGrantRequest, v1.RevokeGrantResponse]
+	listGrantableRules       *connect.Client[v1.ListGrantableRulesRequest, v1.ListGrantableRulesResponse]
 	watchEvents              *connect.Client[v1.WatchEventsRequest, v1.WatchEventsResponse]
 	getPushPublicKey         *connect.Client[v1.GetPushPublicKeyRequest, v1.GetPushPublicKeyResponse]
 	registerPushSubscription *connect.Client[v1.RegisterPushSubscriptionRequest, v1.RegisterPushSubscriptionResponse]
@@ -242,6 +254,11 @@ func (c *approverServiceClient) RevokeGrant(ctx context.Context, req *connect.Re
 	return c.revokeGrant.CallUnary(ctx, req)
 }
 
+// ListGrantableRules calls openbao.authorizer.v1.ApproverService.ListGrantableRules.
+func (c *approverServiceClient) ListGrantableRules(ctx context.Context, req *connect.Request[v1.ListGrantableRulesRequest]) (*connect.Response[v1.ListGrantableRulesResponse], error) {
+	return c.listGrantableRules.CallUnary(ctx, req)
+}
+
 // WatchEvents calls openbao.authorizer.v1.ApproverService.WatchEvents.
 func (c *approverServiceClient) WatchEvents(ctx context.Context, req *connect.Request[v1.WatchEventsRequest]) (*connect.ServerStreamForClient[v1.WatchEventsResponse], error) {
 	return c.watchEvents.CallServerStream(ctx, req)
@@ -283,6 +300,8 @@ type ApproverServiceHandler interface {
 	ListGrants(context.Context, *connect.Request[v1.ListGrantsRequest]) (*connect.Response[v1.ListGrantsResponse], error)
 	// RevokeGrant ends a Grant before its expiry.
 	RevokeGrant(context.Context, *connect.Request[v1.RevokeGrantRequest]) (*connect.Response[v1.RevokeGrantResponse], error)
+	// ListGrantableRules returns the same catalog Requesters see, read-only.
+	ListGrantableRules(context.Context, *connect.Request[v1.ListGrantableRulesRequest]) (*connect.Response[v1.ListGrantableRulesResponse], error)
 	// WatchEvents sends a full dashboard snapshot on connect and after every
 	// change, plus periodic heartbeats. It ends when the session ends.
 	WatchEvents(context.Context, *connect.Request[v1.WatchEventsRequest], *connect.ServerStream[v1.WatchEventsResponse]) error
@@ -347,6 +366,12 @@ func NewApproverServiceHandler(svc ApproverServiceHandler, opts ...connect.Handl
 		connect.WithSchema(approverServiceMethods.ByName("RevokeGrant")),
 		connect.WithHandlerOptions(opts...),
 	)
+	approverServiceListGrantableRulesHandler := connect.NewUnaryHandler(
+		ApproverServiceListGrantableRulesProcedure,
+		svc.ListGrantableRules,
+		connect.WithSchema(approverServiceMethods.ByName("ListGrantableRules")),
+		connect.WithHandlerOptions(opts...),
+	)
 	approverServiceWatchEventsHandler := connect.NewServerStreamHandler(
 		ApproverServiceWatchEventsProcedure,
 		svc.WatchEvents,
@@ -389,6 +414,8 @@ func NewApproverServiceHandler(svc ApproverServiceHandler, opts ...connect.Handl
 			approverServiceListGrantsHandler.ServeHTTP(w, r)
 		case ApproverServiceRevokeGrantProcedure:
 			approverServiceRevokeGrantHandler.ServeHTTP(w, r)
+		case ApproverServiceListGrantableRulesProcedure:
+			approverServiceListGrantableRulesHandler.ServeHTTP(w, r)
 		case ApproverServiceWatchEventsProcedure:
 			approverServiceWatchEventsHandler.ServeHTTP(w, r)
 		case ApproverServiceGetPushPublicKeyProcedure:
@@ -436,6 +463,10 @@ func (UnimplementedApproverServiceHandler) ListGrants(context.Context, *connect.
 
 func (UnimplementedApproverServiceHandler) RevokeGrant(context.Context, *connect.Request[v1.RevokeGrantRequest]) (*connect.Response[v1.RevokeGrantResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("openbao.authorizer.v1.ApproverService.RevokeGrant is not implemented"))
+}
+
+func (UnimplementedApproverServiceHandler) ListGrantableRules(context.Context, *connect.Request[v1.ListGrantableRulesRequest]) (*connect.Response[v1.ListGrantableRulesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("openbao.authorizer.v1.ApproverService.ListGrantableRules is not implemented"))
 }
 
 func (UnimplementedApproverServiceHandler) WatchEvents(context.Context, *connect.Request[v1.WatchEventsRequest], *connect.ServerStream[v1.WatchEventsResponse]) error {

@@ -9,7 +9,7 @@ import {
   WatchEventsResponseSchema,
   type WatchEventsResponse,
 } from '../gen/openbao/authorizer/v1/approver_pb'
-import { ErrorDetailSchema } from '../gen/openbao/authorizer/v1/types_pb'
+import { ErrorDetailSchema, type GrantableSchema } from '../gen/openbao/authorizer/v1/types_pb'
 
 export function rpcError(code: Code, reason: string, message = reason) {
   return new ConnectError(message, code, undefined, [{ desc: ErrorDetailSchema, value: { reason } }])
@@ -66,6 +66,7 @@ interface FakeOptions {
   initialSnapshot?: MessageInitShape<typeof DashboardSnapshotSchema> | null
   handlers?: Partial<ServiceImpl<typeof ApproverService>>
   loginOptions?: MessageInitShape<typeof GetLoginOptionsResponseSchema>
+  grantables?: MessageInitShape<typeof GrantableSchema>[]
 }
 
 // Sessionless RPCs, as on the server.
@@ -130,6 +131,7 @@ export function fakeApprover(options: FakeOptions = {}) {
       if (initialSnapshot) stream.snapshot(initialSnapshot)
       yield* stream.events()
     },
+    listGrantableRules: () => ({ grantables: options.grantables ?? [] }),
     getPushPublicKey: () => ({ publicKey: 'BEl6' }),
     registerPushSubscription: (request) => {
       remember('RegisterPushSubscription', request)

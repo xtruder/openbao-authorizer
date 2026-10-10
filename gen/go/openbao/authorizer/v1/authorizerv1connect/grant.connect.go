@@ -45,6 +45,9 @@ const (
 	// GrantServiceListMyGrantsProcedure is the fully-qualified name of the GrantService's ListMyGrants
 	// RPC.
 	GrantServiceListMyGrantsProcedure = "/openbao.authorizer.v1.GrantService/ListMyGrants"
+	// GrantServiceListGrantablesProcedure is the fully-qualified name of the GrantService's
+	// ListGrantables RPC.
+	GrantServiceListGrantablesProcedure = "/openbao.authorizer.v1.GrantService/ListGrantables"
 )
 
 // GrantServiceClient is a client for the openbao.authorizer.v1.GrantService service.
@@ -61,6 +64,9 @@ type GrantServiceClient interface {
 	WatchGrantRequest(context.Context, *connect.Request[v1.WatchGrantRequestRequest]) (*connect.ServerStreamForClient[v1.WatchGrantRequestResponse], error)
 	// ListMyGrants returns the caller's active Grants.
 	ListMyGrants(context.Context, *connect.Request[v1.ListMyGrantsRequest]) (*connect.Response[v1.ListMyGrantsResponse], error)
+	// ListGrantables returns what may be requested: every Grantable Rule and,
+	// for rules with a discover path, the concrete paths found there.
+	ListGrantables(context.Context, *connect.Request[v1.ListGrantablesRequest]) (*connect.Response[v1.ListGrantablesResponse], error)
 }
 
 // NewGrantServiceClient constructs a client for the openbao.authorizer.v1.GrantService service. By
@@ -98,6 +104,12 @@ func NewGrantServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(grantServiceMethods.ByName("ListMyGrants")),
 			connect.WithClientOptions(opts...),
 		),
+		listGrantables: connect.NewClient[v1.ListGrantablesRequest, v1.ListGrantablesResponse](
+			httpClient,
+			baseURL+GrantServiceListGrantablesProcedure,
+			connect.WithSchema(grantServiceMethods.ByName("ListGrantables")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -107,6 +119,7 @@ type grantServiceClient struct {
 	getGrantRequest    *connect.Client[v1.GetGrantRequestRequest, v1.GetGrantRequestResponse]
 	watchGrantRequest  *connect.Client[v1.WatchGrantRequestRequest, v1.WatchGrantRequestResponse]
 	listMyGrants       *connect.Client[v1.ListMyGrantsRequest, v1.ListMyGrantsResponse]
+	listGrantables     *connect.Client[v1.ListGrantablesRequest, v1.ListGrantablesResponse]
 }
 
 // CreateGrantRequest calls openbao.authorizer.v1.GrantService.CreateGrantRequest.
@@ -129,6 +142,11 @@ func (c *grantServiceClient) ListMyGrants(ctx context.Context, req *connect.Requ
 	return c.listMyGrants.CallUnary(ctx, req)
 }
 
+// ListGrantables calls openbao.authorizer.v1.GrantService.ListGrantables.
+func (c *grantServiceClient) ListGrantables(ctx context.Context, req *connect.Request[v1.ListGrantablesRequest]) (*connect.Response[v1.ListGrantablesResponse], error) {
+	return c.listGrantables.CallUnary(ctx, req)
+}
+
 // GrantServiceHandler is an implementation of the openbao.authorizer.v1.GrantService service.
 type GrantServiceHandler interface {
 	// CreateGrantRequest files a batch of Permission Items. Items outside the
@@ -143,6 +161,9 @@ type GrantServiceHandler interface {
 	WatchGrantRequest(context.Context, *connect.Request[v1.WatchGrantRequestRequest], *connect.ServerStream[v1.WatchGrantRequestResponse]) error
 	// ListMyGrants returns the caller's active Grants.
 	ListMyGrants(context.Context, *connect.Request[v1.ListMyGrantsRequest]) (*connect.Response[v1.ListMyGrantsResponse], error)
+	// ListGrantables returns what may be requested: every Grantable Rule and,
+	// for rules with a discover path, the concrete paths found there.
+	ListGrantables(context.Context, *connect.Request[v1.ListGrantablesRequest]) (*connect.Response[v1.ListGrantablesResponse], error)
 }
 
 // NewGrantServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -176,6 +197,12 @@ func NewGrantServiceHandler(svc GrantServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(grantServiceMethods.ByName("ListMyGrants")),
 		connect.WithHandlerOptions(opts...),
 	)
+	grantServiceListGrantablesHandler := connect.NewUnaryHandler(
+		GrantServiceListGrantablesProcedure,
+		svc.ListGrantables,
+		connect.WithSchema(grantServiceMethods.ByName("ListGrantables")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/openbao.authorizer.v1.GrantService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case GrantServiceCreateGrantRequestProcedure:
@@ -186,6 +213,8 @@ func NewGrantServiceHandler(svc GrantServiceHandler, opts ...connect.HandlerOpti
 			grantServiceWatchGrantRequestHandler.ServeHTTP(w, r)
 		case GrantServiceListMyGrantsProcedure:
 			grantServiceListMyGrantsHandler.ServeHTTP(w, r)
+		case GrantServiceListGrantablesProcedure:
+			grantServiceListGrantablesHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -209,4 +238,8 @@ func (UnimplementedGrantServiceHandler) WatchGrantRequest(context.Context, *conn
 
 func (UnimplementedGrantServiceHandler) ListMyGrants(context.Context, *connect.Request[v1.ListMyGrantsRequest]) (*connect.Response[v1.ListMyGrantsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("openbao.authorizer.v1.GrantService.ListMyGrants is not implemented"))
+}
+
+func (UnimplementedGrantServiceHandler) ListGrantables(context.Context, *connect.Request[v1.ListGrantablesRequest]) (*connect.Response[v1.ListGrantablesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("openbao.authorizer.v1.GrantService.ListGrantables is not implemented"))
 }

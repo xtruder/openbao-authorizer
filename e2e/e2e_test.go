@@ -127,13 +127,15 @@ func TestSessionGrantWorkflow(t *testing.T) {
 	mustCall(t, ctx, bao, rootToken, http.MethodPost, "sys/mounts/kv", map[string]any{
 		"type": "kv", "options": map[string]string{"version": "2"},
 	}, http.StatusOK, http.StatusNoContent)
-	for _, name := range []string{"alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta"} {
+	for _, name := range []string{"alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "folder/nested"} {
 		mustCall(t, ctx, bao, rootToken, http.MethodPost, "kv/data/e2e/"+name, map[string]any{
 			"data": map[string]string{"value": "secret-" + name},
 		}, http.StatusOK)
 	}
 
-	writePolicy(ctx, t, bao, authorizerPolicy, readRepositoryFile(t, repositoryRoot, "config/authorizer-policy.hcl"))
+	// The e2e-kv rule discovers its paths by listing kv/metadata/e2e.
+	writePolicy(ctx, t, bao, authorizerPolicy, readRepositoryFile(t, repositoryRoot, "config/authorizer-policy.hcl")+
+		"path \"kv/metadata/e2e\" {\n  capabilities = [\"list\"]\n}\n")
 	writePolicy(ctx, t, bao, approverPolicy, readRepositoryFile(t, repositoryRoot, "config/approver-policy.hcl"))
 	writePolicy(ctx, t, bao, sessionPolicy, "# Baseline Session Token policy: no access beyond default.\n")
 	writePolicy(ctx, t, bao, minterPolicy, fmt.Sprintf("path \"auth/token/create/%s\" {\n  capabilities = [\"update\"]\n}\n", tokenRole))
@@ -212,6 +214,8 @@ grantable "e2e-kv" {
   path         = "kv/data/e2e/*"
   capabilities = ["read"]
   max_ttl      = "2h"
+  description  = "E2E secrets"
+  discover     = "kv/metadata/e2e"
 }
 `, staticDirectory, filepath.Join(runtimeDirectory, "app.db"), encryptionKeyFile, baoAddress, authorizerTokenFile, approverPolicy, baoAddress, tokenRole)
 	writeSecretFile(t, appConfig, configuration)
@@ -416,6 +420,34 @@ grantable "e2e-kv" {
 	}
 
 	t.Log("bao-cred read --reason requested access on denial and read the secret after approval")
+
+	// A Requester finds a concrete path in the catalog and requests it.
+	catalog := cred.run(ctx, t, sessionB.Token, "grantable")
+	var grantables []struct {
+		Name          string   `json:"name"`
+		Path          string   `json:"path"`
+		MaxTTL        string   `json:"max_ttl"`
+		Description   string   `json:"description"`
+		Paths         []string `json:"paths"`
+		DiscoverError string   `json:"discover_error"`
+	}
+	if catalog.exitCode != 0 || json.Unmarshal([]byte(catalog.stdout), &grantables) != nil || len(grantables) != 1 {
+		t.Fatalf("bao-cred grantable = %+v", catalog)
+	}
+
+	if rule := grantables[0]; rule.Name != "e2e-kv" || rule.Path != "kv/data/e2e/*" || rule.MaxTTL != "2h0m0s" || rule.Description != "E2E secrets" ||
+		rule.DiscoverError != "" || !slices.Contains(rule.Paths, "kv/data/e2e/theta") || slices.Contains(rule.Paths, "kv/data/e2e/folder/") {
+		t.Fatalf("e2e-kv grantable = %+v", rule)
+	}
+
+	theta := cred.start(ctx, sessionB.Token, "read", "--reason", "e2e: theta from the catalog", "--field", "data.value", "--timeout", "2m", "kv/data/e2e/theta")
+	thetaRequest := approver.waitForPending(ctx, t, "kv/data/e2e/theta")
+	approver.decide(ctx, t, thetaRequest, map[string]authorizerv1.Decision{"kv/data/e2e/theta": authorizerv1.Decision_DECISION_APPROVE}, nil)
+	if result := theta.wait(t); result.exitCode != 0 || result.stdout != "secret-theta" {
+		t.Fatalf("read of a discovered path = %+v", result)
+	}
+
+	t.Log("bao-cred grantable listed kv/data/e2e/theta from kv/metadata/e2e; reading it with --reason worked after approval")
 
 	// Only tokens matching a Requester Rule may request Grants.
 	humanToken := responseAuthToken(t, mustCall(t, ctx, bao, "", http.MethodPost, "auth/userpass/login/approver", map[string]string{"password": approverPassword}, http.StatusOK))

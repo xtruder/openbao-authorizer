@@ -2,6 +2,7 @@ package openbao
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -163,5 +164,45 @@ func TestRevokeSelfUsesHumanToken(t *testing.T) {
 
 	if err := client.RevokeSelf(t.Context(), "human-token"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestListUsesAuthorizerTokenAndTreatsNotFoundAsEmpty(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Vault-Token"); got != "authorizer" || r.Method != "LIST" {
+			t.Fatalf("%s %s with token %q", r.Method, r.URL.Path, got)
+		}
+
+		switch r.URL.Path {
+		case "/v1/github/permissionsets":
+			_, _ = w.Write([]byte(`{"data":{"keys":["project-a","folder/"]}}`))
+		case "/v1/kv/metadata/denied":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"errors":["permission denied"]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := New(Config{Address: server.URL, Token: "authorizer", HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	keys, err := client.List(t.Context(), "github/permissionsets")
+	if err != nil || !slices.Equal(keys, []string{"project-a", "folder/"}) {
+		t.Fatalf("keys = %q, %v", keys, err)
+	}
+
+	if keys, err := client.List(t.Context(), "kv/metadata/empty"); err != nil || keys != nil {
+		t.Fatalf("empty list = %q, %v", keys, err)
+	}
+
+	var httpErr *HTTPError
+	if _, err := client.List(t.Context(), "kv/metadata/denied"); !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusForbidden {
+		t.Fatalf("denied list error = %v", err)
 	}
 }

@@ -69,6 +69,7 @@ type Fake struct {
 	identities map[string]openbao.Identity
 	entities   map[string]*openbao.Entity
 	policies   map[string]Policy
+	lists      map[string][]string
 	failures   map[string]error
 	calls      map[string]int
 	revoked    []string
@@ -81,6 +82,7 @@ func New() *Fake {
 		identities: make(map[string]openbao.Identity),
 		entities:   make(map[string]*openbao.Entity),
 		policies:   make(map[string]Policy),
+		lists:      make(map[string][]string),
 		failures:   make(map[string]error),
 		calls:      make(map[string]int),
 	}
@@ -107,6 +109,13 @@ func (f *Fake) AddEntity(entity openbao.Entity) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.entities[entity.ID] = &entity
+}
+
+// SetList sets the keys List returns for path.
+func (f *Fake) SetList(path string, keys ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lists[path] = keys
 }
 
 // Fail makes method return err until cleared with a nil err.
@@ -257,6 +266,17 @@ func (f *Fake) DeletePolicy(_ context.Context, name string) error {
 
 	delete(f.policies, name)
 	return nil
+}
+
+// List implements LIST with the authorizer token; unknown paths have no keys.
+func (f *Fake) List(_ context.Context, path string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failure("List"); err != nil {
+		return nil, err
+	}
+
+	return slices.Clone(f.lists[path]), nil
 }
 
 // CapabilitiesSelf evaluates exact-path policy blocks attached to the token's

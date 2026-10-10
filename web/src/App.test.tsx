@@ -427,6 +427,93 @@ describe('OpenBao Authorizer user workflows', () => {
     expect(screen.getByRole('button', { name: 'Revoke kv/data/staging/db' })).toBeInTheDocument()
   })
 
+  describe('grantable rules', () => {
+    const discovered = Array.from({ length: 7 }, (_, index) => `github/token/repo-${index + 1}`)
+    const grantables = [
+      { name: 'github', path: 'github/token/+', capabilities: ['read'], maxTtl: hours(1), description: 'Repository-scoped GitHub tokens', paths: discovered },
+      { name: 'local-kv', path: 'kv/data/opencode/*', capabilities: ['read', 'update'], maxTtl: hours(8), discoverError: 'permission denied' },
+    ]
+
+    async function openCatalog(user: ReturnType<typeof userEvent.setup>) {
+      await user.click(await screen.findByRole('button', { name: /Grantable rules/ }))
+      return screen.findByRole('list', { name: 'Grantable rules' })
+    }
+
+    it('lists each rule with its discovered paths and discovery errors', async () => {
+      const user = userEvent.setup()
+      const fake = signedIn({ grantables })
+
+      render(<App client={fake.client} />)
+      expect(fake.callsTo('ListGrantableRules')).toHaveLength(0)
+      const list = await openCatalog(user)
+
+      const github = within(list).getByRole('heading', { name: 'github' }).closest('li')!
+      expect(within(github).getByText('github/token/+')).toBeInTheDocument()
+      expect(within(github).getByText('Repository-scoped GitHub tokens')).toBeInTheDocument()
+      expect(within(github).getByText('Max TTL 1h')).toBeInTheDocument()
+      expect(within(github).getByText('read')).toBeInTheDocument()
+      expect(within(within(github).getByRole('list', { name: 'Discovered paths for github' })).getAllByRole('listitem')).toHaveLength(5)
+      expect(within(github).getByText('2 more paths')).toBeInTheDocument()
+      expect(within(github).getByRole('list', { name: 'More discovered paths for github', hidden: true })).toHaveTextContent('github/token/repo-7')
+
+      const kv = within(list).getByRole('heading', { name: 'local-kv' }).closest('li')!
+      expect(within(kv).getByText('Max TTL 8h')).toBeInTheDocument()
+      expect(within(kv).getByText(/Path discovery failed: permission denied/)).toBeInTheDocument()
+      expect(within(kv).queryByText('Discovered paths')).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Grantable rules/ })).toHaveTextContent('2')
+    })
+
+    it('shows an empty catalog', async () => {
+      const user = userEvent.setup()
+      const fake = signedIn()
+
+      render(<App client={fake.client} />)
+      await user.click(await screen.findByRole('button', { name: /Grantable rules/ }))
+
+      expect(await screen.findByText('No grantable rules')).toBeInTheDocument()
+    })
+
+    it('reloads the catalog on refresh without restarting the stream', async () => {
+      const user = userEvent.setup()
+      let current = [grantables[1]]
+      const fake = signedIn({ handlers: { listGrantableRules: () => ({ grantables: current }) } })
+
+      render(<App client={fake.client} />)
+      const list = await openCatalog(user)
+      expect(within(list).getByRole('heading', { name: 'local-kv' })).toBeInTheDocument()
+
+      current = grantables
+      await user.click(screen.getByRole('button', { name: 'Refresh' }))
+
+      expect(await within(list).findByRole('heading', { name: 'github' })).toBeInTheDocument()
+      expect(fake.callsTo('ListGrantableRules')).toHaveLength(2)
+      expect(fake.streams).toHaveLength(1)
+    })
+
+    it('reports load errors and retries', async () => {
+      const user = userEvent.setup()
+      let fail = true
+      const fake = signedIn({
+        handlers: {
+          listGrantableRules: () => {
+            if (fail) throw rpcError(Code.Unavailable, 'OPENBAO_UNAVAILABLE')
+            return { grantables }
+          },
+        },
+      })
+
+      render(<App client={fake.client} />)
+      await user.click(await screen.findByRole('button', { name: /Grantable rules/ }))
+
+      expect(await screen.findByRole('alert')).toHaveTextContent('OpenBao is unavailable. Try again shortly.')
+      fail = false
+      await user.click(screen.getByRole('button', { name: 'Retry' }))
+
+      expect(await screen.findByRole('list', { name: 'Grantable rules' })).toBeInTheDocument()
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    })
+  })
+
   it('keeps the operator signed in and offers a retry when logout fails', async () => {
     const user = userEvent.setup()
     let attempts = 0

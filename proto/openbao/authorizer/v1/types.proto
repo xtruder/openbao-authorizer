@@ -89,3 +89,20 @@ message ErrorDetail {
   // IDs of the items or grants the error concerns, when relevant.
   repeated string ids = 2;
 }
+
+// Grantable is one Grantable Rule as Requesters and Approvers see it.
+message Grantable {
+  string name = 1;
+  // OpenBao ACL path pattern: `+` matches one segment, a trailing `*` any suffix.
+  string path = 2;
+  repeated string capabilities = 3;
+  // Longest Grant the rule allows (default_ttl when the rule sets none).
+  google.protobuf.Duration max_ttl = 4;
+  // Operator-written hint on what the rule is for and how to pick a path.
+  string description = 5;
+  // Concrete requestable paths found by listing the rule's discover path;
+  // empty when the rule has none. Other paths matching `path` stay valid.
+  repeated string paths = 6;
+  // Set when listing the discover path failed; `path` still applies.
+  string discover_error = 7;
+}

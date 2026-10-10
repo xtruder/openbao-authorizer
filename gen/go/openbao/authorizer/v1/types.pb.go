@@ -570,6 +570,105 @@ func (x *ErrorDetail) GetIds() []string {
 	return nil
 }
 
+// Grantable is one Grantable Rule as Requesters and Approvers see it.
+type Grantable struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// OpenBao ACL path pattern: `+` matches one segment, a trailing `*` any suffix.
+	Path         string   `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
+	Capabilities []string `protobuf:"bytes,3,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
+	// Longest Grant the rule allows (default_ttl when the rule sets none).
+	MaxTtl *durationpb.Duration `protobuf:"bytes,4,opt,name=max_ttl,json=maxTtl,proto3" json:"max_ttl,omitempty"`
+	// Operator-written hint on what the rule is for and how to pick a path.
+	Description string `protobuf:"bytes,5,opt,name=description,proto3" json:"description,omitempty"`
+	// Concrete requestable paths found by listing the rule's discover path;
+	// empty when the rule has none. Other paths matching `path` stay valid.
+	Paths []string `protobuf:"bytes,6,rep,name=paths,proto3" json:"paths,omitempty"`
+	// Set when listing the discover path failed; `path` still applies.
+	DiscoverError string `protobuf:"bytes,7,opt,name=discover_error,json=discoverError,proto3" json:"discover_error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Grantable) Reset() {
+	*x = Grantable{}
+	mi := &file_openbao_authorizer_v1_types_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Grantable) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Grantable) ProtoMessage() {}
+
+func (x *Grantable) ProtoReflect() protoreflect.Message {
+	mi := &file_openbao_authorizer_v1_types_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Grantable.ProtoReflect.Descriptor instead.
+func (*Grantable) Descriptor() ([]byte, []int) {
+	return file_openbao_authorizer_v1_types_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *Grantable) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *Grantable) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *Grantable) GetCapabilities() []string {
+	if x != nil {
+		return x.Capabilities
+	}
+	return nil
+}
+
+func (x *Grantable) GetMaxTtl() *durationpb.Duration {
+	if x != nil {
+		return x.MaxTtl
+	}
+	return nil
+}
+
+func (x *Grantable) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *Grantable) GetPaths() []string {
+	if x != nil {
+		return x.Paths
+	}
+	return nil
+}
+
+func (x *Grantable) GetDiscoverError() string {
+	if x != nil {
+		return x.DiscoverError
+	}
+	return ""
+}
+
 var File_openbao_authorizer_v1_types_proto protoreflect.FileDescriptor
 
 const file_openbao_authorizer_v1_types_proto_rawDesc = "" +
@@ -618,7 +717,15 @@ const file_openbao_authorizer_v1_types_proto_rawDesc = "" +
 	"\tHeartbeat\"7\n" +
 	"\vErrorDetail\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason\x12\x10\n" +
-	"\x03ids\x18\x02 \x03(\tR\x03ids*\xd9\x01\n" +
+	"\x03ids\x18\x02 \x03(\tR\x03ids\"\xea\x01\n" +
+	"\tGrantable\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
+	"\x04path\x18\x02 \x01(\tR\x04path\x12\"\n" +
+	"\fcapabilities\x18\x03 \x03(\tR\fcapabilities\x122\n" +
+	"\amax_ttl\x18\x04 \x01(\v2\x19.google.protobuf.DurationR\x06maxTtl\x12 \n" +
+	"\vdescription\x18\x05 \x01(\tR\vdescription\x12\x14\n" +
+	"\x05paths\x18\x06 \x03(\tR\x05paths\x12%\n" +
+	"\x0ediscover_error\x18\a \x01(\tR\rdiscoverError*\xd9\x01\n" +
 	"\tItemState\x12\x1a\n" +
 	"\x16ITEM_STATE_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12ITEM_STATE_PENDING\x10\x01\x12\x1e\n" +
@@ -644,7 +751,7 @@ func file_openbao_authorizer_v1_types_proto_rawDescGZIP() []byte {
 }
 
 var file_openbao_authorizer_v1_types_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_openbao_authorizer_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_openbao_authorizer_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_openbao_authorizer_v1_types_proto_goTypes = []any{
 	(ItemState)(0),                // 0: openbao.authorizer.v1.ItemState
 	(*PermissionItem)(nil),        // 1: openbao.authorizer.v1.PermissionItem
@@ -653,25 +760,27 @@ var file_openbao_authorizer_v1_types_proto_goTypes = []any{
 	(*Grant)(nil),                 // 4: openbao.authorizer.v1.Grant
 	(*Heartbeat)(nil),             // 5: openbao.authorizer.v1.Heartbeat
 	(*ErrorDetail)(nil),           // 6: openbao.authorizer.v1.ErrorDetail
-	(*durationpb.Duration)(nil),   // 7: google.protobuf.Duration
-	(*timestamppb.Timestamp)(nil), // 8: google.protobuf.Timestamp
+	(*Grantable)(nil),             // 7: openbao.authorizer.v1.Grantable
+	(*durationpb.Duration)(nil),   // 8: google.protobuf.Duration
+	(*timestamppb.Timestamp)(nil), // 9: google.protobuf.Timestamp
 }
 var file_openbao_authorizer_v1_types_proto_depIdxs = []int32{
-	7,  // 0: openbao.authorizer.v1.PermissionItem.ttl:type_name -> google.protobuf.Duration
+	8,  // 0: openbao.authorizer.v1.PermissionItem.ttl:type_name -> google.protobuf.Duration
 	0,  // 1: openbao.authorizer.v1.PermissionItem.state:type_name -> openbao.authorizer.v1.ItemState
-	8,  // 2: openbao.authorizer.v1.PermissionItem.expires_at:type_name -> google.protobuf.Timestamp
-	8,  // 3: openbao.authorizer.v1.PermissionItem.decided_at:type_name -> google.protobuf.Timestamp
-	8,  // 4: openbao.authorizer.v1.GrantRequest.created_at:type_name -> google.protobuf.Timestamp
+	9,  // 2: openbao.authorizer.v1.PermissionItem.expires_at:type_name -> google.protobuf.Timestamp
+	9,  // 3: openbao.authorizer.v1.PermissionItem.decided_at:type_name -> google.protobuf.Timestamp
+	9,  // 4: openbao.authorizer.v1.GrantRequest.created_at:type_name -> google.protobuf.Timestamp
 	2,  // 5: openbao.authorizer.v1.GrantRequest.requester:type_name -> openbao.authorizer.v1.Requester
 	1,  // 6: openbao.authorizer.v1.GrantRequest.items:type_name -> openbao.authorizer.v1.PermissionItem
-	8,  // 7: openbao.authorizer.v1.Grant.created_at:type_name -> google.protobuf.Timestamp
-	8,  // 8: openbao.authorizer.v1.Grant.expires_at:type_name -> google.protobuf.Timestamp
+	9,  // 7: openbao.authorizer.v1.Grant.created_at:type_name -> google.protobuf.Timestamp
+	9,  // 8: openbao.authorizer.v1.Grant.expires_at:type_name -> google.protobuf.Timestamp
 	2,  // 9: openbao.authorizer.v1.Grant.requester:type_name -> openbao.authorizer.v1.Requester
-	10, // [10:10] is the sub-list for method output_type
-	10, // [10:10] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	8,  // 10: openbao.authorizer.v1.Grantable.max_ttl:type_name -> google.protobuf.Duration
+	11, // [11:11] is the sub-list for method output_type
+	11, // [11:11] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_openbao_authorizer_v1_types_proto_init() }
@@ -685,7 +794,7 @@ func file_openbao_authorizer_v1_types_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_openbao_authorizer_v1_types_proto_rawDesc), len(file_openbao_authorizer_v1_types_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   6,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -38,7 +38,8 @@ if ! "${OPENBAO_BIN}" secrets list -format=json | jq -e 'has("kv/")' >/dev/null;
   "${OPENBAO_BIN}" secrets enable -path=kv -version=2 kv >/dev/null
 fi
 
-"${OPENBAO_BIN}" policy write openbao-authorizer "${PROJECT_DIR}/config/authorizer-policy.hcl" >/dev/null
+cat "${PROJECT_DIR}/config/authorizer-policy.hcl" "${PROJECT_DIR}/deploy/local/authorizer-discover-policy.hcl" |
+  "${OPENBAO_BIN}" policy write openbao-authorizer - >/dev/null
 "${OPENBAO_BIN}" policy write openbao-authorizer-approver "${PROJECT_DIR}/config/approver-policy.hcl" >/dev/null
 "${OPENBAO_BIN}" policy write opencode-session "${PROJECT_DIR}/deploy/local/opencode-session-policy.hcl" >/dev/null
 "${OPENBAO_BIN}" policy write opencode-minter "${PROJECT_DIR}/deploy/local/opencode-minter-policy.hcl" >/dev/null
@@ -160,6 +161,8 @@ grantable "local-kv" {
   path         = "kv/data/opencode/*"
   capabilities = ["read"]
   max_ttl      = "24h"
+  description  = "Local example secrets."
+  discover     = "kv/metadata/opencode"
 }
 grantable "local-kv-metadata" {
   path         = "kv/metadata/opencode/*"
@@ -170,6 +173,8 @@ grantable "github-token" {
   path         = "github/token/project-*"
   capabilities = ["read"]
   max_ttl      = "1h"
+  description  = "GitHub App installation token for one project; the name selects org, repos and permissions."
+  discover     = "github/permissionsets"
 }
 EOF
 if [[ -n "${VAPID_PUBLIC_KEY:-}" || -n "${VAPID_PRIVATE_KEY:-}" || -n "${VAPID_SUBJECT:-}" ]]; then

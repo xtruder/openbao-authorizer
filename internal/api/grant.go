@@ -102,6 +102,10 @@ func (a grantService) ListMyGrants(ctx context.Context, _ *connect.Request[autho
 	return connect.NewResponse(&authorizerv1.ListMyGrantsResponse{Grants: grantsProto(active, false)}), nil
 }
 
+func (a grantService) ListGrantables(ctx context.Context, _ *connect.Request[authorizerv1.ListGrantablesRequest]) (*connect.Response[authorizerv1.ListGrantablesResponse], error) {
+	return connect.NewResponse(&authorizerv1.ListGrantablesResponse{Grantables: grantablesProto(a.grants.Grantables(ctx))}), nil
+}
+
 // streamWatch waits for the next change on a live stream while sending
 // heartbeats in between.
 type streamWatch struct {

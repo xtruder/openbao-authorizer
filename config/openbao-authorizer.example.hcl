@@ -60,10 +60,16 @@ grants {
 # segment (any position, any case, or a glob such as `s*`), a wildcard first
 # segment, or sudo are rejected at startup. Requested paths with such a segment
 # are always refused, so these KV keys can't be granted.
+#
+# Requesters see every rule and its description. discover names an OpenBao
+# path the authorizer lists (its policy needs `list` there); each key fills the
+# path's single, last-segment wildcard to suggest concrete paths.
 grantable "github-token" {
   path         = "github/token/project-*"
   capabilities = ["read"]
   max_ttl      = "8h"
+  description  = "GitHub App installation token for one project; the name selects org, repos and permissions."
+  discover     = "github/permissionsets"
 }
 
 grantable "project-secrets" {

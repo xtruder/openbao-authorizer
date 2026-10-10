@@ -6,7 +6,7 @@ import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegen
 import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
 import type { Duration } from "@bufbuild/protobuf/wkt";
 import { file_google_protobuf_duration } from "@bufbuild/protobuf/wkt";
-import type { Grant, GrantRequest, Heartbeat } from "./types_pb";
+import type { Grant, Grantable, GrantRequest, Heartbeat } from "./types_pb";
 import { file_openbao_authorizer_v1_types } from "./types_pb";
 import type { Message } from "@bufbuild/protobuf";
 
@@ -14,7 +14,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file openbao/authorizer/v1/grant.proto.
  */
 export const file_openbao_authorizer_v1_grant: GenFile = /*@__PURE__*/
-  fileDesc("CiFvcGVuYmFvL2F1dGhvcml6ZXIvdjEvZ3JhbnQucHJvdG8SFW9wZW5iYW8uYXV0aG9yaXplci52MSJhChNQZXJtaXNzaW9uSXRlbUlucHV0EgwKBHBhdGgYASABKAkSFAoMY2FwYWJpbGl0aWVzGAIgAygJEiYKA3R0bBgDIAEoCzIZLmdvb2dsZS5wcm90b2J1Zi5EdXJhdGlvbiJmChlDcmVhdGVHcmFudFJlcXVlc3RSZXF1ZXN0Eg4KBnJlYXNvbhgBIAEoCRI5CgVpdGVtcxgCIAMoCzIqLm9wZW5iYW8uYXV0aG9yaXplci52MS5QZXJtaXNzaW9uSXRlbUlucHV0IlgKGkNyZWF0ZUdyYW50UmVxdWVzdFJlc3BvbnNlEjoKDWdyYW50X3JlcXVlc3QYASABKAsyIy5vcGVuYmFvLmF1dGhvcml6ZXIudjEuR3JhbnRSZXF1ZXN0IiQKFkdldEdyYW50UmVxdWVzdFJlcXVlc3QSCgoCaWQYASABKAkiVQoXR2V0R3JhbnRSZXF1ZXN0UmVzcG9uc2USOgoNZ3JhbnRfcmVxdWVzdBgBIAEoCzIjLm9wZW5iYW8uYXV0aG9yaXplci52MS5HcmFudFJlcXVlc3QiJgoYV2F0Y2hHcmFudFJlcXVlc3RSZXF1ZXN0EgoKAmlkGAEgASgJIpkBChlXYXRjaEdyYW50UmVxdWVzdFJlc3BvbnNlEjwKDWdyYW50X3JlcXVlc3QYASABKAsyIy5vcGVuYmFvLmF1dGhvcml6ZXIudjEuR3JhbnRSZXF1ZXN0SAASNQoJaGVhcnRiZWF0GAIgASgLMiAub3BlbmJhby5hdXRob3JpemVyLnYxLkhlYXJ0YmVhdEgAQgcKBWV2ZW50IhUKE0xpc3RNeUdyYW50c1JlcXVlc3QiRAoUTGlzdE15R3JhbnRzUmVzcG9uc2USLAoGZ3JhbnRzGAEgAygLMhwub3BlbmJhby5hdXRob3JpemVyLnYxLkdyYW50Mt4DCgxHcmFudFNlcnZpY2USeQoSQ3JlYXRlR3JhbnRSZXF1ZXN0EjAub3BlbmJhby5hdXRob3JpemVyLnYxLkNyZWF0ZUdyYW50UmVxdWVzdFJlcXVlc3QaMS5vcGVuYmFvLmF1dGhvcml6ZXIudjEuQ3JlYXRlR3JhbnRSZXF1ZXN0UmVzcG9uc2UScAoPR2V0R3JhbnRSZXF1ZXN0Ei0ub3BlbmJhby5hdXRob3JpemVyLnYxLkdldEdyYW50UmVxdWVzdFJlcXVlc3QaLi5vcGVuYmFvLmF1dGhvcml6ZXIudjEuR2V0R3JhbnRSZXF1ZXN0UmVzcG9uc2USeAoRV2F0Y2hHcmFudFJlcXVlc3QSLy5vcGVuYmFvLmF1dGhvcml6ZXIudjEuV2F0Y2hHcmFudFJlcXVlc3RSZXF1ZXN0GjAub3BlbmJhby5hdXRob3JpemVyLnYxLldhdGNoR3JhbnRSZXF1ZXN0UmVzcG9uc2UwARJnCgxMaXN0TXlHcmFudHMSKi5vcGVuYmFvLmF1dGhvcml6ZXIudjEuTGlzdE15R3JhbnRzUmVxdWVzdBorLm9wZW5iYW8uYXV0aG9yaXplci52MS5MaXN0TXlHcmFudHNSZXNwb25zZULuAQoZY29tLm9wZW5iYW8uYXV0aG9yaXplci52MUIKR3JhbnRQcm90b1ABWk9naXRodWIuY29tL3h0cnVkZXIvb3BlbmJhby1hdXRob3JpemVyL2dlbi9nby9vcGVuYmFvL2F1dGhvcml6ZXIvdjE7YXV0aG9yaXplcnYxogIDT0FYqgIVT3BlbmJhby5BdXRob3JpemVyLlYxygIVT3BlbmJhb1xBdXRob3JpemVyXFYx4gIhT3BlbmJhb1xBdXRob3JpemVyXFYxXEdQQk1ldGFkYXRh6gIXT3BlbmJhbzo6QXV0aG9yaXplcjo6VjFiBnByb3RvMw", [file_google_protobuf_duration, file_openbao_authorizer_v1_types]);
+  fileDesc("CiFvcGVuYmFvL2F1dGhvcml6ZXIvdjEvZ3JhbnQucHJvdG8SFW9wZW5iYW8uYXV0aG9yaXplci52MSJhChNQZXJtaXNzaW9uSXRlbUlucHV0EgwKBHBhdGgYASABKAkSFAoMY2FwYWJpbGl0aWVzGAIgAygJEiYKA3R0bBgDIAEoCzIZLmdvb2dsZS5wcm90b2J1Zi5EdXJhdGlvbiJmChlDcmVhdGVHcmFudFJlcXVlc3RSZXF1ZXN0Eg4KBnJlYXNvbhgBIAEoCRI5CgVpdGVtcxgCIAMoCzIqLm9wZW5iYW8uYXV0aG9yaXplci52MS5QZXJtaXNzaW9uSXRlbUlucHV0IlgKGkNyZWF0ZUdyYW50UmVxdWVzdFJlc3BvbnNlEjoKDWdyYW50X3JlcXVlc3QYASABKAsyIy5vcGVuYmFvLmF1dGhvcml6ZXIudjEuR3JhbnRSZXF1ZXN0IiQKFkdldEdyYW50UmVxdWVzdFJlcXVlc3QSCgoCaWQYASABKAkiVQoXR2V0R3JhbnRSZXF1ZXN0UmVzcG9uc2USOgoNZ3JhbnRfcmVxdWVzdBgBIAEoCzIjLm9wZW5iYW8uYXV0aG9yaXplci52MS5HcmFudFJlcXVlc3QiJgoYV2F0Y2hHcmFudFJlcXVlc3RSZXF1ZXN0EgoKAmlkGAEgASgJIpkBChlXYXRjaEdyYW50UmVxdWVzdFJlc3BvbnNlEjwKDWdyYW50X3JlcXVlc3QYASABKAsyIy5vcGVuYmFvLmF1dGhvcml6ZXIudjEuR3JhbnRSZXF1ZXN0SAASNQoJaGVhcnRiZWF0GAIgASgLMiAub3BlbmJhby5hdXRob3JpemVyLnYxLkhlYXJ0YmVhdEgAQgcKBWV2ZW50IhUKE0xpc3RNeUdyYW50c1JlcXVlc3QiRAoUTGlzdE15R3JhbnRzUmVzcG9uc2USLAoGZ3JhbnRzGAEgAygLMhwub3BlbmJhby5hdXRob3JpemVyLnYxLkdyYW50IhcKFUxpc3RHcmFudGFibGVzUmVxdWVzdCJOChZMaXN0R3JhbnRhYmxlc1Jlc3BvbnNlEjQKCmdyYW50YWJsZXMYASADKAsyIC5vcGVuYmFvLmF1dGhvcml6ZXIudjEuR3JhbnRhYmxlMs0ECgxHcmFudFNlcnZpY2USeQoSQ3JlYXRlR3JhbnRSZXF1ZXN0EjAub3BlbmJhby5hdXRob3JpemVyLnYxLkNyZWF0ZUdyYW50UmVxdWVzdFJlcXVlc3QaMS5vcGVuYmFvLmF1dGhvcml6ZXIudjEuQ3JlYXRlR3JhbnRSZXF1ZXN0UmVzcG9uc2UScAoPR2V0R3JhbnRSZXF1ZXN0Ei0ub3BlbmJhby5hdXRob3JpemVyLnYxLkdldEdyYW50UmVxdWVzdFJlcXVlc3QaLi5vcGVuYmFvLmF1dGhvcml6ZXIudjEuR2V0R3JhbnRSZXF1ZXN0UmVzcG9uc2USeAoRV2F0Y2hHcmFudFJlcXVlc3QSLy5vcGVuYmFvLmF1dGhvcml6ZXIudjEuV2F0Y2hHcmFudFJlcXVlc3RSZXF1ZXN0GjAub3BlbmJhby5hdXRob3JpemVyLnYxLldhdGNoR3JhbnRSZXF1ZXN0UmVzcG9uc2UwARJnCgxMaXN0TXlHcmFudHMSKi5vcGVuYmFvLmF1dGhvcml6ZXIudjEuTGlzdE15R3JhbnRzUmVxdWVzdBorLm9wZW5iYW8uYXV0aG9yaXplci52MS5MaXN0TXlHcmFudHNSZXNwb25zZRJtCg5MaXN0R3JhbnRhYmxlcxIsLm9wZW5iYW8uYXV0aG9yaXplci52MS5MaXN0R3JhbnRhYmxlc1JlcXVlc3QaLS5vcGVuYmFvLmF1dGhvcml6ZXIudjEuTGlzdEdyYW50YWJsZXNSZXNwb25zZULuAQoZY29tLm9wZW5iYW8uYXV0aG9yaXplci52MUIKR3JhbnRQcm90b1ABWk9naXRodWIuY29tL3h0cnVkZXIvb3BlbmJhby1hdXRob3JpemVyL2dlbi9nby9vcGVuYmFvL2F1dGhvcml6ZXIvdjE7YXV0aG9yaXplcnYxogIDT0FYqgIVT3BlbmJhby5BdXRob3JpemVyLlYxygIVT3BlbmJhb1xBdXRob3JpemVyXFYx4gIhT3BlbmJhb1xBdXRob3JpemVyXFYxXEdQQk1ldGFkYXRh6gIXT3BlbmJhbzo6QXV0aG9yaXplcjo6VjFiBnByb3RvMw", [file_google_protobuf_duration, file_openbao_authorizer_v1_types]);
 
 /**
  * PermissionItemInput is one requested path and its capabilities.
@@ -201,6 +201,36 @@ export const ListMyGrantsResponseSchema: GenMessage<ListMyGrantsResponse> = /*@_
   messageDesc(file_openbao_authorizer_v1_grant, 8);
 
 /**
+ * @generated from message openbao.authorizer.v1.ListGrantablesRequest
+ */
+export type ListGrantablesRequest = Message<"openbao.authorizer.v1.ListGrantablesRequest"> & {
+};
+
+/**
+ * Describes the message openbao.authorizer.v1.ListGrantablesRequest.
+ * Use `create(ListGrantablesRequestSchema)` to create a new message.
+ */
+export const ListGrantablesRequestSchema: GenMessage<ListGrantablesRequest> = /*@__PURE__*/
+  messageDesc(file_openbao_authorizer_v1_grant, 9);
+
+/**
+ * @generated from message openbao.authorizer.v1.ListGrantablesResponse
+ */
+export type ListGrantablesResponse = Message<"openbao.authorizer.v1.ListGrantablesResponse"> & {
+  /**
+   * @generated from field: repeated openbao.authorizer.v1.Grantable grantables = 1;
+   */
+  grantables: Grantable[];
+};
+
+/**
+ * Describes the message openbao.authorizer.v1.ListGrantablesResponse.
+ * Use `create(ListGrantablesResponseSchema)` to create a new message.
+ */
+export const ListGrantablesResponseSchema: GenMessage<ListGrantablesResponse> = /*@__PURE__*/
+  messageDesc(file_openbao_authorizer_v1_grant, 10);
+
+/**
  * GrantService is called by Requesters (e.g. bao-cred in an Agent Session)
  * with `Authorization: Bearer <OpenBao token>`. Only tokens matching a
  * configured Requester Rule may call it; a Requester sees only its own
@@ -252,6 +282,17 @@ export const GrantService: GenService<{
     methodKind: "unary";
     input: typeof ListMyGrantsRequestSchema;
     output: typeof ListMyGrantsResponseSchema;
+  },
+  /**
+   * ListGrantables returns what may be requested: every Grantable Rule and,
+   * for rules with a discover path, the concrete paths found there.
+   *
+   * @generated from rpc openbao.authorizer.v1.GrantService.ListGrantables
+   */
+  listGrantables: {
+    methodKind: "unary";
+    input: typeof ListGrantablesRequestSchema;
+    output: typeof ListGrantablesResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_openbao_authorizer_v1_grant, 0);

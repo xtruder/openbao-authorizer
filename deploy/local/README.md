@@ -26,7 +26,9 @@ empty so the service does not need a frontend directory at runtime.
 
 `bootstrap-openbao.sh` creates:
 
-- the `openbao-authorizer` policy ([`config/authorizer-policy.hcl`](../../config/authorizer-policy.hcl))
+- the `openbao-authorizer` policy ([`config/authorizer-policy.hcl`](../../config/authorizer-policy.hcl)
+  plus `list` on the discover paths in
+  [`authorizer-discover-policy.hcl`](authorizer-discover-policy.hcl))
   and an orphan authorizer token without the default policy;
 - the `approver` user, its `openbao-authorizer-approver` marker policy and the
   `local-approvers` identity group;
@@ -38,7 +40,9 @@ empty so the service does not need a frontend directory at runtime.
   `auth/token/create/opencode-session`;
 - an example secret at `kv/opencode/example`, plus `grantable` rules in
   `app.hcl` for `kv/data/opencode/*`, `kv/metadata/opencode/*` and
-  `github/token/project-*`;
+  `github/token/project-*`; the first and last discover their concrete paths
+  from `kv/metadata/opencode` and `github/permissionsets`, which
+  `bao-cred grantable` lists;
 - in `app.hcl`, an `approver_login` block offering userpass and token sign-in,
   and one `requester "opencode"` rule matching the `opencode-session` token
   role. The minter AppRole shares the `approle` mount, so don't add an

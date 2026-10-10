@@ -60,6 +60,8 @@ grantable "github-token" {
   path         = "github/token/project-*"
   capabilities = ["read"]
   max_ttl      = "8h"
+  description  = " One project's GitHub App token. "
+  discover     = "github/permissionsets/"
 }
 grantable "kv" {
   path         = "kv/data/+/config"
@@ -107,6 +109,10 @@ grantable "kv" {
 	if len(rules) != 2 || rules[0].Name != "github-token" || rules[0].MaxTTL != 8*time.Hour || rules[1].MaxTTL != 0 || len(rules[1].Capabilities) != 2 {
 		t.Fatalf("rules = %#v", rules)
 	}
+
+	if rules[0].Description != "One project's GitHub App token." || rules[0].Discover != "github/permissionsets" || rules[1].Discover != "" {
+		t.Fatalf("discovery settings = %#v", rules)
+	}
 }
 
 func TestLoadAppliesGrantDefaults(t *testing.T) {
@@ -136,21 +142,27 @@ func TestLoadRejectsInvalidGrantableRules(t *testing.T) {
 		return fmt.Sprintf("grantable \"x\" {\n  path = %q\n  capabilities = %s\n  %s\n}\n", path, capabilities, extra)
 	}
 	cases := map[string]struct{ extra, message string }{
-		"sys path":         {rule("sys/policies/acl/*", `["read"]`, ""), "hard denylist"},
-		"identity glob":    {rule("iden*", `["read"]`, ""), "hard denylist"},
-		"leading wildcard": {rule("+/data/a", `["read"]`, ""), "hard denylist"},
-		"bare glob":        {rule("*", `["read"]`, ""), "hard denylist"},
-		"auth path":        {rule("auth/token/create", `["update"]`, ""), "hard denylist"},
-		"cubbyhole":        {rule("cubbyhole/secret", `["read"]`, ""), "hard denylist"},
-		"sudo":             {rule("kv/data/a", `["read", "sudo"]`, ""), "sudo"},
-		"unknown cap":      {rule("kv/data/a", `["deny"]`, ""), "capability \"deny\""},
-		"no caps":          {rule("kv/data/a", `[]`, ""), "capabilities are required"},
-		"inner glob":       {rule("kv/*/a", `["read"]`, ""), "only allowed at the end"},
-		"partial plus":     {rule("kv/data/a+", `["read"]`, ""), "complete path segment"},
-		"bad max_ttl":      {rule("kv/data/a", `["read"]`, `max_ttl = "soon"`), "max_ttl"},
-		"duplicate":        {rule("kv/data/a", `["read"]`, "") + rule("kv/data/b", `["read"]`, ""), "more than once"},
-		"bad pending_ttl":  {"grants {\n  pending_ttl = \"0s\"\n}\n", "grants.pending_ttl"},
-		"bad default_ttl":  {"grants {\n  default_ttl = \"forever\"\n}\n", "grants.default_ttl"},
+		"sys path":          {rule("sys/policies/acl/*", `["read"]`, ""), "hard denylist"},
+		"identity glob":     {rule("iden*", `["read"]`, ""), "hard denylist"},
+		"leading wildcard":  {rule("+/data/a", `["read"]`, ""), "hard denylist"},
+		"bare glob":         {rule("*", `["read"]`, ""), "hard denylist"},
+		"auth path":         {rule("auth/token/create", `["update"]`, ""), "hard denylist"},
+		"cubbyhole":         {rule("cubbyhole/secret", `["read"]`, ""), "hard denylist"},
+		"sudo":              {rule("kv/data/a", `["read", "sudo"]`, ""), "sudo"},
+		"unknown cap":       {rule("kv/data/a", `["deny"]`, ""), "capability \"deny\""},
+		"no caps":           {rule("kv/data/a", `[]`, ""), "capabilities are required"},
+		"inner glob":        {rule("kv/*/a", `["read"]`, ""), "only allowed at the end"},
+		"partial plus":      {rule("kv/data/a+", `["read"]`, ""), "complete path segment"},
+		"bad max_ttl":       {rule("kv/data/a", `["read"]`, `max_ttl = "soon"`), "max_ttl"},
+		"duplicate":         {rule("kv/data/a", `["read"]`, "") + rule("kv/data/b", `["read"]`, ""), "more than once"},
+		"bad pending_ttl":   {"grants {\n  pending_ttl = \"0s\"\n}\n", "grants.pending_ttl"},
+		"bad default_ttl":   {"grants {\n  default_ttl = \"forever\"\n}\n", "grants.default_ttl"},
+		"discover exact":    {rule("kv/data/a", `["read"]`, `discover = "kv/metadata"`), "exactly one wildcard"},
+		"discover inner +":  {rule("kv/+/a/*", `["read"]`, `discover = "kv/metadata"`), "exactly one wildcard"},
+		"discover not last": {rule("kv/data/+/config", `["read"]`, `discover = "kv/metadata"`), "exactly one wildcard"},
+		"discover denied":   {rule("kv/data/*", `["read"]`, `discover = "sys/policies/acl"`), "hard denylist"},
+		"discover glob":     {rule("kv/data/*", `["read"]`, `discover = "kv/metadata/*"`), "concrete"},
+		"discover rooted":   {rule("kv/data/*", `["read"]`, `discover = "/kv/metadata"`), "must not start with /"},
 	}
 	for name, testCase := range cases {
 		t.Run(name, func(t *testing.T) {

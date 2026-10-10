@@ -17,3 +17,8 @@ path "identity/entity/id/*" {
 path "sys/policies/acl/agent-grant-*" {
   capabilities = ["create", "read", "update", "delete"]
 }
+
+# Each Grantable Rule with `discover` needs `list` on its discover path, e.g.:
+# path "github/permissionsets" {
+#   capabilities = ["list"]
+# }

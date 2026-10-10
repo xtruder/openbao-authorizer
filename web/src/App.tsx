@@ -4,7 +4,7 @@ import { ConnectError } from '@connectrpc/connect'
 import { createApproverClient, errorReason, getErrorMessage, isSessionLost, type ApproverClient, type Session } from './api'
 import { formatDuration, parseDuration, pushEnrollmentErrorMessage } from './utils'
 import { Decision, LoginMethodType, type DashboardSnapshot, type Identity, type LoginMethod } from './gen/openbao/authorizer/v1/approver_pb'
-import { ItemState, type Requester, type Grant, type GrantRequest, type PermissionItem } from './gen/openbao/authorizer/v1/types_pb'
+import { ItemState, type Requester, type Grant, type Grantable, type GrantRequest, type PermissionItem } from './gen/openbao/authorizer/v1/types_pb'
 import { completeOidcLogin, discardOidcLogin, isOidcCallback, loginWithGitHub, loginWithPassword, startOidcLogin, type OpenBaoTarget } from './openbaoLogin'
 import {
   BellIcon,
@@ -591,17 +591,65 @@ function GrantRow({ grant, busy, disabled, onRevoke }: { grant: Grant; busy: boo
   )
 }
 
+// Rules with more discovered paths than this show the rest behind a disclosure.
+const PATH_PREVIEW_LIMIT = 5
+
+function PathList({ label, paths }: { label: string; paths: string[] }) {
+  return (
+    <ul className="mt-1 space-y-0.5" aria-label={label}>
+      {paths.map((path) => <li key={path} className="break-all font-mono text-xs text-zinc-700">{path}</li>)}
+    </ul>
+  )
+}
+
+function GrantableRow({ grantable }: { grantable: Grantable }) {
+  const maxTtl = formatDuration(grantable.maxTtl)
+  const preview = grantable.paths.slice(0, PATH_PREVIEW_LIMIT)
+  const rest = grantable.paths.slice(PATH_PREVIEW_LIMIT)
+  return (
+    <li className="item-row">
+      <div className="min-w-0 flex-1">
+        <div className="mb-1.5 flex flex-wrap items-center gap-2">
+          <h3 className="text-sm font-semibold text-zinc-950">{grantable.name}</h3>
+          {grantable.capabilities.map((capability) => <span key={capability} className="operation-pill">{capability}</span>)}
+        </div>
+        <p className="break-all font-mono text-[13px] font-semibold text-zinc-900">{grantable.path}</p>
+        {grantable.description && <p className="mt-1.5 whitespace-pre-wrap break-words text-sm leading-6 text-zinc-600">{grantable.description}</p>}
+        {maxTtl && <p className="mt-1.5 inline-flex items-center gap-1 text-xs text-zinc-500"><ClockIcon className="size-3.5" />Max TTL {maxTtl}</p>}
+        {preview.length > 0 && (
+          <div className="mt-2.5">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-zinc-400">Discovered paths</p>
+            <PathList label={`Discovered paths for ${grantable.name}`} paths={preview} />
+            {rest.length > 0 && (
+              <details className="mt-1">
+                <summary className="cursor-pointer text-xs font-medium text-zinc-500 hover:text-zinc-800">{rest.length} more {rest.length === 1 ? 'path' : 'paths'}</summary>
+                <PathList label={`More discovered paths for ${grantable.name}`} paths={rest} />
+              </details>
+            )}
+          </div>
+        )}
+        {grantable.discoverError && (
+          <p className="mt-2 break-words text-xs text-amber-700" title={grantable.discoverError}>
+            Path discovery failed: {grantable.discoverError}. Any path matching the pattern can still be requested.
+          </p>
+        )}
+      </div>
+    </li>
+  )
+}
+
 function EmptyState({ tab }: { tab: DashboardTab }) {
   const content = {
     pending: ['Queue is clear', 'New access requests from requesters will appear here as they arrive.'],
     history: ['No decided requests', 'Requests leave the queue once every item is decided, refused or expired.'],
     grants: ['No active grants', 'Approved permissions appear here until they expire or you revoke them.'],
+    catalog: ['No grantable rules', 'The rules requesters can ask for appear here once the authorizer configures them.'],
   }[tab]
   return (
     <div className="grid min-h-[390px] place-items-center px-6 py-16 text-center">
       <div>
         <div className="mx-auto grid size-14 place-items-center rounded-full border border-zinc-200 bg-zinc-50 text-zinc-400">
-          {tab === 'pending' ? <InboxIcon className="size-6" /> : tab === 'history' ? <ClockIcon className="size-6" /> : <KeyIcon className="size-6" />}
+          {tab === 'pending' ? <InboxIcon className="size-6" /> : tab === 'history' ? <ClockIcon className="size-6" /> : tab === 'catalog' ? <ShieldIcon className="size-6" /> : <KeyIcon className="size-6" />}
         </div>
         <h3 className="mt-5 text-base font-semibold text-zinc-900">{content[0]}</h3>
         <p className="mx-auto mt-2 max-w-xs text-sm leading-6 text-zinc-500">{content[1]}</p>
@@ -647,6 +695,9 @@ function Dashboard({ client, session, onSignedOut }: { client: ApproverClient; s
   const [highlightedId, setHighlightedId] = useState<string | null>(null)
   const [signingOut, setSigningOut] = useState(false)
   const [signOutError, setSignOutError] = useState('')
+  // The catalog is not part of the event stream; it is fetched whenever its tab opens.
+  const [catalog, setCatalog] = useState<{ grantables: Grantable[] | null; loading: boolean; error: string }>({ grantables: null, loading: false, error: '' })
+  const catalogRequest = useRef(0)
   const [notificationStatus, setNotificationStatus] = useState<'idle' | 'enabling' | 'enabled' | 'disabling' | 'unsupported'>(() => {
     if (!('Notification' in window) || !('serviceWorker' in navigator) || !('PushManager' in window)) return 'unsupported'
     return 'idle'
@@ -852,6 +903,34 @@ function Dashboard({ client, session, onSignedOut }: { client: ApproverClient; s
     }
   }
 
+  async function loadCatalog() {
+    // Only the latest load may land, so a slow earlier response cannot overwrite a refresh.
+    const request = ++catalogRequest.current
+    setCatalog((current) => ({ ...current, loading: true, error: '' }))
+    try {
+      const { grantables } = await client.listGrantableRules({})
+      if (request !== catalogRequest.current) return
+      setCatalog({ grantables, loading: false, error: '' })
+    } catch (caught) {
+      if (request !== catalogRequest.current) return
+      if (isSessionLost(caught)) {
+        onSignedOut()
+        return
+      }
+      setCatalog((current) => ({ ...current, loading: false, error: getErrorMessage(caught, 'Unable to load grantable rules.') }))
+    }
+  }
+
+  function refresh() {
+    if (tab === 'catalog') void loadCatalog()
+    else restartStream(true)
+  }
+
+  function selectTab(next: DashboardTab) {
+    setTab(next)
+    if (next === 'catalog') void loadCatalog()
+  }
+
   async function signOut() {
     if (signingOut) return
     setSigningOut(true)
@@ -927,12 +1006,16 @@ function Dashboard({ client, session, onSignedOut }: { client: ApproverClient; s
     }
   }
 
-  const tabs: { id: DashboardTab; label: string; count: number }[] = [
+  const tabs: { id: DashboardTab; label: string; count?: number }[] = [
     { id: 'pending', label: 'Pending', count: pendingItemCount },
     { id: 'history', label: 'History', count: history.length },
     { id: 'grants', label: 'Active grants', count: grants.length },
+    { id: 'catalog', label: 'Grantable rules', count: catalog.grantables?.length },
   ]
-  const visibleCount = tab === 'pending' ? pending.length : tab === 'history' ? history.length : grants.length
+  const visibleCount = { pending: pending.length, history: history.length, grants: grants.length, catalog: catalog.grantables?.length ?? 0 }[tab]
+  const countNoun = { pending: 'request', history: 'request', grants: 'grant', catalog: 'rule' }[tab]
+  const listLoading = tab === 'catalog' ? catalog.grantables === null && !catalog.error : loading
+  const refreshBusy = tab === 'catalog' ? catalog.loading : refreshing
 
   return (
     <>
@@ -971,8 +1054,8 @@ function Dashboard({ client, session, onSignedOut }: { client: ApproverClient; s
             <h1 className="mt-3 text-3xl font-semibold tracking-[-0.04em] text-zinc-950 sm:text-4xl">Access requests</h1>
             <p className="mt-2 text-sm leading-6 text-zinc-500">Decide each permission a requester asks for. Approved grants expire on their own.</p>
           </div>
-          <button type="button" onClick={() => restartStream(true)} disabled={refreshing} className="secondary-button self-start sm:self-auto">
-            <RefreshIcon className={`size-4 ${refreshing ? 'animate-spin' : ''}`} />Refresh
+          <button type="button" onClick={refresh} disabled={refreshBusy} className="secondary-button self-start sm:self-auto">
+            <RefreshIcon className={`size-4 ${refreshBusy ? 'animate-spin' : ''}`} />Refresh
           </button>
         </div>
 
@@ -992,21 +1075,31 @@ function Dashboard({ client, session, onSignedOut }: { client: ApproverClient; s
           <div className="list-toolbar">
             <div className="filter-tabs" role="group" aria-label="Views">
               {tabs.map((entry) => (
-                <button key={entry.id} type="button" aria-pressed={tab === entry.id} onClick={() => setTab(entry.id)} className={tab === entry.id ? 'active' : ''}>
-                  {entry.label} <span>{entry.count}</span>
+                <button key={entry.id} type="button" aria-pressed={tab === entry.id} onClick={() => selectTab(entry.id)} className={tab === entry.id ? 'active' : ''}>
+                  {entry.label} {entry.count !== undefined && <span>{entry.count}</span>}
                 </button>
               ))}
             </div>
-            <p className="hidden text-xs text-zinc-400 sm:block">{visibleCount} {tab === 'grants' ? (visibleCount === 1 ? 'grant' : 'grants') : (visibleCount === 1 ? 'request' : 'requests')}</p>
+            <p className="hidden text-xs text-zinc-400 sm:block">{visibleCount} {countNoun}{visibleCount === 1 ? '' : 's'}</p>
           </div>
 
           {grantError && tab === 'grants' && <div role="alert" className="mx-4 mt-3 rounded-sm border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-700 sm:mx-6">{grantError}</div>}
 
-          {loading ? (
-            <div className="space-y-px" aria-label="Loading requests" role="status">
+          {catalog.error && tab === 'catalog' && (
+            <div role="alert" className="mx-4 mt-3 flex items-center justify-between gap-4 rounded-sm border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-700 sm:mx-6">
+              <span>{catalog.error}</span><button type="button" onClick={() => void loadCatalog()} disabled={catalog.loading} className="font-semibold underline underline-offset-2">Retry</button>
+            </div>
+          )}
+
+          {listLoading ? (
+            <div className="space-y-px" aria-label={tab === 'catalog' ? 'Loading grantable rules' : 'Loading requests'} role="status">
               {[0, 1, 2].map((item) => <div className="request-skeleton" key={item}><div className="size-10 animate-pulse rounded-sm bg-zinc-100" /><div className="flex-1 space-y-3"><div className="h-3 w-24 animate-pulse rounded bg-zinc-100" /><div className="h-3 w-2/3 animate-pulse rounded bg-zinc-100" /><div className="h-2.5 w-1/2 animate-pulse rounded bg-zinc-100" /></div></div>)}
             </div>
-          ) : visibleCount === 0 ? <EmptyState tab={tab} /> : tab === 'grants' ? (
+          ) : tab === 'catalog' && catalog.grantables === null ? null : visibleCount === 0 ? <EmptyState tab={tab} /> : tab === 'catalog' ? (
+            <ul className="divide-y divide-zinc-100" aria-label="Grantable rules">
+              {catalog.grantables?.map((grantable) => <GrantableRow key={grantable.name} grantable={grantable} />)}
+            </ul>
+          ) : tab === 'grants' ? (
             <ul className="divide-y divide-zinc-100" aria-label="Active grants">
               {grants.map((grant) => <GrantRow key={grant.id} grant={grant} busy={busyGrantId === grant.id} disabled={busyGrantId !== null} onRevoke={(target) => void revoke(target)} />)}
             </ul>

@@ -25,7 +25,7 @@ const rootLong = `Reads credentials from OpenBao with the Requester's token from
 VAULT_TOKEN, or else the token file ~/.vault-token written by bao login (skipped
 when BAO_NO_TOKEN_FILE is set). When the token lacks access, bao-cred can file
 a Grant Request with the authorizer at BAO_AUTHORIZER_ADDR and wait for an
-Approver to decide it.
+Approver to decide it; bao-cred grantable lists the paths that may be requested.
 
 Request outcomes are printed as JSON on stdout; progress goes to stderr.
 
@@ -37,7 +37,8 @@ Exit status:
   4  a Permission Item is still pending (timeout or --no-wait)
   In command mode, the command's own exit status is returned.`
 
-const rootExample = `  bao-cred read --field token github/token/project-example
+const rootExample = `  bao-cred grantable
+  bao-cred read --field token github/token/project-example
   bao-cred read --reason "open a PR in org/repo" --field token github/token/project-example
   bao-cred request --reason "migrate app schema" --item database/creds/app=read --item kv/data/app=read,update
   bao-cred read --format dotenv --map DB_USER=username --map DB_PASSWORD=password database/creds/app
@@ -142,7 +143,7 @@ func newRootCommand(read readFunc) *cobra.Command {
 	}
 	root.CompletionOptions.DisableDefaultCmd = true
 	root.SetFlagErrorFunc(flagError)
-	root.AddCommand(newReadCommand(read), newRequestCommand(), newGrantsCommand())
+	root.AddCommand(newReadCommand(read), newRequestCommand(), newGrantsCommand(), newGrantableCommand())
 	return root
 }
 

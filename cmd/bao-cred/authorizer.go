@@ -162,6 +162,17 @@ type grantOutput struct {
 	ExpiresAt    time.Time `json:"expires_at"`
 }
 
+// grantableOutput is the printed form of a Grantable Rule.
+type grantableOutput struct {
+	Name          string   `json:"name"`
+	Path          string   `json:"path"`
+	Capabilities  []string `json:"capabilities"`
+	MaxTTL        string   `json:"max_ttl"`
+	Description   string   `json:"description,omitempty"`
+	Paths         []string `json:"paths,omitempty"`
+	DiscoverError string   `json:"discover_error,omitempty"`
+}
+
 // authorizerError is an RPC failure reduced to the authorizer's stable reason
 // and message. It never includes request headers, so the token stays out of
 // output.
@@ -512,6 +523,26 @@ func (c *authorizerClient) grants(ctx context.Context) ([]grantOutput, error) {
 	return grants, nil
 }
 
+func (c *authorizerClient) grantables(ctx context.Context) ([]grantableOutput, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	response, err := c.service.ListGrantables(ctx, connect.NewRequest(&authorizerv1.ListGrantablesRequest{}))
+	if err != nil {
+		return nil, fmt.Errorf("list Grantable Rules: %w", newAuthorizerError(err))
+	}
+
+	grantables := make([]grantableOutput, 0, len(response.Msg.GetGrantables()))
+	for _, grantable := range response.Msg.GetGrantables() {
+		grantables = append(grantables, grantableOutput{
+			Name: grantable.GetName(), Path: grantable.GetPath(), Capabilities: grantable.GetCapabilities(),
+			MaxTTL: grantable.GetMaxTtl().AsDuration().String(), Description: grantable.GetDescription(),
+			Paths: grantable.GetPaths(), DiscoverError: grantable.GetDiscoverError(),
+		})
+	}
+
+	return grantables, nil
+}
+
 // waitForGrantRequest watches the request until no item is pending or timeout
 // elapses, reconnecting with capped backoff after drops. Each snapshot is the
 // full truth, so nothing is lost across reconnects. Reaching the timeout is
@@ -754,12 +785,7 @@ func newGrantsCommand() *cobra.Command {
 }
 
 func runGrants(ctx context.Context, authorizerURL string, stdout io.Writer) error {
-	token, err := requesterToken()
-	if err != nil {
-		return err
-	}
-
-	client, err := newAuthorizerClient(authorizerURL, token)
+	client, err := requesterAuthorizerClient(authorizerURL)
 	if err != nil {
 		return err
 	}
@@ -770,6 +796,50 @@ func runGrants(ctx context.Context, authorizerURL string, stdout io.Writer) erro
 	}
 
 	return writeIndentedJSON(stdout, grants)
+}
+
+func newGrantableCommand() *cobra.Command {
+	var authorizerURL string
+	command := &cobra.Command{
+		Use:   "grantable",
+		Short: "List the Grantable Rules a Requester may request from, as JSON",
+		Long: `Lists every Grantable Rule: its path pattern, capabilities, longest TTL and
+description. For rules that discover them, "paths" lists concrete requestable
+paths; other paths matching "path" are valid too. "discover_error" says why
+discovery failed. Request a path with bao-cred read --reason or bao-cred request.`,
+		Example: `  bao-cred grantable
+  bao-cred grantable | jq -r '.[].paths[]?'`,
+		Args: noPositionalArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			return runGrantable(command.Context(), authorizerURL, command.OutOrStdout())
+		},
+	}
+
+	command.Flags().StringVar(&authorizerURL, "authorizer", "", "authorizer base URL (default $BAO_AUTHORIZER_ADDR)")
+	return command
+}
+
+func runGrantable(ctx context.Context, authorizerURL string, stdout io.Writer) error {
+	client, err := requesterAuthorizerClient(authorizerURL)
+	if err != nil {
+		return err
+	}
+
+	grantables, err := client.grantables(ctx)
+	if err != nil {
+		return err
+	}
+
+	return writeIndentedJSON(stdout, grantables)
+}
+
+func requesterAuthorizerClient(authorizerURL string) (*authorizerClient, error) {
+	token, err := requesterToken()
+	if err != nil {
+		return nil, err
+	}
+
+	return newAuthorizerClient(authorizerURL, token)
 }
 
 func writeIndentedJSON(output io.Writer, value any) error {

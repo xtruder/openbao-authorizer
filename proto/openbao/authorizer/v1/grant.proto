@@ -22,6 +22,9 @@ service GrantService {
   rpc WatchGrantRequest(WatchGrantRequestRequest) returns (stream WatchGrantRequestResponse);
   // ListMyGrants returns the caller's active Grants.
   rpc ListMyGrants(ListMyGrantsRequest) returns (ListMyGrantsResponse);
+  // ListGrantables returns what may be requested: every Grantable Rule and,
+  // for rules with a discover path, the concrete paths found there.
+  rpc ListGrantables(ListGrantablesRequest) returns (ListGrantablesResponse);
 }
 
 // PermissionItemInput is one requested path and its capabilities.
@@ -66,4 +69,10 @@ message ListMyGrantsRequest {}
 
 message ListMyGrantsResponse {
   repeated Grant grants = 1;
+}
+
+message ListGrantablesRequest {}
+
+message ListGrantablesResponse {
+  repeated Grantable grantables = 1;
 }

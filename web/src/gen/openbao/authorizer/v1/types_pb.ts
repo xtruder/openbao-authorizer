@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file openbao/authorizer/v1/types.proto.
  */
 export const file_openbao_authorizer_v1_types: GenFile = /*@__PURE__*/
-  fileDesc("CiFvcGVuYmFvL2F1dGhvcml6ZXIvdjEvdHlwZXMucHJvdG8SFW9wZW5iYW8uYXV0aG9yaXplci52MSKvAgoOUGVybWlzc2lvbkl0ZW0SCgoCaWQYASABKAkSDAoEcGF0aBgCIAEoCRIUCgxjYXBhYmlsaXRpZXMYAyADKAkSJgoDdHRsGAQgASgLMhkuZ29vZ2xlLnByb3RvYnVmLkR1cmF0aW9uEi8KBXN0YXRlGAUgASgOMiAub3BlbmJhby5hdXRob3JpemVyLnYxLkl0ZW1TdGF0ZRIOCgZyZWFzb24YBiABKAkSLgoKZXhwaXJlc19hdBgHIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASEgoKZGVjaWRlZF9ieRgIIAEoCRIuCgpkZWNpZGVkX2F0GAkgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIQCghncmFudF9pZBgKIAEoCSJaCglSZXF1ZXN0ZXISCgoCaWQYASABKAkSDQoFdGl0bGUYAiABKAkSEQoJZGlyZWN0b3J5GAMgASgJEhEKCWVudGl0eV9pZBgEIAEoCRIMCgRydWxlGAUgASgJIsUBCgxHcmFudFJlcXVlc3QSCgoCaWQYASABKAkSDgoGcmVhc29uGAIgASgJEi4KCmNyZWF0ZWRfYXQYAyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEjMKCXJlcXVlc3RlchgEIAEoCzIgLm9wZW5iYW8uYXV0aG9yaXplci52MS5SZXF1ZXN0ZXISNAoFaXRlbXMYBSADKAsyJS5vcGVuYmFvLmF1dGhvcml6ZXIudjEuUGVybWlzc2lvbkl0ZW0i8gEKBUdyYW50EgoKAmlkGAEgASgJEg8KB2l0ZW1faWQYAiABKAkSDAoEcGF0aBgDIAEoCRIUCgxjYXBhYmlsaXRpZXMYBCADKAkSLgoKY3JlYXRlZF9hdBgFIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLgoKZXhwaXJlc19hdBgGIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASEwoLYXBwcm92ZWRfYnkYByABKAkSMwoJcmVxdWVzdGVyGAggASgLMiAub3BlbmJhby5hdXRob3JpemVyLnYxLlJlcXVlc3RlciILCglIZWFydGJlYXQiKgoLRXJyb3JEZXRhaWwSDgoGcmVhc29uGAEgASgJEgsKA2lkcxgCIAMoCSrZAQoJSXRlbVN0YXRlEhoKFklURU1fU1RBVEVfVU5TUEVDSUZJRUQQABIWChJJVEVNX1NUQVRFX1BFTkRJTkcQARIeChpJVEVNX1NUQVRFX0FMUkVBRFlfR1JBTlRFRBACEhcKE0lURU1fU1RBVEVfQVBQUk9WRUQQAxIXChNJVEVNX1NUQVRFX1JFSkVDVEVEEAQSFgoSSVRFTV9TVEFURV9SRUZVU0VEEAUSFgoSSVRFTV9TVEFURV9FWFBJUkVEEAYSFgoSSVRFTV9TVEFURV9SRVZPS0VEEAdC7gEKGWNvbS5vcGVuYmFvLmF1dGhvcml6ZXIudjFCClR5cGVzUHJvdG9QAVpPZ2l0aHViLmNvbS94dHJ1ZGVyL29wZW5iYW8tYXV0aG9yaXplci9nZW4vZ28vb3BlbmJhby9hdXRob3JpemVyL3YxO2F1dGhvcml6ZXJ2MaICA09BWKoCFU9wZW5iYW8uQXV0aG9yaXplci5WMcoCFU9wZW5iYW9cQXV0aG9yaXplclxWMeICIU9wZW5iYW9cQXV0aG9yaXplclxWMVxHUEJNZXRhZGF0YeoCF09wZW5iYW86OkF1dGhvcml6ZXI6OlYxYgZwcm90bzM", [file_google_protobuf_duration, file_google_protobuf_timestamp]);
+  fileDesc("CiFvcGVuYmFvL2F1dGhvcml6ZXIvdjEvdHlwZXMucHJvdG8SFW9wZW5iYW8uYXV0aG9yaXplci52MSKvAgoOUGVybWlzc2lvbkl0ZW0SCgoCaWQYASABKAkSDAoEcGF0aBgCIAEoCRIUCgxjYXBhYmlsaXRpZXMYAyADKAkSJgoDdHRsGAQgASgLMhkuZ29vZ2xlLnByb3RvYnVmLkR1cmF0aW9uEi8KBXN0YXRlGAUgASgOMiAub3BlbmJhby5hdXRob3JpemVyLnYxLkl0ZW1TdGF0ZRIOCgZyZWFzb24YBiABKAkSLgoKZXhwaXJlc19hdBgHIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASEgoKZGVjaWRlZF9ieRgIIAEoCRIuCgpkZWNpZGVkX2F0GAkgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIQCghncmFudF9pZBgKIAEoCSJaCglSZXF1ZXN0ZXISCgoCaWQYASABKAkSDQoFdGl0bGUYAiABKAkSEQoJZGlyZWN0b3J5GAMgASgJEhEKCWVudGl0eV9pZBgEIAEoCRIMCgRydWxlGAUgASgJIsUBCgxHcmFudFJlcXVlc3QSCgoCaWQYASABKAkSDgoGcmVhc29uGAIgASgJEi4KCmNyZWF0ZWRfYXQYAyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEjMKCXJlcXVlc3RlchgEIAEoCzIgLm9wZW5iYW8uYXV0aG9yaXplci52MS5SZXF1ZXN0ZXISNAoFaXRlbXMYBSADKAsyJS5vcGVuYmFvLmF1dGhvcml6ZXIudjEuUGVybWlzc2lvbkl0ZW0i8gEKBUdyYW50EgoKAmlkGAEgASgJEg8KB2l0ZW1faWQYAiABKAkSDAoEcGF0aBgDIAEoCRIUCgxjYXBhYmlsaXRpZXMYBCADKAkSLgoKY3JlYXRlZF9hdBgFIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLgoKZXhwaXJlc19hdBgGIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASEwoLYXBwcm92ZWRfYnkYByABKAkSMwoJcmVxdWVzdGVyGAggASgLMiAub3BlbmJhby5hdXRob3JpemVyLnYxLlJlcXVlc3RlciILCglIZWFydGJlYXQiKgoLRXJyb3JEZXRhaWwSDgoGcmVhc29uGAEgASgJEgsKA2lkcxgCIAMoCSKlAQoJR3JhbnRhYmxlEgwKBG5hbWUYASABKAkSDAoEcGF0aBgCIAEoCRIUCgxjYXBhYmlsaXRpZXMYAyADKAkSKgoHbWF4X3R0bBgEIAEoCzIZLmdvb2dsZS5wcm90b2J1Zi5EdXJhdGlvbhITCgtkZXNjcmlwdGlvbhgFIAEoCRINCgVwYXRocxgGIAMoCRIWCg5kaXNjb3Zlcl9lcnJvchgHIAEoCSrZAQoJSXRlbVN0YXRlEhoKFklURU1fU1RBVEVfVU5TUEVDSUZJRUQQABIWChJJVEVNX1NUQVRFX1BFTkRJTkcQARIeChpJVEVNX1NUQVRFX0FMUkVBRFlfR1JBTlRFRBACEhcKE0lURU1fU1RBVEVfQVBQUk9WRUQQAxIXChNJVEVNX1NUQVRFX1JFSkVDVEVEEAQSFgoSSVRFTV9TVEFURV9SRUZVU0VEEAUSFgoSSVRFTV9TVEFURV9FWFBJUkVEEAYSFgoSSVRFTV9TVEFURV9SRVZPS0VEEAdC7gEKGWNvbS5vcGVuYmFvLmF1dGhvcml6ZXIudjFCClR5cGVzUHJvdG9QAVpPZ2l0aHViLmNvbS94dHJ1ZGVyL29wZW5iYW8tYXV0aG9yaXplci9nZW4vZ28vb3BlbmJhby9hdXRob3JpemVyL3YxO2F1dGhvcml6ZXJ2MaICA09BWKoCFU9wZW5iYW8uQXV0aG9yaXplci5WMcoCFU9wZW5iYW9cQXV0aG9yaXplclxWMeICIU9wZW5iYW9cQXV0aG9yaXplclxWMVxHUEJNZXRhZGF0YeoCF09wZW5iYW86OkF1dGhvcml6ZXI6OlYxYgZwcm90bzM", [file_google_protobuf_duration, file_google_protobuf_timestamp]);
 
 /**
  * PermissionItem is one OpenBao path plus capabilities within a Grant Request.
@@ -273,6 +273,66 @@ export type ErrorDetail = Message<"openbao.authorizer.v1.ErrorDetail"> & {
  */
 export const ErrorDetailSchema: GenMessage<ErrorDetail> = /*@__PURE__*/
   messageDesc(file_openbao_authorizer_v1_types, 5);
+
+/**
+ * Grantable is one Grantable Rule as Requesters and Approvers see it.
+ *
+ * @generated from message openbao.authorizer.v1.Grantable
+ */
+export type Grantable = Message<"openbao.authorizer.v1.Grantable"> & {
+  /**
+   * @generated from field: string name = 1;
+   */
+  name: string;
+
+  /**
+   * OpenBao ACL path pattern: `+` matches one segment, a trailing `*` any suffix.
+   *
+   * @generated from field: string path = 2;
+   */
+  path: string;
+
+  /**
+   * @generated from field: repeated string capabilities = 3;
+   */
+  capabilities: string[];
+
+  /**
+   * Longest Grant the rule allows (default_ttl when the rule sets none).
+   *
+   * @generated from field: google.protobuf.Duration max_ttl = 4;
+   */
+  maxTtl?: Duration | undefined;
+
+  /**
+   * Operator-written hint on what the rule is for and how to pick a path.
+   *
+   * @generated from field: string description = 5;
+   */
+  description: string;
+
+  /**
+   * Concrete requestable paths found by listing the rule's discover path;
+   * empty when the rule has none. Other paths matching `path` stay valid.
+   *
+   * @generated from field: repeated string paths = 6;
+   */
+  paths: string[];
+
+  /**
+   * Set when listing the discover path failed; `path` still applies.
+   *
+   * @generated from field: string discover_error = 7;
+   */
+  discoverError: string;
+};
+
+/**
+ * Describes the message openbao.authorizer.v1.Grantable.
+ * Use `create(GrantableSchema)` to create a new message.
+ */
+export const GrantableSchema: GenMessage<Grantable> = /*@__PURE__*/
+  messageDesc(file_openbao_authorizer_v1_types, 6);
 
 /**
  * ItemState is the lifecycle of one Permission Item.

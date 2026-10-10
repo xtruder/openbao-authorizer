@@ -139,6 +139,19 @@ path "sys/policies/acl/agent-grant-*" {
 }
 ```
 
+For each Grantable Rule with a `discover` path, add a `list` stanza to the
+authorizer policy, since the authorizer lists that path with its own token:
+
+```hcl
+path "github/permissionsets" {
+  capabilities = ["list"]
+}
+```
+
+OpenBao accepts the trailing-slash form `github/permissionsets/` as well.
+Without the stanza the rule still works, and its catalog entry carries a
+`discover_error`.
+
 The key-only `allowed_parameters` allows entity updates to change `policies` and nothing else, so `name`, `metadata` and `disabled` are refused. OpenBao can't restrict which policy names go into that list. Value globs such as `["agent-grant-*"]` reject a JSON list and accept a comma-joined string containing any names. Treat this token as a privilege-granting credential: it writes the content of Grant policies and can attach any non-root policy to any entity. Grantable Rules and the Hard Denylist are enforced by the authorizer, not by OpenBao. When it attaches a session policy, the authorizer appends the name and keeps every policy already on the entity.
 
 ### CORS and approver sign-in
@@ -195,14 +208,14 @@ Terminate TLS at a trusted reverse proxy. The proxy must not buffer responses un
 `bao-cred` reads OpenBao paths with a **Requester**'s existing OpenBao token,
 such as an **Agent Session**'s **Session Token**, and files **Grant Requests**
 with the authorizer when the Requester needs more access. It never stores or
-mints tokens. It has three commands: `read`, `request`, and `grants`; run
-`bao-cred <command> --help` for details.
+mints tokens. It has four commands: `read`, `request`, `grants`, and
+`grantable`; run `bao-cred <command> --help` for details.
 
 | Setting | Source |
 |---|---|
 | Token | `BAO_TOKEN`, then `VAULT_TOKEN`, then `~/.vault-token` as written by `bao login` (only the default token helper; skipped when `BAO_NO_TOKEN_FILE` is set, which the opencode plugin does) |
 | OpenBao client | Standard client variables such as `BAO_ADDR`, `BAO_NAMESPACE`, and `BAO_CACERT` |
-| Authorizer URL | `--authorizer`, then `BAO_AUTHORIZER_ADDR`; needed only for `request`, `grants`, and `read --reason`. Give the bare origin; bao-cred calls the `GrantService` RPCs under `/api`. It must be HTTPS unless the host is loopback (`localhost`, `127.0.0.0/8`, `::1`), because the token is sent with every call; redirects to plain HTTP are refused |
+| Authorizer URL | `--authorizer`, then `BAO_AUTHORIZER_ADDR`; needed only for `request`, `grants`, `grantable`, and `read --reason`. Give the bare origin; bao-cred calls the `GrantService` RPCs under `/api`. It must be HTTPS unless the host is loopback (`localhost`, `127.0.0.0/8`, `::1`), because the token is sent with every call; redirects to plain HTTP are refused |
 | Authorizer TLS | System roots plus any CA from `BAO_CACERT`, `BAO_CACERT_BYTES`, or `BAO_CAPATH`; `BAO_SKIP_VERIFY` is ignored for the authorizer |
 
 The opencode plugin injects these variables into the agent's shell, so agents
@@ -253,6 +266,9 @@ retries the read once when the item is approved or already granted.
 ### Requesting Grants
 
 ```sh
+# What may be requested: every Grantable Rule, with discovered concrete paths.
+bao-cred grantable
+
 # Batch several Permission Items under one reason; waits until none is pending.
 bao-cred request --reason "deploy app to staging" \
   --item kv/data/app=read --item database/creds/app=read --ttl 2h
@@ -281,7 +297,11 @@ snapshot is the truth, so no decision is missed.
 `revoked`), any `reason`, and `expires_at` (RFC 3339): the pending deadline, or
 the Grant's expiry once approved. `grants` prints an array of the Requester's
 active Grants, each with `id`, `item_id`, `path`, `capabilities`, `created_at`,
-and `expires_at`. Progress goes to stderr; `--quiet` suppresses it.
+and `expires_at`. `grantable` prints an array of Grantable Rules, each with
+`name`, `path` (the pattern), `capabilities`, `max_ttl` (the effective cap),
+and, when set, `description`, `paths` (concrete paths found under the rule's
+`discover` path; other paths matching `path` are valid too) and
+`discover_error`. Progress goes to stderr; `--quiet` suppresses it.
 
 | Exit status | Meaning |
 |---|---|
@@ -348,6 +368,8 @@ grantable "github-token" {
   path         = "github/token/project-*" # OpenBao ACL pattern: `+` segment, trailing `*`
   capabilities = ["read"]                  # maximum capabilities
   max_ttl      = "8h"                      # optional; caps request and approver TTLs (default: default_ttl)
+  description  = "One project's GitHub App token; the name picks org, repos and permissions." # optional
+  discover     = "github/permissionsets"   # optional; LIST keys fill the wildcard of `path`
 }
 ```
 
@@ -375,6 +397,21 @@ and `list`. The server refuses to start if a rule grants `sudo`, starts with a
 the concrete paths it expands to are still refused when any of their segments
 is on the Hard Denylist. So a KV key literally named `auth` or `sys` can't be
 granted.
+
+Requesters and Approvers see every rule in a read-only catalog
+(`ListGrantables`, `ListGrantableRules`, `bao-cred grantable`), including its
+optional `description`. A rule may also set `discover`, an OpenBao path the
+authorizer LISTs with its own token, caching the result for a minute. Each key
+replaces the rule's last path segment, so `github/token/project-*` with
+`discover = "github/permissionsets"` turns key `project-web` into
+`github/token/project-web`. Folder keys (ending in `/`) and results that don't
+match the pattern or fail item validation steps 1–2 below are dropped.
+`discover` requires exactly one wildcard in the rule's path, in its last
+segment (`+`, `*` or `prefix*`); the discover path itself must be concrete and
+must not touch the Hard Denylist. The authorizer policy needs `list` on it (see
+[OpenBao setup](#openbao-setup)). A failed listing is shown on that rule as
+`discover_error` and logged; the rule stays usable. Discovered names are
+visible to every Requester, so set `discover` only where that is acceptable.
 
 ### Item validation
 
@@ -502,6 +539,7 @@ requests and Grants.
 | `GetGrantRequest` | One of the caller's requests. |
 | `WatchGrantRequest` | Sends the request on connect and after every change, plus a heartbeat every 25 seconds. Ends normally after the final state once no item is pending. |
 | `ListMyGrants` | The caller's active Grants. |
+| `ListGrantables` | Every Grantable Rule with its effective `max_ttl`, `description`, and discovered `paths` or `discover_error`. The same for every Requester. |
 
 When an OpenBao call made for a Requester fails, the error has a generic message;
 details are logged on the server only.
@@ -524,6 +562,7 @@ clears the cookie. Every RPC requires a same-origin request (`Origin` and
 | `ListGrantRequests` | Pending, decided (the latest 200) or all requests, with the Requester and per-item decision metadata. |
 | `DecideItems` | Approve or reject pending items of one request; a `ttl` may only shorten the resolved TTL. Refused with `SELF_APPROVAL` for the Approver's own requests. Returns the updated request. |
 | `ListGrants`, `RevokeGrant` | Active Grants across Requesters; revoke one before its expiry. |
+| `ListGrantableRules` | The catalog Requesters get from `ListGrantables`, read-only. |
 | `WatchEvents` | Sends a dashboard snapshot (pending requests, decided requests, active Grants) on connect and after every change, including Grant expiry within about 10 seconds, plus a heartbeat every 25 seconds. Ends with `unauthenticated` / `SESSION_EXPIRED` when the session ends. |
 | `GetPushPublicKey`, `RegisterPushSubscription`, `DeletePushSubscription` | Web Push enrollment and removal; the key is empty when push is disabled. |
 

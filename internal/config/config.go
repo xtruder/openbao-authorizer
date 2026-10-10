@@ -135,6 +135,8 @@ type grantableConfig struct {
 	Path         string   `hcl:"path"`
 	Capabilities []string `hcl:"capabilities"`
 	MaxTTL       string   `hcl:"max_ttl,optional"`
+	Description  string   `hcl:"description,optional"`
+	Discover     string   `hcl:"discover,optional"`
 }
 
 type webPushConfig struct {
@@ -350,7 +352,10 @@ func loadGrants(raw *grantsConfig, grantable []grantableConfig) (grants.Policy, 
 		}
 
 		names[entry.Name] = true
-		rule := grants.Rule{Name: entry.Name, Path: entry.Path, Capabilities: entry.Capabilities}
+		rule := grants.Rule{
+			Name: entry.Name, Path: entry.Path, Capabilities: entry.Capabilities,
+			Description: strings.TrimSpace(entry.Description), Discover: strings.TrimSuffix(entry.Discover, "/"),
+		}
 		if entry.MaxTTL != "" {
 			maxTTL, err := parsePositiveDuration(entry.MaxTTL, fmt.Sprintf("grantable %q max_ttl", entry.Name))
 			if err != nil {

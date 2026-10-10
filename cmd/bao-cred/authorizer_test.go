@@ -324,6 +324,7 @@ func TestRequestUsageErrors(t *testing.T) {
 		{"request", "--reason", "r", "--item", "kv/data/a=read", "extra"},
 		{"request", "--unknown"},
 		{"grants", "extra"},
+		{"grantable", "extra"},
 	} {
 		err := run(arguments, &bytes.Buffer{}, &bytes.Buffer{})
 		if exitCode(err) != exitUsage {
@@ -380,6 +381,53 @@ func TestGrantsPrintsEmptyArray(t *testing.T) {
 
 	if stdout.String() != "[]\n" {
 		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestGrantablePrintsJSON(t *testing.T) {
+	authorizer := newFakeAuthorizer(t)
+	authorizer.grantables = []*authorizerv1.Grantable{
+		{
+			Name: "github-token", Path: "github/token/project-*", Capabilities: []string{"read"}, MaxTtl: durationpb.New(8 * time.Hour),
+			Description: "One project's GitHub token", Paths: []string{"github/token/project-web"},
+		},
+		{Name: "kv", Path: "kv/data/app/*", Capabilities: []string{"read", "list"}, MaxTtl: durationpb.New(time.Hour), DiscoverError: "permission denied listing kv/metadata/app"},
+	}
+	setupEnvironment(t, authorizer.url, "")
+
+	var stdout bytes.Buffer
+	if err := run([]string{"grantable"}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+
+	want := `[{"name":"github-token","path":"github/token/project-*","capabilities":["read"],"max_ttl":"8h0m0s",` +
+		`"description":"One project's GitHub token","paths":["github/token/project-web"]},` +
+		`{"name":"kv","path":"kv/data/app/*","capabilities":["read","list"],"max_ttl":"1h0m0s",` +
+		`"discover_error":"permission denied listing kv/metadata/app"}]`
+	if got := compactJSON(t, stdout.Bytes()); got != want {
+		t.Fatalf("stdout = %s\nwant     %s", got, want)
+	}
+}
+
+func TestGrantablePrintsEmptyArrayAndReportsErrors(t *testing.T) {
+	authorizer := newFakeAuthorizer(t)
+	setupEnvironment(t, authorizer.url, "")
+
+	var stdout bytes.Buffer
+	if err := run([]string{"grantable"}, &stdout, &bytes.Buffer{}); err != nil || stdout.String() != "[]\n" {
+		t.Fatalf("stdout = %q, error = %v", stdout.String(), err)
+	}
+
+	t.Setenv("BAO_TOKEN", "not-a-requester-token")
+	err := run([]string{"grantable"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if exitCode(err) != exitFailure || err.Error() != "list Grantable Rules: this token is not allowed to request grants (no matching requester rule)" {
+		t.Fatalf("error = %v (exit %d)", err, exitCode(err))
+	}
+
+	t.Setenv("BAO_AUTHORIZER_ADDR", "")
+	t.Setenv("BAO_TOKEN", testToken)
+	if err := run([]string{"grantable"}, &bytes.Buffer{}, &bytes.Buffer{}); exitCode(err) != exitFailure || !strings.Contains(err.Error(), "BAO_AUTHORIZER_ADDR") {
+		t.Fatalf("missing authorizer error = %v", err)
 	}
 }
 
@@ -523,13 +571,14 @@ type watchScript struct {
 type fakeAuthorizer struct {
 	authorizerv1connect.UnimplementedGrantServiceHandler
 
-	url       string
-	server    *httptest.Server
-	created   *authorizerv1.GrantRequest
-	createErr error
-	current   *authorizerv1.GrantRequest
-	watches   []watchScript
-	grants    []*authorizerv1.Grant
+	url        string
+	server     *httptest.Server
+	created    *authorizerv1.GrantRequest
+	createErr  error
+	current    *authorizerv1.GrantRequest
+	watches    []watchScript
+	grants     []*authorizerv1.Grant
+	grantables []*authorizerv1.Grantable
 
 	mu      sync.Mutex
 	filed   []*authorizerv1.CreateGrantRequestRequest
@@ -615,6 +664,12 @@ func (f *fakeAuthorizer) ListMyGrants(
 	context.Context, *connect.Request[authorizerv1.ListMyGrantsRequest],
 ) (*connect.Response[authorizerv1.ListMyGrantsResponse], error) {
 	return connect.NewResponse(&authorizerv1.ListMyGrantsResponse{Grants: f.grants}), nil
+}
+
+func (f *fakeAuthorizer) ListGrantables(
+	context.Context, *connect.Request[authorizerv1.ListGrantablesRequest],
+) (*connect.Response[authorizerv1.ListGrantablesResponse], error) {
+	return connect.NewResponse(&authorizerv1.ListGrantablesResponse{Grantables: f.grantables}), nil
 }
 
 func (f *fakeAuthorizer) inputs() []*authorizerv1.CreateGrantRequestRequest {

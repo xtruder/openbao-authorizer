@@ -74,6 +74,7 @@ type OpenBao interface {
 	WritePolicy(context.Context, string, string, time.Time) error
 	DeletePolicy(context.Context, string) error
 	CapabilitiesSelf(context.Context, string, []string) (map[string][]string, error)
+	List(context.Context, string) ([]string, error)
 }
 
 // Store persists Grant Requests and Grants.
@@ -147,6 +148,8 @@ type Service struct {
 	logger   *slog.Logger
 	now      func() time.Time
 	changes  changeSignal
+
+	discoveries discoveryCache
 
 	sessionLocksMu sync.Mutex
 	sessionLocks   map[string]*sessionLock

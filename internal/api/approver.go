@@ -163,6 +163,10 @@ func (a approverService) RevokeGrant(ctx context.Context, request *connect.Reque
 	return connect.NewResponse(&authorizerv1.RevokeGrantResponse{}), nil
 }
 
+func (a approverService) ListGrantableRules(ctx context.Context, _ *connect.Request[authorizerv1.ListGrantableRulesRequest]) (*connect.Response[authorizerv1.ListGrantableRulesResponse], error) {
+	return connect.NewResponse(&authorizerv1.ListGrantableRulesResponse{Grantables: grantablesProto(a.grants.Grantables(ctx))}), nil
+}
+
 func (a approverService) WatchEvents(ctx context.Context, _ *connect.Request[authorizerv1.WatchEventsRequest], stream *connect.ServerStream[authorizerv1.WatchEventsResponse]) error {
 	current := approverFrom(ctx)
 	ctx, cancel := context.WithCancel(ctx)

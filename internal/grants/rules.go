@@ -27,7 +27,11 @@ type Rule struct {
 	Path         string
 	Capabilities []string
 	// MaxTTL caps requested and approver TTLs; zero caps them at default_ttl.
-	MaxTTL time.Duration
+	MaxTTL      time.Duration
+	Description string
+	// Discover is an OpenBao path whose LIST keys fill the wildcard in the
+	// last segment of Path, naming concrete requestable paths.
+	Discover string
 }
 
 // Policy holds the validated Grantable Rules and TTL defaults.
@@ -85,7 +89,39 @@ func ValidateRule(rule Rule) error {
 		return fmt.Errorf("grantable %q: max_ttl must be positive", rule.Name)
 	}
 
+	if rule.Discover != "" {
+		if err := validateDiscover(rule); err != nil {
+			return fmt.Errorf("grantable %q: discover: %w", rule.Name, err)
+		}
+	}
+
 	return nil
+}
+
+// validateDiscover requires a single wildcard in the last segment of the
+// rule's path, so each listed key fills exactly that segment.
+func validateDiscover(rule Rule) error {
+	directory, last := splitLastSegment(rule.Path)
+	if strings.ContainsAny(directory, "+*") || (last != "+" && !strings.HasSuffix(last, "*")) {
+		return errors.New("path must have exactly one wildcard, in its last segment (+, * or prefix*)")
+	}
+
+	if refusal := checkConcretePath(rule.Discover); refusal != "" {
+		return errors.New(refusal)
+	}
+
+	if overlapsDenylist(rule.Discover) {
+		return fmt.Errorf("path %q overlaps the hard denylist (%s segments)", rule.Discover, strings.Join(deniedSegments, ", "))
+	}
+
+	return nil
+}
+
+// splitLastSegment splits a path into everything up to and including its
+// last "/", and the last segment.
+func splitLastSegment(path string) (string, string) {
+	index := strings.LastIndex(path, "/") + 1
+	return path[:index], path[index:]
 }
 
 func validatePattern(pattern string) error {

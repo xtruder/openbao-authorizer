@@ -8,6 +8,7 @@ import (
 
 	authorizerv1 "github.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1"
 	"github.com/xtruder/openbao-authorizer/internal/config"
+	"github.com/xtruder/openbao-authorizer/internal/grants"
 	"github.com/xtruder/openbao-authorizer/internal/store"
 )
 
@@ -113,6 +114,18 @@ func grantsProto(values []store.Grant, forApprover bool) []*authorizerv1.Grant {
 		}
 
 		rendered = append(rendered, renderedGrant)
+	}
+
+	return rendered
+}
+
+func grantablesProto(values []grants.Grantable) []*authorizerv1.Grantable {
+	rendered := make([]*authorizerv1.Grantable, 0, len(values))
+	for _, value := range values {
+		rendered = append(rendered, &authorizerv1.Grantable{
+			Name: value.Name, Path: value.Path, Capabilities: value.Capabilities, MaxTtl: durationpb.New(value.MaxTTL),
+			Description: value.Description, Paths: value.Paths, DiscoverError: value.DiscoverError,
+		})
 	}
 
 	return rendered

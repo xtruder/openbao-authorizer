@@ -182,6 +182,27 @@ func (c *Client) CapabilitiesSelf(ctx context.Context, token string, paths []str
 	return result, nil
 }
 
+// List returns the keys under path with the authorizer token; folder keys
+// end in "/". OpenBao answers 404 when there are none.
+func (c *Client) List(ctx context.Context, path string) ([]string, error) {
+	var envelope struct {
+		Data struct {
+			Keys []string `json:"keys"`
+		} `json:"data"`
+	}
+	err := c.call(ctx, "LIST", "/v1/"+path, c.token, nil, &envelope)
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return envelope.Data.Keys, nil
+}
+
 // LookupSelf validates a token and returns its identity metadata.
 func (c *Client) LookupSelf(ctx context.Context, token string) (Identity, error) {
 	var envelope struct {
