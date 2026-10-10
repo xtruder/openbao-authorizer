@@ -1,6 +1,6 @@
-// Package httpapi serves the ConnectRPC API: the bearer-token AgentService and
-// the same-origin, cookie-authenticated ApproverService.
-package httpapi
+// Package api serves the ConnectRPC API: the bearer-token GrantService and the
+// same-origin, cookie-authenticated ApproverService.
+package api
 
 import (
 	"context"
@@ -15,7 +15,9 @@ import (
 
 	"connectrpc.com/connect"
 
+	authorizerv1 "github.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1"
 	"github.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1/authorizerv1connect"
+	"github.com/xtruder/openbao-authorizer/internal/config"
 	"github.com/xtruder/openbao-authorizer/internal/grants"
 	"github.com/xtruder/openbao-authorizer/internal/openbao"
 	"github.com/xtruder/openbao-authorizer/internal/store"
@@ -34,7 +36,6 @@ const (
 
 // OpenBao is the API surface needed to authenticate Approvers.
 type OpenBao interface {
-	LoginUserpass(context.Context, string, string) (string, error)
 	RevokeSelf(context.Context, string) error
 	LookupSelf(context.Context, string) (openbao.Identity, error)
 }
@@ -59,6 +60,7 @@ type Options struct {
 	PublicOrigin         string
 	VAPIDPublicKey       string
 	ApproverPolicy       string
+	ApproverLogin        config.ApproverLogin
 	InsecureCookies      bool
 	ValidatePushEndpoint func(context.Context, string) error
 	// SessionTTL defaults to 168h.
@@ -76,6 +78,7 @@ type server struct {
 	publicOrigin         string
 	vapidPublicKey       string
 	approverPolicy       string
+	loginOptions         *authorizerv1.GetLoginOptionsResponse
 	insecureCookies      bool
 	validatePushEndpoint func(context.Context, string) error
 	sessionTTL           time.Duration
@@ -119,6 +122,7 @@ func New(options Options) http.Handler {
 		publicOrigin:         strings.TrimSuffix(options.PublicOrigin, "/"),
 		vapidPublicKey:       options.VAPIDPublicKey,
 		approverPolicy:       options.ApproverPolicy,
+		loginOptions:         loginOptionsProto(options.ApproverLogin),
 		insecureCookies:      options.InsecureCookies,
 		validatePushEndpoint: options.ValidatePushEndpoint,
 		sessionTTL:           sessionTTL,
@@ -126,9 +130,9 @@ func New(options Options) http.Handler {
 		sessionDeleted:       make(chan struct{}),
 	}
 	mux := http.NewServeMux()
-	mux.Handle(authorizerv1connect.NewAgentServiceHandler(agentService{s},
+	mux.Handle(authorizerv1connect.NewGrantServiceHandler(grantService{s},
 		connect.WithReadMaxBytes(maxBodyBytes),
-		connect.WithInterceptors(streamHeaders{}, authInterceptor(s.authorizeAgent)),
+		connect.WithInterceptors(streamHeaders{}, authInterceptor(s.authorizeRequester)),
 	))
 	mux.Handle(authorizerv1connect.NewApproverServiceHandler(approverService{s},
 		connect.WithReadMaxBytes(maxBodyBytes),

@@ -62,11 +62,6 @@ func ParsePolicy(document string) ([]PolicyBlock, error) {
 	return blocks, nil
 }
 
-type user struct {
-	password string
-	token    string
-}
-
 // Fake is an in-memory OpenBao. It is safe for concurrent use.
 type Fake struct {
 	mu         sync.Mutex
@@ -74,7 +69,6 @@ type Fake struct {
 	identities map[string]openbao.Identity
 	entities   map[string]*openbao.Entity
 	policies   map[string]Policy
-	users      map[string]user
 	failures   map[string]error
 	calls      map[string]int
 	revoked    []string
@@ -87,18 +81,9 @@ func New() *Fake {
 		identities: make(map[string]openbao.Identity),
 		entities:   make(map[string]*openbao.Entity),
 		policies:   make(map[string]Policy),
-		users:      make(map[string]user),
 		failures:   make(map[string]error),
 		calls:      make(map[string]int),
 	}
-}
-
-// AddUser registers a userpass login that yields token.
-func (f *Fake) AddUser(username, password, token string, identity openbao.Identity) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.users[username] = user{password: password, token: token}
-	f.identities[token] = identity
 }
 
 // SetIdentity registers or replaces the identity behind token.
@@ -113,7 +98,7 @@ func (f *Fake) SetIdentity(token string, identity openbao.Identity) {
 func (f *Fake) AddSession(token, entityID string, meta map[string]string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.identities[token] = openbao.Identity{EntityID: entityID, DisplayName: "token", Policies: []string{"default", "opencode-session"}, Role: "opencode-session", Meta: meta}
+	f.identities[token] = openbao.Identity{EntityID: entityID, DisplayName: "token", Policies: []string{"default", "opencode-session"}, Role: "opencode-session", Path: "auth/token/create/opencode-session", Meta: meta}
 	f.entities[entityID] = &openbao.Entity{ID: entityID, Name: "entity_" + entityID}
 }
 
@@ -177,18 +162,6 @@ func (f *Fake) failure(method string) error {
 
 func permissionDenied() error {
 	return &openbao.HTTPError{StatusCode: http.StatusForbidden, Errors: []string{"permission denied"}}
-}
-
-// LoginUserpass implements the userpass login.
-func (f *Fake) LoginUserpass(_ context.Context, username, password string) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	account, ok := f.users[username]
-	if !ok || account.password != password {
-		return "", &openbao.HTTPError{StatusCode: http.StatusBadRequest, Errors: []string{"invalid username or password"}}
-	}
-
-	return account.token, nil
 }
 
 // RevokeSelf implements auth/token/revoke-self.

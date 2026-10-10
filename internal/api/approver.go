@@ -1,4 +1,4 @@
-package httpapi
+package api
 
 import (
 	"context"
@@ -18,7 +18,8 @@ import (
 )
 
 // approverService implements ApproverService; authorizeApprover has already
-// checked same-origin and, except for Login, the session.
+// checked same-origin and, except for GetLoginOptions and CreateSession, the
+// session.
 type approverService struct{ *server }
 
 var requestFilters = map[authorizerv1.GrantRequestFilter]store.RequestFilter{
@@ -31,33 +32,37 @@ func identityProto(value store.Session) *authorizerv1.Identity {
 	return &authorizerv1.Identity{EntityId: value.EntityID, DisplayName: value.DisplayName}
 }
 
-// Login checks the Approver against OpenBao once and then revokes the human
+func (a approverService) GetLoginOptions(context.Context, *connect.Request[authorizerv1.GetLoginOptionsRequest]) (*connect.Response[authorizerv1.GetLoginOptionsResponse], error) {
+	return connect.NewResponse(a.loginOptions), nil
+}
+
+// CreateSession checks the Approver against OpenBao once and then revokes the
 // token: the application session never calls OpenBao on the Approver's behalf,
-// so removing the approver policy takes effect at the next login.
-func (a approverService) Login(ctx context.Context, request *connect.Request[authorizerv1.LoginRequest]) (*connect.Response[authorizerv1.LoginResponse], error) {
-	username := strings.TrimSpace(request.Msg.GetUsername())
-	password := request.Msg.GetPassword()
-	request.Msg.Password = ""
-	if username == "" || password == "" {
-		return nil, invalidArgument("username and password are required")
-	}
-
-	token, err := a.bao.LoginUserpass(ctx, username, password)
-	if err != nil {
-		if !isAuthoritativeTokenError(err) {
-			return nil, a.openBaoUnavailable("login", err)
-		}
-
-		return nil, apiError(connect.CodeUnauthenticated, reasonInvalidToken, "OpenBao username or password is invalid")
+// so removing the approver policy takes effect at the next sign-in.
+func (a approverService) CreateSession(ctx context.Context, request *connect.Request[authorizerv1.CreateSessionRequest]) (*connect.Response[authorizerv1.CreateSessionResponse], error) {
+	token := strings.TrimSpace(request.Msg.GetOpenbaoToken())
+	keepToken := request.Msg.GetKeepToken()
+	request.Msg.OpenbaoToken = ""
+	if token == "" {
+		return nil, invalidArgument("openbao_token is required")
 	}
 
 	identity, err := a.bao.LookupSelf(ctx, token)
-	if revokeErr := a.bao.RevokeSelf(context.WithoutCancel(ctx), token); revokeErr != nil {
-		a.logger.Warn("revoke OpenBao login token", "error", revokeErr)
+	if err != nil && isAuthoritativeTokenError(err) {
+		return nil, apiError(connect.CodeUnauthenticated, reasonInvalidToken, "OpenBao token is invalid")
+	}
+
+	// A token obtained just for this exchange is revoked, even when refused,
+	// so no live credential outlives it. A pasted token may be the user's
+	// working token, so it is kept; it is never stored either way.
+	if !keepToken {
+		if revokeErr := a.bao.RevokeSelf(context.WithoutCancel(ctx), token); revokeErr != nil {
+			a.logger.Warn("revoke OpenBao approver token", "error", revokeErr)
+		}
 	}
 
 	if err != nil {
-		return nil, apiError(connect.CodeUnauthenticated, reasonInvalidToken, "OpenBao token is invalid")
+		return nil, a.openBaoUnavailable("token lookup", err)
 	}
 
 	if identity.EntityID == "" {
@@ -82,7 +87,7 @@ func (a approverService) Login(ctx context.Context, request *connect.Request[aut
 		return nil, a.internalError(err)
 	}
 
-	response := connect.NewResponse(&authorizerv1.LoginResponse{Identity: identityProto(value)})
+	response := connect.NewResponse(&authorizerv1.CreateSessionResponse{Identity: identityProto(value)})
 	response.Header().Add("Set-Cookie", a.sessionCookie(sessionID, value.ExpiresAt).String())
 	return response, nil
 }

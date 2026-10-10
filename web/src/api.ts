@@ -37,6 +37,8 @@ const reasonMessages: Record<string, string> = {
   ITEM_NOT_PENDING: 'That item was already decided. Showing the latest state.',
   GRANT_NOT_ACTIVE: 'That grant was already revoked or has expired.',
   OPENBAO_UNAVAILABLE: 'OpenBao is unavailable. Try again shortly.',
+  NOT_REQUESTER: 'That OpenBao identity matches no requester rule.',
+  SELF_APPROVAL: "You can't decide your own request.",
 }
 
 export function getErrorMessage(error: unknown, fallback: string) {

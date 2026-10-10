@@ -31,11 +31,13 @@ const (
 	ItemRevoked ItemState = "revoked"
 )
 
-// SessionDisplay identifies an Agent Session to Approvers. It is encrypted at rest.
-type SessionDisplay struct {
+// RequesterDisplay identifies a Requester to Approvers. It is encrypted at rest.
+type RequesterDisplay struct {
 	ID        string `json:"id"`
 	Title     string `json:"title,omitempty"`
 	Directory string `json:"directory,omitempty"`
+	// Rule names the Requester Rule the token matched.
+	Rule string `json:"rule,omitempty"`
 }
 
 // Item is a stored Permission Item. Items are stored as JSON on their request.
@@ -53,12 +55,12 @@ type Item struct {
 	GrantExpires time.Time `json:"grant_expires,omitzero"`
 }
 
-// GrantRequest is a stored batch of Permission Items from one Agent Session.
+// GrantRequest is a stored batch of Permission Items from one Requester.
 // All pending items share PendingUntil.
 type GrantRequest struct {
 	ID           string
 	EntityID     string
-	Session      SessionDisplay
+	Requester    RequesterDisplay
 	Reason       string
 	CreatedAt    time.Time
 	PendingUntil time.Time
@@ -74,7 +76,7 @@ type Grant struct {
 	EntityID     string
 	Path         string
 	Capabilities []string
-	Session      SessionDisplay
+	Requester    RequesterDisplay
 	CreatedAt    time.Time
 	ExpiresAt    time.Time
 	ApprovedBy   string
@@ -105,7 +107,7 @@ const decidedRequestLimit = 200
 
 // CreateGrantRequest stores a request with its items.
 func (d *DB) CreateGrantRequest(ctx context.Context, request GrantRequest) error {
-	sessionNonce, sessionCiphertext, err := d.encryptJSON(request.Session, []byte(request.ID+":session"))
+	sessionNonce, sessionCiphertext, err := d.encryptJSON(request.Requester, []byte(request.ID+":session"))
 	if err != nil {
 		return err
 	}
@@ -182,7 +184,7 @@ pending_until, items FROM grant_requests `+clause, args...) // #nosec G202 -- cl
 			return nil, fmt.Errorf("decode grant items: %w", err)
 		}
 
-		if err := d.decryptJSON(sessionNonce, sessionCiphertext, []byte(request.ID+":session"), &request.Session); err != nil {
+		if err := d.decryptJSON(sessionNonce, sessionCiphertext, []byte(request.ID+":session"), &request.Requester); err != nil {
 			return nil, err
 		}
 
@@ -234,7 +236,7 @@ func (d *DB) DecideItems(ctx context.Context, request GrantRequest, grants []Gra
 	}
 
 	for _, grant := range grants {
-		sessionNonce, sessionCiphertext, err := d.encryptJSON(grant.Session, []byte(grant.ID+":session"))
+		sessionNonce, sessionCiphertext, err := d.encryptJSON(grant.Requester, []byte(grant.ID+":session"))
 		if err != nil {
 			return err
 		}
@@ -355,7 +357,7 @@ created_at, expires_at, approved_by_name, revoked_at, revoked_by_name FROM grant
 			return nil, fmt.Errorf("scan grant: %w", err)
 		}
 
-		if err := d.decryptJSON(sessionNonce, sessionCiphertext, []byte(grant.ID+":session"), &grant.Session); err != nil {
+		if err := d.decryptJSON(sessionNonce, sessionCiphertext, []byte(grant.ID+":session"), &grant.Requester); err != nil {
 			return nil, err
 		}
 

@@ -1,7 +1,7 @@
 import { create } from '@bufbuild/protobuf'
 import { DurationSchema } from '@bufbuild/protobuf/wkt'
 import { describe, expect, it } from 'vitest'
-import { formatDuration, parseDuration } from './duration'
+import { formatDuration, parseDuration } from './utils'
 
 describe('grant durations', () => {
   it('formats whole seconds like Go without zero units', () => {

@@ -5,17 +5,21 @@ package openbao.authorizer.v1;
 import "google/protobuf/duration.proto";
 import "openbao/authorizer/v1/types.proto";
 
-// ApproverService is called by the PWA. Every RPC requires a same-origin
-// request; every RPC except Login also requires the HttpOnly, SameSite=Strict
-// session cookie that Login sets. No CSRF token is needed: the cookie is never
+// ApproverService is called by the PWA. Approvers sign in to OpenBao directly
+// with any auth method; the PWA exchanges the resulting token for an app
+// session once. Every RPC requires a same-origin request; every RPC except
+// GetLoginOptions and CreateSession also requires the HttpOnly,
+// SameSite=Strict session cookie. No CSRF token is needed: the cookie is never
 // sent cross-site, Connect's content types force a CORS preflight that the
 // server never grants, and the origin check rejects sibling sites.
 service ApproverService {
-  // Login checks OpenBao userpass credentials and the approver policy, then
-  // revokes the OpenBao token at once: the authorizer keeps only its own
-  // session. The password is discarded; the session cookie is set on the
-  // response. It is the only RPC that needs no session.
-  rpc Login(LoginRequest) returns (LoginResponse);
+  // GetLoginOptions tells the PWA where OpenBao is and which login methods to
+  // offer. It needs no session.
+  rpc GetLoginOptions(GetLoginOptionsRequest) returns (GetLoginOptionsResponse);
+  // CreateSession checks an OpenBao token's approver policy, revokes the
+  // token unless asked to keep it, and sets the session cookie. The authorizer never sees
+  // passwords or other login credentials.
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
   // GetSession restores the current session after a page load.
   rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
   // Logout ends the session and clears the session cookie.
@@ -45,12 +49,50 @@ message Identity {
   string display_name = 2;
 }
 
-message LoginRequest {
-  string username = 1;
-  string password = 2;
+enum LoginMethodType {
+  LOGIN_METHOD_TYPE_UNSPECIFIED = 0;
+  // Paste an existing OpenBao token.
+  LOGIN_METHOD_TYPE_TOKEN = 1;
+  // Username and password posted to `auth/<mount>/login/<username>`.
+  LOGIN_METHOD_TYPE_USERPASS = 2;
+  // Username and password posted to `auth/<mount>/login/<username>`.
+  LOGIN_METHOD_TYPE_LDAP = 3;
+  // GitHub personal access token posted to `auth/<mount>/login`.
+  LOGIN_METHOD_TYPE_GITHUB = 4;
+  // OpenBao OIDC redirect flow through `auth/<mount>/oidc/auth_url`.
+  LOGIN_METHOD_TYPE_OIDC = 5;
 }
 
-message LoginResponse {
+message LoginMethod {
+  LoginMethodType type = 1;
+  // Auth mount path without `auth/`, e.g. "userpass"; unused for tokens.
+  string mount = 2;
+  // Label shown on the sign-in screen.
+  string label = 3;
+  // OIDC role; empty uses the mount's default role.
+  string oidc_role = 4;
+}
+
+message GetLoginOptionsRequest {}
+
+message GetLoginOptionsResponse {
+  // OpenBao address as reachable from approvers' browsers. OpenBao must
+  // allow the PWA origin in `sys/config/cors`.
+  string openbao_address = 1;
+  string namespace = 2;
+  repeated LoginMethod methods = 3;
+}
+
+message CreateSessionRequest {
+  // OpenBao token to check for the approver policy. The server never stores it.
+  string openbao_token = 1;
+  // Leave the token valid afterwards. Set for tokens the user pasted, which
+  // may be their working token; tokens the PWA obtained by logging in to
+  // OpenBao exist only for this exchange and are revoked.
+  bool keep_token = 2;
+}
+
+message CreateSessionResponse {
   Identity identity = 1;
 }
 

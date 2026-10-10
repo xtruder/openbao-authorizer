@@ -203,6 +203,45 @@ button:disabled {
   background: #fafafa;
 }
 
+.login-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem;
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 3px;
+  padding: 0.2rem;
+  background: rgb(255 255 255 / 3%);
+}
+
+.login-tabs button {
+  flex: 1 1 auto;
+  height: 2.25rem;
+  border-radius: 2px;
+  padding: 0 0.75rem;
+  color: #a1a1aa;
+  font-size: 0.75rem;
+  font-weight: 650;
+  transition: color 150ms ease, background 150ms ease;
+}
+
+.login-tabs button:hover:not(:disabled) {
+  color: #fff;
+}
+
+.login-tabs button[aria-selected='true'] {
+  color: #18181b;
+  background: #f5cf2d;
+}
+
+.login-tabs button:focus-visible {
+  outline: 2px solid #f5cf2d;
+  outline-offset: 2px;
+}
+
+.login-tabs button:disabled {
+  opacity: 0.55;
+}
+
 .error-banner {
   border: 1px solid rgb(248 113 113 / 25%);
   border-radius: 2px;

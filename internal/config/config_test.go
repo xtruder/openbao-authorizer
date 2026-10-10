@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/xtruder/openbao-authorizer/internal/grants"
 )
 
 func TestLoadHCLConfigurationAndSecretFiles(t *testing.T) {
@@ -32,7 +35,22 @@ openbao {
   namespace             = "engineering"
   authorizer_token_file = "authorizer-token"
   approver_policy       = "approver"
-  session_token_role    = "agent-session"
+}
+approver_login {
+  openbao_address = "https://bao.example.test/"
+  namespace       = "engineering"
+  method "userpass" {}
+  method "oidc" {
+    mount = "/sso/"
+    label = "Company SSO"
+    role  = "approver"
+  }
+}
+requester "opencode" {
+  token_role = "agent-session"
+}
+requester "ci" {
+  auth_mount = "approle/"
 }
 grants {
   default_ttl = "12h"
@@ -66,8 +84,19 @@ grantable "kv" {
 		t.Fatalf("DatabasePath = %q", configuration.DatabasePath)
 	}
 
-	if configuration.SessionTokenRole != "agent-session" || configuration.SessionTTL != 12*time.Hour {
-		t.Fatalf("session settings = %q %s", configuration.SessionTokenRole, configuration.SessionTTL)
+	if configuration.SessionTTL != 12*time.Hour {
+		t.Fatalf("SessionTTL = %s", configuration.SessionTTL)
+	}
+
+	wantRequesters := []grants.RequesterRule{{Name: "opencode", TokenRole: "agent-session"}, {Name: "ci", AuthMount: "approle"}}
+	if !slices.Equal(configuration.Requesters, wantRequesters) {
+		t.Fatalf("Requesters = %#v", configuration.Requesters)
+	}
+
+	login := configuration.ApproverLogin
+	wantMethods := []LoginMethod{{Type: "userpass", Mount: "userpass", Label: "Username & password"}, {Type: "oidc", Mount: "sso", Label: "Company SSO", OIDCRole: "approver"}}
+	if login.OpenBaoAddress != "https://bao.example.test" || login.Namespace != "engineering" || !slices.Equal(login.Methods, wantMethods) {
+		t.Fatalf("ApproverLogin = %#v", login)
 	}
 
 	if configuration.GrantPolicy.DefaultTTL != 12*time.Hour || configuration.PendingTTL != 30*time.Minute {
@@ -93,8 +122,12 @@ func TestLoadAppliesGrantDefaults(t *testing.T) {
 		t.Fatalf("TTLs = %s %s", configuration.GrantPolicy.DefaultTTL, configuration.PendingTTL)
 	}
 
-	if configuration.SessionTokenRole != "opencode-session" || configuration.SessionTTL != 168*time.Hour || len(configuration.GrantPolicy.Rules) != 0 {
+	if configuration.SessionTTL != 168*time.Hour || len(configuration.GrantPolicy.Rules) != 0 {
 		t.Fatalf("configuration = %#v", configuration)
+	}
+
+	if methods := configuration.ApproverLogin.Methods; !slices.Equal(methods, []LoginMethod{{Type: "token", Label: "Token"}}) {
+		t.Fatalf("default login methods = %#v", methods)
 	}
 }
 
@@ -130,6 +163,36 @@ func TestLoadRejectsInvalidGrantableRules(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsInvalidLoginAndRequesters(t *testing.T) {
+	cases := map[string]struct{ replace, with, message string }{
+		"no requesters":   {"requester \"opencode\" {\n  token_role = \"opencode-session\"\n}", "", "at least one requester"},
+		"two matchers":    {`token_role = "opencode-session"`, `token_role = "a"` + "\n" + `auth_mount = "b"`, "exactly one of token_role or auth_mount"},
+		"no matcher":      {`token_role = "opencode-session"`, ``, "exactly one of token_role or auth_mount"},
+		"bad address":     {`openbao_address = "http://127.0.0.1:8200"`, `openbao_address = "127.0.0.1:8200"`, "approver_login.openbao_address"},
+		"unknown method":  {`method "token" {}`, `method "kerberos" {}`, "not one of"},
+		"role not oidc":   {`method "token" {}`, `method "userpass" { role = "x" }`, "does not take a role"},
+		"duplicate rules": {`requester "opencode" {`, `requester "opencode" { token_role = "x" }` + "\n" + `requester "opencode" {`, "more than once"},
+	}
+	for name, testCase := range cases {
+		t.Run(name, func(t *testing.T) {
+			configPath := writeMinimalConfig(t, t.TempDir(), "")
+			contents, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if !strings.Contains(string(contents), testCase.replace) {
+				t.Fatalf("minimal config lacks %q", testCase.replace)
+			}
+
+			writeTestFile(t, filepath.Dir(configPath), "app.hcl", strings.Replace(string(contents), testCase.replace, testCase.with, 1))
+			if _, err := Load(configPath); err == nil || !strings.Contains(err.Error(), testCase.message) {
+				t.Fatalf("error = %v, want %q", err, testCase.message)
+			}
+		})
+	}
+}
+
 func TestExampleConfigurationLoads(t *testing.T) {
 	directory := t.TempDir()
 	example, err := os.ReadFile("../../config/openbao-authorizer.example.hcl")
@@ -148,8 +211,8 @@ func TestExampleConfigurationLoads(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(configuration.GrantPolicy.Rules) != 2 {
-		t.Fatalf("rules = %#v", configuration.GrantPolicy.Rules)
+	if len(configuration.GrantPolicy.Rules) != 2 || len(configuration.Requesters) != 2 || len(configuration.ApproverLogin.Methods) != 3 {
+		t.Fatalf("configuration = %#v", configuration)
 	}
 }
 
@@ -172,6 +235,12 @@ openbao {
   address = "http://127.0.0.1:8200"
   authorizer_token_file = "authorizer-token"
   approver_policy = "approver"
+}
+approver_login {
+  openbao_address = "http://127.0.0.1:8200"
+}
+requester "opencode" {
+  token_role = "opencode-session"
 }
 `)
 	_, err := Load(configPath)
@@ -199,6 +268,13 @@ openbao {
   address = "http://127.0.0.1:8200"
   authorizer_token_file = "authorizer-token"
   approver_policy = "approver"
+}
+approver_login {
+  openbao_address = "http://127.0.0.1:8200"
+  method "token" {}
+}
+requester "opencode" {
+  token_role = "opencode-session"
 }
 `+extra+"\n")
 }

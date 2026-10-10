@@ -1,5 +1,5 @@
-// Command openbao-authorizer runs the OpenBao Authorizer: the Agent API that
-// files Grant Requests and the Approver PWA that decides them.
+// Command openbao-authorizer runs the OpenBao Authorizer: the Grant API that
+// Requesters file Grant Requests with and the Approver PWA that decides them.
 package main
 
 import (
@@ -14,6 +14,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path"
@@ -21,9 +22,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/xtruder/openbao-authorizer/internal/api"
 	"github.com/xtruder/openbao-authorizer/internal/config"
 	"github.com/xtruder/openbao-authorizer/internal/grants"
-	"github.com/xtruder/openbao-authorizer/internal/httpapi"
 	"github.com/xtruder/openbao-authorizer/internal/openbao"
 	"github.com/xtruder/openbao-authorizer/internal/push"
 	"github.com/xtruder/openbao-authorizer/internal/store"
@@ -72,7 +73,7 @@ func run(configPath string) error {
 		}
 	}()
 
-	events := httpapi.NewEventBus()
+	events := api.NewEventBus()
 	pushService, err := push.New(database, push.Config{
 		PublicKey: cfg.VAPIDPublicKey, PrivateKey: cfg.VAPIDPrivateKey, Subject: cfg.VAPIDSubject,
 		AllowedHostSuffixes: cfg.PushAllowedHosts,
@@ -81,11 +82,11 @@ func run(configPath string) error {
 		return err
 	}
 
-	grantService := grants.New(bao, database, &httpapi.Notifier{Events: events, Push: pushService, Logger: logger}, grants.Config{
-		Policy:           cfg.GrantPolicy,
-		PendingTTL:       cfg.PendingTTL,
-		SessionTokenRole: cfg.SessionTokenRole,
-		Logger:           logger,
+	grantService := grants.New(bao, database, &api.Notifier{Events: events, Push: pushService, Logger: logger}, grants.Config{
+		Policy:     cfg.GrantPolicy,
+		PendingTTL: cfg.PendingTTL,
+		Requesters: cfg.Requesters,
+		Logger:     logger,
 	})
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -93,7 +94,7 @@ func run(configPath string) error {
 	go grantService.Run(rootCtx)
 	go sessionSweeper(rootCtx, logger, database)
 
-	api := httpapi.New(httpapi.Options{
+	apiHandler := api.New(api.Options{
 		OpenBao:              bao,
 		Store:                database,
 		Grants:               grantService,
@@ -102,11 +103,12 @@ func run(configPath string) error {
 		PublicOrigin:         cfg.PublicOrigin,
 		VAPIDPublicKey:       cfg.VAPIDPublicKey,
 		ApproverPolicy:       cfg.ApproverPolicy,
+		ApproverLogin:        cfg.ApproverLogin,
 		InsecureCookies:      cfg.InsecureCookies,
 		SessionTTL:           cfg.SessionTTL,
 		ValidatePushEndpoint: pushService.ValidateEndpoint,
 	})
-	server := newHTTPServer(cfg.ListenAddress, requestLogger(logger, routes(api, staticFileSystem(cfg.StaticDirectory))))
+	server := newHTTPServer(cfg.ListenAddress, requestLogger(logger, routes(apiHandler, staticFileSystem(cfg.StaticDirectory), cfg.ApproverLogin.OpenBaoAddress)))
 	serveErrors := make(chan error, 1)
 	go func() {
 		logger.Info("listening", "address", cfg.ListenAddress)
@@ -148,14 +150,14 @@ func newHTTPServer(address string, handler http.Handler) *http.Server {
 
 // routes serves the ConnectRPC services under /api/ next to the health check
 // and the PWA.
-func routes(api http.Handler, staticFiles fs.FS) http.Handler {
+func routes(apiHandler http.Handler, staticFiles fs.FS, openBaoAddress string) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("/api/", api)
+	mux.Handle("/api/", apiHandler)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
-	mux.Handle("/", staticHandler(staticFiles))
+	mux.Handle("/", staticHandler(staticFiles, openBaoAddress))
 	return mux
 }
 
@@ -207,13 +209,20 @@ func staticFileSystem(directory string) fs.FS {
 	return frontend.Dist
 }
 
-func staticHandler(staticFiles fs.FS) http.Handler {
+// staticHandler serves the PWA. Its CSP lets it reach OpenBao, where Approvers
+// sign in directly.
+func staticHandler(staticFiles fs.FS, openBaoAddress string) http.Handler {
 	files := http.FileServerFS(staticFiles)
+	connectSources := "'self'"
+	if address, err := url.Parse(openBaoAddress); err == nil && address.Host != "" {
+		connectSources += " " + address.Scheme + "://" + address.Host
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src "+connectSources+"; img-src 'self' data:; style-src 'self'; script-src 'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

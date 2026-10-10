@@ -46,7 +46,7 @@ func TestRequestWatchesUntilDecided(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	err := run([]string{
-		"request", "-reason", "migrate schema", "-item", "kv/data/a=read", "-item", "kv/data/b=read, update", "-ttl", "1h",
+		"request", "--reason", "migrate schema", "--item", "kv/data/a=read", "--item", "kv/data/b=read, update", "--ttl", "1h",
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatal(err)
@@ -89,7 +89,7 @@ func TestRequestReportsPartialOutcome(t *testing.T) {
 	setupEnvironment(t, authorizer.url, "")
 
 	var stdout, stderr bytes.Buffer
-	err := run([]string{"request", "-reason", "r", "-item", "kv/data/a=read", "-item", "kv/data/b=read"}, &stdout, &stderr)
+	err := run([]string{"request", "--reason", "r", "--item", "kv/data/a=read", "--item", "kv/data/b=read"}, &stdout, &stderr)
 	if exitCode(err) != exitNotGranted || !strings.Contains(err.Error(), "kv/data/b=read: rejected (use the staging path)") {
 		t.Fatalf("error = %v (exit %d)", err, exitCode(err))
 	}
@@ -107,7 +107,7 @@ func TestRequestSkipsWatchWhenNothingPending(t *testing.T) {
 	setupEnvironment(t, authorizer.url, "")
 
 	var stderr bytes.Buffer
-	err := run([]string{"request", "-quiet", "-reason", "r", "-item", "kv/data/a=read"}, &bytes.Buffer{}, &stderr)
+	err := run([]string{"request", "--quiet", "--reason", "r", "--item", "kv/data/a=read"}, &bytes.Buffer{}, &stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestRequestReconnectsAfterStreamDrop(t *testing.T) {
 	setupEnvironment(t, authorizer.url, "")
 
 	var stderr bytes.Buffer
-	err := run([]string{"request", "-reason", "r", "-item", "kv/data/a=read"}, &bytes.Buffer{}, &stderr)
+	err := run([]string{"request", "--reason", "r", "--item", "kv/data/a=read"}, &bytes.Buffer{}, &stderr)
 	if err != nil {
 		t.Fatalf("%v; stderr %q", err, stderr.String())
 	}
@@ -156,7 +156,7 @@ func TestRequestReconnectsIdleStream(t *testing.T) {
 	setupEnvironment(t, authorizer.url, "")
 
 	var stderr bytes.Buffer
-	if err := run([]string{"request", "-reason", "r", "-item", "kv/data/a=read"}, &bytes.Buffer{}, &stderr); err != nil {
+	if err := run([]string{"request", "--reason", "r", "--item", "kv/data/a=read"}, &bytes.Buffer{}, &stderr); err != nil {
 		t.Fatal(err)
 	}
 
@@ -178,7 +178,7 @@ func TestRequestIgnoresHeartbeats(t *testing.T) {
 	setupEnvironment(t, authorizer.url, "")
 
 	var stdout, stderr bytes.Buffer
-	if err := run([]string{"request", "-reason", "r", "-item", "kv/data/a=read"}, &stdout, &stderr); err != nil {
+	if err := run([]string{"request", "--reason", "r", "--item", "kv/data/a=read"}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
 
@@ -202,9 +202,9 @@ func TestRequestReportsPendingAtTimeout(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	err := run([]string{
-		"request", "-timeout", "200ms", "-reason", "r", "-item", "kv/data/a=read", "-item", "sys/mounts=read",
+		"request", "--timeout", "200ms", "--reason", "r", "--item", "kv/data/a=read", "--item", "sys/mounts=read",
 	}, &stdout, &stderr)
-	if exitCode(err) != exitPending || !strings.Contains(err.Error(), "still pending after 200ms; resume with: bao-cred request -wait req-1") {
+	if exitCode(err) != exitPending || !strings.Contains(err.Error(), "still pending after 200ms; resume with: bao-cred request --wait req-1") {
 		t.Fatalf("error = %v (exit %d)", err, exitCode(err))
 	}
 
@@ -219,8 +219,8 @@ func TestRequestNoWaitReturnsImmediately(t *testing.T) {
 	setupEnvironment(t, authorizer.url, "")
 
 	var stdout bytes.Buffer
-	err := run([]string{"request", "-no-wait", "-reason", "r", "-item", "kv/data/a=read"}, &stdout, &bytes.Buffer{})
-	if exitCode(err) != exitPending || !strings.Contains(err.Error(), "wait with: bao-cred request -wait req-1") {
+	err := run([]string{"request", "--no-wait", "--reason", "r", "--item", "kv/data/a=read"}, &stdout, &bytes.Buffer{})
+	if exitCode(err) != exitPending || !strings.Contains(err.Error(), "wait with: bao-cred request --wait req-1") {
 		t.Fatalf("error = %v (exit %d)", err, exitCode(err))
 	}
 
@@ -239,7 +239,7 @@ func TestRequestResumesWaiting(t *testing.T) {
 	setupEnvironment(t, authorizer.url, "")
 
 	var stderr bytes.Buffer
-	if err := run([]string{"request", "-wait", "req-1"}, &bytes.Buffer{}, &stderr); err != nil {
+	if err := run([]string{"request", "--wait", "req-1"}, &bytes.Buffer{}, &stderr); err != nil {
 		t.Fatal(err)
 	}
 
@@ -256,8 +256,8 @@ func TestRequestWaitUnknownRequest(t *testing.T) {
 	authorizer := newFakeAuthorizer(t)
 	setupEnvironment(t, authorizer.url, "")
 
-	err := run([]string{"request", "-wait", "req-2"}, &bytes.Buffer{}, &bytes.Buffer{})
-	if exitCode(err) != exitFailure || err.Error() != "read Grant Request req-2: not found for this Agent Session" {
+	err := run([]string{"request", "--wait", "req-2"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if exitCode(err) != exitFailure || err.Error() != "read Grant Request req-2: not found for this Requester" {
 		t.Fatalf("error = %v (exit %d)", err, exitCode(err))
 	}
 }
@@ -268,9 +268,9 @@ func TestRequestStopsOnPermanentWatchError(t *testing.T) {
 	authorizer.watches = []watchScript{{err: detailedError(connect.CodeUnauthenticated, "INVALID_TOKEN", "token revoked")}}
 	setupEnvironment(t, authorizer.url, "")
 
-	err := run([]string{"request", "-reason", "r", "-item", "kv/data/a=read"}, &bytes.Buffer{}, &bytes.Buffer{})
-	if exitCode(err) != exitFailure || !strings.Contains(err.Error(), "rejected the Session Token") ||
-		!strings.Contains(err.Error(), "resume with: bao-cred request -wait req-1") {
+	err := run([]string{"request", "--reason", "r", "--item", "kv/data/a=read"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if exitCode(err) != exitFailure || !strings.Contains(err.Error(), "rejected the token") ||
+		!strings.Contains(err.Error(), "resume with: bao-cred request --wait req-1") {
 		t.Fatalf("error = %v (exit %d)", err, exitCode(err))
 	}
 
@@ -281,15 +281,15 @@ func TestRequestStopsOnPermanentWatchError(t *testing.T) {
 
 func TestRequestAuthorizerErrorsOmitToken(t *testing.T) {
 	for token, want := range map[string]string{
-		"not-a-session-token": "file Grant Request: the token is not a Session Token: its identity has no Agent Session alias",
-		"expired-token":       "file Grant Request: the authorizer rejected the Session Token; it may be expired or revoked",
+		"not-a-requester-token": "file Grant Request: this token is not allowed to request grants (no matching requester rule)",
+		"expired-token":         "file Grant Request: the authorizer rejected the token; it may be expired or revoked",
 	} {
 		authorizer := newFakeAuthorizer(t)
 		setupEnvironment(t, authorizer.url, "")
 		t.Setenv("BAO_TOKEN", token)
 
 		var stdout, stderr bytes.Buffer
-		err := run([]string{"request", "-reason", "r", "-item", "kv/data/a=read"}, &stdout, &stderr)
+		err := run([]string{"request", "--reason", "r", "--item", "kv/data/a=read"}, &stdout, &stderr)
 		if exitCode(err) != exitFailure || err.Error() != want {
 			t.Fatalf("%s: error = %v (exit %d)", token, err, exitCode(err))
 		}
@@ -305,7 +305,7 @@ func TestRequestReportsInvalidRequest(t *testing.T) {
 	authorizer.createErr = detailedError(connect.CodeInvalidArgument, "INVALID_REQUEST", "ttl exceeds the rule's max_ttl")
 	setupEnvironment(t, authorizer.url, "")
 
-	err := run([]string{"request", "-reason", "r", "-item", "kv/data/a=read", "-ttl", "100h"}, &bytes.Buffer{}, &bytes.Buffer{})
+	err := run([]string{"request", "--reason", "r", "--item", "kv/data/a=read", "--ttl", "100h"}, &bytes.Buffer{}, &bytes.Buffer{})
 	if err == nil || err.Error() != "file Grant Request: authorizer returned invalid_argument: ttl exceeds the rule's max_ttl" {
 		t.Fatalf("error = %v", err)
 	}
@@ -315,14 +315,14 @@ func TestRequestUsageErrors(t *testing.T) {
 	authorizer := newFakeAuthorizer(t)
 	setupEnvironment(t, authorizer.url, "")
 	for _, arguments := range [][]string{
-		{"request", "-item", "kv/data/a=read"},
-		{"request", "-reason", "r"},
-		{"request", "-reason", "r", "-item", "kv/data/a"},
-		{"request", "-reason", "r", "-item", "kv/data/a=read,"},
-		{"request", "-reason", "r", "-item", "=read"},
-		{"request", "-wait", "req-1", "-item", "kv/data/a=read"},
-		{"request", "-reason", "r", "-item", "kv/data/a=read", "extra"},
-		{"request", "-unknown"},
+		{"request", "--item", "kv/data/a=read"},
+		{"request", "--reason", "r"},
+		{"request", "--reason", "r", "--item", "kv/data/a"},
+		{"request", "--reason", "r", "--item", "kv/data/a=read,"},
+		{"request", "--reason", "r", "--item", "=read"},
+		{"request", "--wait", "req-1", "--item", "kv/data/a=read"},
+		{"request", "--reason", "r", "--item", "kv/data/a=read", "extra"},
+		{"request", "--unknown"},
 		{"grants", "extra"},
 	} {
 		err := run(arguments, &bytes.Buffer{}, &bytes.Buffer{})
@@ -451,7 +451,7 @@ func TestRequestStopsOnInsecureRedirectDuringWatch(t *testing.T) {
 	setupEnvironment(t, authorizer.url, "")
 	trustServer(t, authorizer.server)
 
-	err := run([]string{"request", "-reason", "r", "-item", "kv/data/a=read", "-timeout", "5s"}, &bytes.Buffer{}, &bytes.Buffer{})
+	err := run([]string{"request", "--reason", "r", "--item", "kv/data/a=read", "--timeout", "5s"}, &bytes.Buffer{}, &bytes.Buffer{})
 	if exitCode(err) != exitFailure || !strings.Contains(err.Error(), "insecure authorizer URL") {
 		t.Fatalf("error = %v (exit %d)", err, exitCode(err))
 	}
@@ -518,10 +518,10 @@ type watchScript struct {
 	err      error
 }
 
-// fakeAuthorizer implements AgentService for req-1. Watch calls follow
+// fakeAuthorizer implements GrantService for req-1. Watch calls follow
 // watches in order, repeating the last script.
 type fakeAuthorizer struct {
-	authorizerv1connect.UnimplementedAgentServiceHandler
+	authorizerv1connect.UnimplementedGrantServiceHandler
 
 	url       string
 	server    *httptest.Server
@@ -545,7 +545,7 @@ func newFakeAuthorizer(t *testing.T) *fakeAuthorizer {
 func newFakeAuthorizerServer(t *testing.T, start func(http.Handler) *httptest.Server) *fakeAuthorizer {
 	t.Helper()
 	fake := &fakeAuthorizer{}
-	path, handler := authorizerv1connect.NewAgentServiceHandler(fake, connect.WithInterceptors(fakeAuthentication{}))
+	path, handler := authorizerv1connect.NewGrantServiceHandler(fake, connect.WithInterceptors(fakeAuthentication{}))
 	mux := http.NewServeMux()
 	mux.Handle("/api"+path, http.StripPrefix("/api", handler))
 	fake.server = start(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -611,10 +611,10 @@ func (f *fakeAuthorizer) WatchGrantRequest(
 	}
 }
 
-func (f *fakeAuthorizer) ListSessionGrants(
-	context.Context, *connect.Request[authorizerv1.ListSessionGrantsRequest],
-) (*connect.Response[authorizerv1.ListSessionGrantsResponse], error) {
-	return connect.NewResponse(&authorizerv1.ListSessionGrantsResponse{Grants: f.grants}), nil
+func (f *fakeAuthorizer) ListMyGrants(
+	context.Context, *connect.Request[authorizerv1.ListMyGrantsRequest],
+) (*connect.Response[authorizerv1.ListMyGrantsResponse], error) {
+	return connect.NewResponse(&authorizerv1.ListMyGrantsResponse{Grants: f.grants}), nil
 }
 
 func (f *fakeAuthorizer) inputs() []*authorizerv1.CreateGrantRequestRequest {
@@ -636,7 +636,7 @@ func (f *fakeAuthorizer) calls() int {
 }
 
 // fakeAuthentication accepts only testToken, answering like the authorizer
-// does for revoked tokens and for tokens without a session alias.
+// does for revoked tokens and for tokens matching no Requester Rule.
 type fakeAuthentication struct{}
 
 func (fakeAuthentication) check(header http.Header) error {
@@ -646,7 +646,7 @@ func (fakeAuthentication) check(header http.Header) error {
 	case "Bearer expired-token":
 		return detailedError(connect.CodeUnauthenticated, "INVALID_TOKEN", "invalid token")
 	default:
-		return detailedError(connect.CodePermissionDenied, "NOT_SESSION_IDENTITY", "not a Session Token")
+		return detailedError(connect.CodePermissionDenied, "NOT_REQUESTER", "no matching requester rule")
 	}
 }
 

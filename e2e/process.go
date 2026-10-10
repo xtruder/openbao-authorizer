@@ -1,5 +1,3 @@
-//go:build linux
-
 // Package e2e contains the real-process end-to-end harness.
 package e2e
 

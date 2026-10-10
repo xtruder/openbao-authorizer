@@ -27,6 +27,8 @@ describe('approver errors', () => {
     expect(getErrorMessage(rpcError(Code.Unauthenticated, 'SESSION_EXPIRED'), 'fallback')).toBe('Your session has expired. Sign in again.')
     expect(getErrorMessage(rpcError(Code.FailedPrecondition, 'GRANT_NOT_ACTIVE'), 'fallback')).toBe('That grant was already revoked or has expired.')
     expect(getErrorMessage(rpcError(Code.NotFound, 'NOT_FOUND'), 'fallback')).toBe('That request or grant no longer exists.')
+    expect(getErrorMessage(rpcError(Code.PermissionDenied, 'SELF_APPROVAL'), 'fallback')).toBe("You can't decide your own request.")
+    expect(getErrorMessage(rpcError(Code.PermissionDenied, 'NOT_REQUESTER'), 'fallback')).toBe('That OpenBao identity matches no requester rule.')
   })
 
   it('keeps the server explanation for invalid input', () => {

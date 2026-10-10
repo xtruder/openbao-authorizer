@@ -14,7 +14,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file openbao/authorizer/v1/approver.proto.
  */
 export const file_openbao_authorizer_v1_approver: GenFile = /*@__PURE__*/
-  fileDesc("CiRvcGVuYmFvL2F1dGhvcml6ZXIvdjEvYXBwcm92ZXIucHJvdG8SFW9wZW5iYW8uYXV0aG9yaXplci52MSIzCghJZGVudGl0eRIRCgllbnRpdHlfaWQYASABKAkSFAoMZGlzcGxheV9uYW1lGAIgASgJIjIKDExvZ2luUmVxdWVzdBIQCgh1c2VybmFtZRgBIAEoCRIQCghwYXNzd29yZBgCIAEoCSJCCg1Mb2dpblJlc3BvbnNlEjEKCGlkZW50aXR5GAEgASgLMh8ub3BlbmJhby5hdXRob3JpemVyLnYxLklkZW50aXR5IhMKEUdldFNlc3Npb25SZXF1ZXN0IkcKEkdldFNlc3Npb25SZXNwb25zZRIxCghpZGVudGl0eRgBIAEoCzIfLm9wZW5iYW8uYXV0aG9yaXplci52MS5JZGVudGl0eSIPCg1Mb2dvdXRSZXF1ZXN0IhAKDkxvZ291dFJlc3BvbnNlIlUKGExpc3RHcmFudFJlcXVlc3RzUmVxdWVzdBI5CgZmaWx0ZXIYASABKA4yKS5vcGVuYmFvLmF1dGhvcml6ZXIudjEuR3JhbnRSZXF1ZXN0RmlsdGVyIlgKGUxpc3RHcmFudFJlcXVlc3RzUmVzcG9uc2USOwoOZ3JhbnRfcmVxdWVzdHMYASADKAsyIy5vcGVuYmFvLmF1dGhvcml6ZXIudjEuR3JhbnRSZXF1ZXN0InoKDEl0ZW1EZWNpc2lvbhIPCgdpdGVtX2lkGAEgASgJEjEKCGRlY2lzaW9uGAIgASgOMh8ub3BlbmJhby5hdXRob3JpemVyLnYxLkRlY2lzaW9uEiYKA3R0bBgDIAEoCzIZLmdvb2dsZS5wcm90b2J1Zi5EdXJhdGlvbiJmChJEZWNpZGVJdGVtc1JlcXVlc3QSGAoQZ3JhbnRfcmVxdWVzdF9pZBgBIAEoCRI2CglkZWNpc2lvbnMYAiADKAsyIy5vcGVuYmFvLmF1dGhvcml6ZXIudjEuSXRlbURlY2lzaW9uIlEKE0RlY2lkZUl0ZW1zUmVzcG9uc2USOgoNZ3JhbnRfcmVxdWVzdBgBIAEoCzIjLm9wZW5iYW8uYXV0aG9yaXplci52MS5HcmFudFJlcXVlc3QiEwoRTGlzdEdyYW50c1JlcXVlc3QiQgoSTGlzdEdyYW50c1Jlc3BvbnNlEiwKBmdyYW50cxgBIAMoCzIcLm9wZW5iYW8uYXV0aG9yaXplci52MS5HcmFudCImChJSZXZva2VHcmFudFJlcXVlc3QSEAoIZ3JhbnRfaWQYASABKAkiFQoTUmV2b2tlR3JhbnRSZXNwb25zZSIUChJXYXRjaEV2ZW50c1JlcXVlc3QixgEKEURhc2hib2FyZFNuYXBzaG90Ej0KEHBlbmRpbmdfcmVxdWVzdHMYASADKAsyIy5vcGVuYmFvLmF1dGhvcml6ZXIudjEuR3JhbnRSZXF1ZXN0Ej0KEGRlY2lkZWRfcmVxdWVzdHMYAiADKAsyIy5vcGVuYmFvLmF1dGhvcml6ZXIudjEuR3JhbnRSZXF1ZXN0EjMKDWFjdGl2ZV9ncmFudHMYAyADKAsyHC5vcGVuYmFvLmF1dGhvcml6ZXIudjEuR3JhbnQikwEKE1dhdGNoRXZlbnRzUmVzcG9uc2USPAoIc25hcHNob3QYASABKAsyKC5vcGVuYmFvLmF1dGhvcml6ZXIudjEuRGFzaGJvYXJkU25hcHNob3RIABI1CgloZWFydGJlYXQYAiABKAsyIC5vcGVuYmFvLmF1dGhvcml6ZXIudjEuSGVhcnRiZWF0SABCBwoFZXZlbnQiGQoXR2V0UHVzaFB1YmxpY0tleVJlcXVlc3QiLgoYR2V0UHVzaFB1YmxpY0tleVJlc3BvbnNlEhIKCnB1YmxpY19rZXkYASABKAkiUQofUmVnaXN0ZXJQdXNoU3Vic2NyaXB0aW9uUmVxdWVzdBIQCghlbmRwb2ludBgBIAEoCRIOCgZwMjU2ZGgYAiABKAkSDAoEYXV0aBgDIAEoCSIiCiBSZWdpc3RlclB1c2hTdWJzY3JpcHRpb25SZXNwb25zZSIxCh1EZWxldGVQdXNoU3Vic2NyaXB0aW9uUmVxdWVzdBIQCghlbmRwb2ludBgBIAEoCSIgCh5EZWxldGVQdXNoU3Vic2NyaXB0aW9uUmVzcG9uc2UqfgoSR3JhbnRSZXF1ZXN0RmlsdGVyEiQKIEdSQU5UX1JFUVVFU1RfRklMVEVSX1VOU1BFQ0lGSUVEEAASIAocR1JBTlRfUkVRVUVTVF9GSUxURVJfUEVORElORxABEiAKHEdSQU5UX1JFUVVFU1RfRklMVEVSX0RFQ0lERUQQAipPCghEZWNpc2lvbhIYChRERUNJU0lPTl9VTlNQRUNJRklFRBAAEhQKEERFQ0lTSU9OX0FQUFJPVkUQARITCg9ERUNJU0lPTl9SRUpFQ1QQAjK5CQoPQXBwcm92ZXJTZXJ2aWNlElIKBUxvZ2luEiMub3BlbmJhby5hdXRob3JpemVyLnYxLkxvZ2luUmVxdWVzdBokLm9wZW5iYW8uYXV0aG9yaXplci52MS5Mb2dpblJlc3BvbnNlEmEKCkdldFNlc3Npb24SKC5vcGVuYmFvLmF1dGhvcml6ZXIudjEuR2V0U2Vzc2lvblJlcXVlc3QaKS5vcGVuYmFvLmF1dGhvcml6ZXIudjEuR2V0U2Vzc2lvblJlc3BvbnNlElUKBkxvZ291dBIkLm9wZW5iYW8uYXV0aG9yaXplci52MS5Mb2dvdXRSZXF1ZXN0GiUub3BlbmJhby5hdXRob3JpemVyLnYxLkxvZ291dFJlc3BvbnNlEnYKEUxpc3RHcmFudFJlcXVlc3RzEi8ub3BlbmJhby5hdXRob3JpemVyLnYxLkxpc3RHcmFudFJlcXVlc3RzUmVxdWVzdBowLm9wZW5iYW8uYXV0aG9yaXplci52MS5MaXN0R3JhbnRSZXF1ZXN0c1Jlc3BvbnNlEmQKC0RlY2lkZUl0ZW1zEikub3BlbmJhby5hdXRob3JpemVyLnYxLkRlY2lkZUl0ZW1zUmVxdWVzdBoqLm9wZW5iYW8uYXV0aG9yaXplci52MS5EZWNpZGVJdGVtc1Jlc3BvbnNlEmEKCkxpc3RHcmFudHMSKC5vcGVuYmFvLmF1dGhvcml6ZXIudjEuTGlzdEdyYW50c1JlcXVlc3QaKS5vcGVuYmFvLmF1dGhvcml6ZXIudjEuTGlzdEdyYW50c1Jlc3BvbnNlEmQKC1Jldm9rZUdyYW50Eikub3BlbmJhby5hdXRob3JpemVyLnYxLlJldm9rZUdyYW50UmVxdWVzdBoqLm9wZW5iYW8uYXV0aG9yaXplci52MS5SZXZva2VHcmFudFJlc3BvbnNlEmYKC1dhdGNoRXZlbnRzEikub3BlbmJhby5hdXRob3JpemVyLnYxLldhdGNoRXZlbnRzUmVxdWVzdBoqLm9wZW5iYW8uYXV0aG9yaXplci52MS5XYXRjaEV2ZW50c1Jlc3BvbnNlMAEScwoQR2V0UHVzaFB1YmxpY0tleRIuLm9wZW5iYW8uYXV0aG9yaXplci52MS5HZXRQdXNoUHVibGljS2V5UmVxdWVzdBovLm9wZW5iYW8uYXV0aG9yaXplci52MS5HZXRQdXNoUHVibGljS2V5UmVzcG9uc2USiwEKGFJlZ2lzdGVyUHVzaFN1YnNjcmlwdGlvbhI2Lm9wZW5iYW8uYXV0aG9yaXplci52MS5SZWdpc3RlclB1c2hTdWJzY3JpcHRpb25SZXF1ZXN0Gjcub3BlbmJhby5hdXRob3JpemVyLnYxLlJlZ2lzdGVyUHVzaFN1YnNjcmlwdGlvblJlc3BvbnNlEoUBChZEZWxldGVQdXNoU3Vic2NyaXB0aW9uEjQub3BlbmJhby5hdXRob3JpemVyLnYxLkRlbGV0ZVB1c2hTdWJzY3JpcHRpb25SZXF1ZXN0GjUub3BlbmJhby5hdXRob3JpemVyLnYxLkRlbGV0ZVB1c2hTdWJzY3JpcHRpb25SZXNwb25zZULxAQoZY29tLm9wZW5iYW8uYXV0aG9yaXplci52MUINQXBwcm92ZXJQcm90b1ABWk9naXRodWIuY29tL3h0cnVkZXIvb3BlbmJhby1hdXRob3JpemVyL2dlbi9nby9vcGVuYmFvL2F1dGhvcml6ZXIvdjE7YXV0aG9yaXplcnYxogIDT0FYqgIVT3BlbmJhby5BdXRob3JpemVyLlYxygIVT3BlbmJhb1xBdXRob3JpemVyXFYx4gIhT3BlbmJhb1xBdXRob3JpemVyXFYxXEdQQk1ldGFkYXRh6gIXT3BlbmJhbzo6QXV0aG9yaXplcjo6VjFiBnByb3RvMw", [file_google_protobuf_duration, file_openbao_authorizer_v1_types]);
+  fileDesc("CiRvcGVuYmFvL2F1dGhvcml6ZXIvdjEvYXBwcm92ZXIucHJvdG8SFW9wZW5iYW8uYXV0aG9yaXplci52MSIzCghJZGVudGl0eRIRCgllbnRpdHlfaWQYASABKAkSFAoMZGlzcGxheV9uYW1lGAIgASgJInQKC0xvZ2luTWV0aG9kEjQKBHR5cGUYASABKA4yJi5vcGVuYmFvLmF1dGhvcml6ZXIudjEuTG9naW5NZXRob2RUeXBlEg0KBW1vdW50GAIgASgJEg0KBWxhYmVsGAMgASgJEhEKCW9pZGNfcm9sZRgEIAEoCSIYChZHZXRMb2dpbk9wdGlvbnNSZXF1ZXN0InoKF0dldExvZ2luT3B0aW9uc1Jlc3BvbnNlEhcKD29wZW5iYW9fYWRkcmVzcxgBIAEoCRIRCgluYW1lc3BhY2UYAiABKAkSMwoHbWV0aG9kcxgDIAMoCzIiLm9wZW5iYW8uYXV0aG9yaXplci52MS5Mb2dpbk1ldGhvZCJBChRDcmVhdGVTZXNzaW9uUmVxdWVzdBIVCg1vcGVuYmFvX3Rva2VuGAEgASgJEhIKCmtlZXBfdG9rZW4YAiABKAgiSgoVQ3JlYXRlU2Vzc2lvblJlc3BvbnNlEjEKCGlkZW50aXR5GAEgASgLMh8ub3BlbmJhby5hdXRob3JpemVyLnYxLklkZW50aXR5IhMKEUdldFNlc3Npb25SZXF1ZXN0IkcKEkdldFNlc3Npb25SZXNwb25zZRIxCghpZGVudGl0eRgBIAEoCzIfLm9wZW5iYW8uYXV0aG9yaXplci52MS5JZGVudGl0eSIPCg1Mb2dvdXRSZXF1ZXN0IhAKDkxvZ291dFJlc3BvbnNlIlUKGExpc3RHcmFudFJlcXVlc3RzUmVxdWVzdBI5CgZmaWx0ZXIYASABKA4yKS5vcGVuYmFvLmF1dGhvcml6ZXIudjEuR3JhbnRSZXF1ZXN0RmlsdGVyIlgKGUxpc3RHcmFudFJlcXVlc3RzUmVzcG9uc2USOwoOZ3JhbnRfcmVxdWVzdHMYASADKAsyIy5vcGVuYmFvLmF1dGhvcml6ZXIudjEuR3JhbnRSZXF1ZXN0InoKDEl0ZW1EZWNpc2lvbhIPCgdpdGVtX2lkGAEgASgJEjEKCGRlY2lzaW9uGAIgASgOMh8ub3BlbmJhby5hdXRob3JpemVyLnYxLkRlY2lzaW9uEiYKA3R0bBgDIAEoCzIZLmdvb2dsZS5wcm90b2J1Zi5EdXJhdGlvbiJmChJEZWNpZGVJdGVtc1JlcXVlc3QSGAoQZ3JhbnRfcmVxdWVzdF9pZBgBIAEoCRI2CglkZWNpc2lvbnMYAiADKAsyIy5vcGVuYmFvLmF1dGhvcml6ZXIudjEuSXRlbURlY2lzaW9uIlEKE0RlY2lkZUl0ZW1zUmVzcG9uc2USOgoNZ3JhbnRfcmVxdWVzdBgBIAEoCzIjLm9wZW5iYW8uYXV0aG9yaXplci52MS5HcmFudFJlcXVlc3QiEwoRTGlzdEdyYW50c1JlcXVlc3QiQgoSTGlzdEdyYW50c1Jlc3BvbnNlEiwKBmdyYW50cxgBIAMoCzIcLm9wZW5iYW8uYXV0aG9yaXplci52MS5HcmFudCImChJSZXZva2VHcmFudFJlcXVlc3QSEAoIZ3JhbnRfaWQYASABKAkiFQoTUmV2b2tlR3JhbnRSZXNwb25zZSIUChJXYXRjaEV2ZW50c1JlcXVlc3QixgEKEURhc2hib2FyZFNuYXBzaG90Ej0KEHBlbmRpbmdfcmVxdWVzdHMYASADKAsyIy5vcGVuYmFvLmF1dGhvcml6ZXIudjEuR3JhbnRSZXF1ZXN0Ej0KEGRlY2lkZWRfcmVxdWVzdHMYAiADKAsyIy5vcGVuYmFvLmF1dGhvcml6ZXIudjEuR3JhbnRSZXF1ZXN0EjMKDWFjdGl2ZV9ncmFudHMYAyADKAsyHC5vcGVuYmFvLmF1dGhvcml6ZXIudjEuR3JhbnQikwEKE1dhdGNoRXZlbnRzUmVzcG9uc2USPAoIc25hcHNob3QYASABKAsyKC5vcGVuYmFvLmF1dGhvcml6ZXIudjEuRGFzaGJvYXJkU25hcHNob3RIABI1CgloZWFydGJlYXQYAiABKAsyIC5vcGVuYmFvLmF1dGhvcml6ZXIudjEuSGVhcnRiZWF0SABCBwoFZXZlbnQiGQoXR2V0UHVzaFB1YmxpY0tleVJlcXVlc3QiLgoYR2V0UHVzaFB1YmxpY0tleVJlc3BvbnNlEhIKCnB1YmxpY19rZXkYASABKAkiUQofUmVnaXN0ZXJQdXNoU3Vic2NyaXB0aW9uUmVxdWVzdBIQCghlbmRwb2ludBgBIAEoCRIOCgZwMjU2ZGgYAiABKAkSDAoEYXV0aBgDIAEoCSIiCiBSZWdpc3RlclB1c2hTdWJzY3JpcHRpb25SZXNwb25zZSIxCh1EZWxldGVQdXNoU3Vic2NyaXB0aW9uUmVxdWVzdBIQCghlbmRwb2ludBgBIAEoCSIgCh5EZWxldGVQdXNoU3Vic2NyaXB0aW9uUmVzcG9uc2UqxwEKD0xvZ2luTWV0aG9kVHlwZRIhCh1MT0dJTl9NRVRIT0RfVFlQRV9VTlNQRUNJRklFRBAAEhsKF0xPR0lOX01FVEhPRF9UWVBFX1RPS0VOEAESHgoaTE9HSU5fTUVUSE9EX1RZUEVfVVNFUlBBU1MQAhIaChZMT0dJTl9NRVRIT0RfVFlQRV9MREFQEAMSHAoYTE9HSU5fTUVUSE9EX1RZUEVfR0lUSFVCEAQSGgoWTE9HSU5fTUVUSE9EX1RZUEVfT0lEQxAFKn4KEkdyYW50UmVxdWVzdEZpbHRlchIkCiBHUkFOVF9SRVFVRVNUX0ZJTFRFUl9VTlNQRUNJRklFRBAAEiAKHEdSQU5UX1JFUVVFU1RfRklMVEVSX1BFTkRJTkcQARIgChxHUkFOVF9SRVFVRVNUX0ZJTFRFUl9ERUNJREVEEAIqTwoIRGVjaXNpb24SGAoUREVDSVNJT05fVU5TUEVDSUZJRUQQABIUChBERUNJU0lPTl9BUFBST1ZFEAESEwoPREVDSVNJT05fUkVKRUNUEAIywwoKD0FwcHJvdmVyU2VydmljZRJwCg9HZXRMb2dpbk9wdGlvbnMSLS5vcGVuYmFvLmF1dGhvcml6ZXIudjEuR2V0TG9naW5PcHRpb25zUmVxdWVzdBouLm9wZW5iYW8uYXV0aG9yaXplci52MS5HZXRMb2dpbk9wdGlvbnNSZXNwb25zZRJqCg1DcmVhdGVTZXNzaW9uEisub3BlbmJhby5hdXRob3JpemVyLnYxLkNyZWF0ZVNlc3Npb25SZXF1ZXN0Giwub3BlbmJhby5hdXRob3JpemVyLnYxLkNyZWF0ZVNlc3Npb25SZXNwb25zZRJhCgpHZXRTZXNzaW9uEigub3BlbmJhby5hdXRob3JpemVyLnYxLkdldFNlc3Npb25SZXF1ZXN0Gikub3BlbmJhby5hdXRob3JpemVyLnYxLkdldFNlc3Npb25SZXNwb25zZRJVCgZMb2dvdXQSJC5vcGVuYmFvLmF1dGhvcml6ZXIudjEuTG9nb3V0UmVxdWVzdBolLm9wZW5iYW8uYXV0aG9yaXplci52MS5Mb2dvdXRSZXNwb25zZRJ2ChFMaXN0R3JhbnRSZXF1ZXN0cxIvLm9wZW5iYW8uYXV0aG9yaXplci52MS5MaXN0R3JhbnRSZXF1ZXN0c1JlcXVlc3QaMC5vcGVuYmFvLmF1dGhvcml6ZXIudjEuTGlzdEdyYW50UmVxdWVzdHNSZXNwb25zZRJkCgtEZWNpZGVJdGVtcxIpLm9wZW5iYW8uYXV0aG9yaXplci52MS5EZWNpZGVJdGVtc1JlcXVlc3QaKi5vcGVuYmFvLmF1dGhvcml6ZXIudjEuRGVjaWRlSXRlbXNSZXNwb25zZRJhCgpMaXN0R3JhbnRzEigub3BlbmJhby5hdXRob3JpemVyLnYxLkxpc3RHcmFudHNSZXF1ZXN0Gikub3BlbmJhby5hdXRob3JpemVyLnYxLkxpc3RHcmFudHNSZXNwb25zZRJkCgtSZXZva2VHcmFudBIpLm9wZW5iYW8uYXV0aG9yaXplci52MS5SZXZva2VHcmFudFJlcXVlc3QaKi5vcGVuYmFvLmF1dGhvcml6ZXIudjEuUmV2b2tlR3JhbnRSZXNwb25zZRJmCgtXYXRjaEV2ZW50cxIpLm9wZW5iYW8uYXV0aG9yaXplci52MS5XYXRjaEV2ZW50c1JlcXVlc3QaKi5vcGVuYmFvLmF1dGhvcml6ZXIudjEuV2F0Y2hFdmVudHNSZXNwb25zZTABEnMKEEdldFB1c2hQdWJsaWNLZXkSLi5vcGVuYmFvLmF1dGhvcml6ZXIudjEuR2V0UHVzaFB1YmxpY0tleVJlcXVlc3QaLy5vcGVuYmFvLmF1dGhvcml6ZXIudjEuR2V0UHVzaFB1YmxpY0tleVJlc3BvbnNlEosBChhSZWdpc3RlclB1c2hTdWJzY3JpcHRpb24SNi5vcGVuYmFvLmF1dGhvcml6ZXIudjEuUmVnaXN0ZXJQdXNoU3Vic2NyaXB0aW9uUmVxdWVzdBo3Lm9wZW5iYW8uYXV0aG9yaXplci52MS5SZWdpc3RlclB1c2hTdWJzY3JpcHRpb25SZXNwb25zZRKFAQoWRGVsZXRlUHVzaFN1YnNjcmlwdGlvbhI0Lm9wZW5iYW8uYXV0aG9yaXplci52MS5EZWxldGVQdXNoU3Vic2NyaXB0aW9uUmVxdWVzdBo1Lm9wZW5iYW8uYXV0aG9yaXplci52MS5EZWxldGVQdXNoU3Vic2NyaXB0aW9uUmVzcG9uc2VC8QEKGWNvbS5vcGVuYmFvLmF1dGhvcml6ZXIudjFCDUFwcHJvdmVyUHJvdG9QAVpPZ2l0aHViLmNvbS94dHJ1ZGVyL29wZW5iYW8tYXV0aG9yaXplci9nZW4vZ28vb3BlbmJhby9hdXRob3JpemVyL3YxO2F1dGhvcml6ZXJ2MaICA09BWKoCFU9wZW5iYW8uQXV0aG9yaXplci5WMcoCFU9wZW5iYW9cQXV0aG9yaXplclxWMeICIU9wZW5iYW9cQXV0aG9yaXplclxWMVxHUEJNZXRhZGF0YeoCF09wZW5iYW86OkF1dGhvcml6ZXI6OlYxYgZwcm90bzM", [file_google_protobuf_duration, file_openbao_authorizer_v1_types]);
 
 /**
  * Identity is the approver's OpenBao identity.
@@ -41,31 +41,118 @@ export const IdentitySchema: GenMessage<Identity> = /*@__PURE__*/
   messageDesc(file_openbao_authorizer_v1_approver, 0);
 
 /**
- * @generated from message openbao.authorizer.v1.LoginRequest
+ * @generated from message openbao.authorizer.v1.LoginMethod
  */
-export type LoginRequest = Message<"openbao.authorizer.v1.LoginRequest"> & {
+export type LoginMethod = Message<"openbao.authorizer.v1.LoginMethod"> & {
   /**
-   * @generated from field: string username = 1;
+   * @generated from field: openbao.authorizer.v1.LoginMethodType type = 1;
    */
-  username: string;
+  type: LoginMethodType;
 
   /**
-   * @generated from field: string password = 2;
+   * Auth mount path without `auth/`, e.g. "userpass"; unused for tokens.
+   *
+   * @generated from field: string mount = 2;
    */
-  password: string;
+  mount: string;
+
+  /**
+   * Label shown on the sign-in screen.
+   *
+   * @generated from field: string label = 3;
+   */
+  label: string;
+
+  /**
+   * OIDC role; empty uses the mount's default role.
+   *
+   * @generated from field: string oidc_role = 4;
+   */
+  oidcRole: string;
 };
 
 /**
- * Describes the message openbao.authorizer.v1.LoginRequest.
- * Use `create(LoginRequestSchema)` to create a new message.
+ * Describes the message openbao.authorizer.v1.LoginMethod.
+ * Use `create(LoginMethodSchema)` to create a new message.
  */
-export const LoginRequestSchema: GenMessage<LoginRequest> = /*@__PURE__*/
+export const LoginMethodSchema: GenMessage<LoginMethod> = /*@__PURE__*/
   messageDesc(file_openbao_authorizer_v1_approver, 1);
 
 /**
- * @generated from message openbao.authorizer.v1.LoginResponse
+ * @generated from message openbao.authorizer.v1.GetLoginOptionsRequest
  */
-export type LoginResponse = Message<"openbao.authorizer.v1.LoginResponse"> & {
+export type GetLoginOptionsRequest = Message<"openbao.authorizer.v1.GetLoginOptionsRequest"> & {
+};
+
+/**
+ * Describes the message openbao.authorizer.v1.GetLoginOptionsRequest.
+ * Use `create(GetLoginOptionsRequestSchema)` to create a new message.
+ */
+export const GetLoginOptionsRequestSchema: GenMessage<GetLoginOptionsRequest> = /*@__PURE__*/
+  messageDesc(file_openbao_authorizer_v1_approver, 2);
+
+/**
+ * @generated from message openbao.authorizer.v1.GetLoginOptionsResponse
+ */
+export type GetLoginOptionsResponse = Message<"openbao.authorizer.v1.GetLoginOptionsResponse"> & {
+  /**
+   * OpenBao address as reachable from approvers' browsers. OpenBao must
+   * allow the PWA origin in `sys/config/cors`.
+   *
+   * @generated from field: string openbao_address = 1;
+   */
+  openbaoAddress: string;
+
+  /**
+   * @generated from field: string namespace = 2;
+   */
+  namespace: string;
+
+  /**
+   * @generated from field: repeated openbao.authorizer.v1.LoginMethod methods = 3;
+   */
+  methods: LoginMethod[];
+};
+
+/**
+ * Describes the message openbao.authorizer.v1.GetLoginOptionsResponse.
+ * Use `create(GetLoginOptionsResponseSchema)` to create a new message.
+ */
+export const GetLoginOptionsResponseSchema: GenMessage<GetLoginOptionsResponse> = /*@__PURE__*/
+  messageDesc(file_openbao_authorizer_v1_approver, 3);
+
+/**
+ * @generated from message openbao.authorizer.v1.CreateSessionRequest
+ */
+export type CreateSessionRequest = Message<"openbao.authorizer.v1.CreateSessionRequest"> & {
+  /**
+   * OpenBao token to check for the approver policy. The server never stores it.
+   *
+   * @generated from field: string openbao_token = 1;
+   */
+  openbaoToken: string;
+
+  /**
+   * Leave the token valid afterwards. Set for tokens the user pasted, which
+   * may be their working token; tokens the PWA obtained by logging in to
+   * OpenBao exist only for this exchange and are revoked.
+   *
+   * @generated from field: bool keep_token = 2;
+   */
+  keepToken: boolean;
+};
+
+/**
+ * Describes the message openbao.authorizer.v1.CreateSessionRequest.
+ * Use `create(CreateSessionRequestSchema)` to create a new message.
+ */
+export const CreateSessionRequestSchema: GenMessage<CreateSessionRequest> = /*@__PURE__*/
+  messageDesc(file_openbao_authorizer_v1_approver, 4);
+
+/**
+ * @generated from message openbao.authorizer.v1.CreateSessionResponse
+ */
+export type CreateSessionResponse = Message<"openbao.authorizer.v1.CreateSessionResponse"> & {
   /**
    * @generated from field: openbao.authorizer.v1.Identity identity = 1;
    */
@@ -73,11 +160,11 @@ export type LoginResponse = Message<"openbao.authorizer.v1.LoginResponse"> & {
 };
 
 /**
- * Describes the message openbao.authorizer.v1.LoginResponse.
- * Use `create(LoginResponseSchema)` to create a new message.
+ * Describes the message openbao.authorizer.v1.CreateSessionResponse.
+ * Use `create(CreateSessionResponseSchema)` to create a new message.
  */
-export const LoginResponseSchema: GenMessage<LoginResponse> = /*@__PURE__*/
-  messageDesc(file_openbao_authorizer_v1_approver, 2);
+export const CreateSessionResponseSchema: GenMessage<CreateSessionResponse> = /*@__PURE__*/
+  messageDesc(file_openbao_authorizer_v1_approver, 5);
 
 /**
  * @generated from message openbao.authorizer.v1.GetSessionRequest
@@ -90,7 +177,7 @@ export type GetSessionRequest = Message<"openbao.authorizer.v1.GetSessionRequest
  * Use `create(GetSessionRequestSchema)` to create a new message.
  */
 export const GetSessionRequestSchema: GenMessage<GetSessionRequest> = /*@__PURE__*/
-  messageDesc(file_openbao_authorizer_v1_approver, 3);
+  messageDesc(file_openbao_authorizer_v1_approver, 6);
 
 /**
  * @generated from message openbao.authorizer.v1.GetSessionResponse
@@ -107,7 +194,7 @@ export type GetSessionResponse = Message<"openbao.authorizer.v1.GetSessionRespon
  * Use `create(GetSessionResponseSchema)` to create a new message.
  */
 export const GetSessionResponseSchema: GenMessage<GetSessionResponse> = /*@__PURE__*/
-  messageDesc(file_openbao_authorizer_v1_approver, 4);
+  messageDesc(file_openbao_authorizer_v1_approver, 7);
 
 /**
  * @generated from message openbao.authorizer.v1.LogoutRequest
@@ -120,7 +207,7 @@ export type LogoutRequest = Message<"openbao.authorizer.v1.LogoutRequest"> & {
  * Use `create(LogoutRequestSchema)` to create a new message.
  */
 export const LogoutRequestSchema: GenMessage<LogoutRequest> = /*@__PURE__*/
-  messageDesc(file_openbao_authorizer_v1_approver, 5);
+  messageDesc(file_openbao_authorizer_v1_approver, 8);
 
 /**
  * @generated from message openbao.authorizer.v1.LogoutResponse
@@ -133,7 +220,7 @@ export type LogoutResponse = Message<"openbao.authorizer.v1.LogoutResponse"> & {
  * Use `create(LogoutResponseSchema)` to create a new message.
  */
 export const LogoutResponseSchema: GenMessage<LogoutResponse> = /*@__PURE__*/
-  messageDesc(file_openbao_authorizer_v1_approver, 6);
+  messageDesc(file_openbao_authorizer_v1_approver, 9);
 
 /**
  * @generated from message openbao.authorizer.v1.ListGrantRequestsRequest
@@ -150,7 +237,7 @@ export type ListGrantRequestsRequest = Message<"openbao.authorizer.v1.ListGrantR
  * Use `create(ListGrantRequestsRequestSchema)` to create a new message.
  */
 export const ListGrantRequestsRequestSchema: GenMessage<ListGrantRequestsRequest> = /*@__PURE__*/
-  messageDesc(file_openbao_authorizer_v1_approver, 7);
+  messageDesc(file_openbao_authorizer_v1_approver, 10);
 
 /**
  * @generated from message openbao.authorizer.v1.ListGrantRequestsResponse
@@ -167,7 +254,7 @@ export type ListGrantRequestsResponse = Message<"openbao.authorizer.v1.ListGrant
  * Use `create(ListGrantRequestsResponseSchema)` to create a new message.
  */
 export const ListGrantRequestsResponseSchema: GenMessage<ListGrantRequestsResponse> = /*@__PURE__*/
-  messageDesc(file_openbao_authorizer_v1_approver, 8);
+  messageDesc(file_openbao_authorizer_v1_approver, 11);
 
 /**
  * @generated from message openbao.authorizer.v1.ItemDecision
@@ -196,7 +283,7 @@ export type ItemDecision = Message<"openbao.authorizer.v1.ItemDecision"> & {
  * Use `create(ItemDecisionSchema)` to create a new message.
  */
 export const ItemDecisionSchema: GenMessage<ItemDecision> = /*@__PURE__*/
-  messageDesc(file_openbao_authorizer_v1_approver, 9);
+  messageDesc(file_openbao_authorizer_v1_approver, 12);
 
 /**
  * @generated from message openbao.authorizer.v1.DecideItemsRequest
@@ -218,7 +305,7 @@ export type DecideItemsRequest = Message<"openbao.authorizer.v1.DecideItemsReque
  * Use `create(DecideItemsRequestSchema)` to create a new message.
  */
 export const DecideItemsRequestSchema: GenMessage<DecideItemsRequest> = /*@__PURE__*/
-  messageDesc(file_openbao_authorizer_v1_approver, 10);
+  messageDesc(file_openbao_authorizer_v1_approver, 13);
 
 /**
  * @generated from message openbao.authorizer.v1.DecideItemsResponse
@@ -235,7 +322,7 @@ export type DecideItemsResponse = Message<"openbao.authorizer.v1.DecideItemsResp
  * Use `create(DecideItemsResponseSchema)` to create a new message.
  */
 export const DecideItemsResponseSchema: GenMessage<DecideItemsResponse> = /*@__PURE__*/
-  messageDesc(file_openbao_authorizer_v1_approver, 11);
+  messageDesc(file_openbao_authorizer_v1_approver, 14);
 
 /**
  * @generated from message openbao.authorizer.v1.ListGrantsRequest
@@ -248,7 +335,7 @@ export type ListGrantsRequest = Message<"openbao.authorizer.v1.ListGrantsRequest
  * Use `create(ListGrantsRequestSchema)` to create a new message.
  */
 export const ListGrantsRequestSchema: GenMessage<ListGrantsRequest> = /*@__PURE__*/
-  messageDesc(file_openbao_authorizer_v1_approver, 12);
+  messageDesc(file_openbao_authorizer_v1_approver, 15);
 
 /**
  * @generated from message openbao.authorizer.v1.ListGrantsResponse
@@ -265,7 +352,7 @@ export type ListGrantsResponse = Message<"openbao.authorizer.v1.ListGrantsRespon
  * Use `create(ListGrantsResponseSchema)` to create a new message.
  */
 export const ListGrantsResponseSchema: GenMessage<ListGrantsResponse> = /*@__PURE__*/
-  messageDesc(file_openbao_authorizer_v1_approver, 13);
+  messageDesc(file_openbao_authorizer_v1_approver, 16);
 
 /**
  * @generated from message openbao.authorizer.v1.RevokeGrantRequest
@@ -282,7 +369,7 @@ export type RevokeGrantRequest = Message<"openbao.authorizer.v1.RevokeGrantReque
  * Use `create(RevokeGrantRequestSchema)` to create a new message.
  */
 export const RevokeGrantRequestSchema: GenMessage<RevokeGrantRequest> = /*@__PURE__*/
-  messageDesc(file_openbao_authorizer_v1_approver, 14);
+  messageDesc(file_openbao_authorizer_v1_approver, 17);
 
 /**
  * @generated from message openbao.authorizer.v1.RevokeGrantResponse
@@ -295,7 +382,7 @@ export type RevokeGrantResponse = Message<"openbao.authorizer.v1.RevokeGrantResp
  * Use `create(RevokeGrantResponseSchema)` to create a new message.
  */
 export const RevokeGrantResponseSchema: GenMessage<RevokeGrantResponse> = /*@__PURE__*/
-  messageDesc(file_openbao_authorizer_v1_approver, 15);
+  messageDesc(file_openbao_authorizer_v1_approver, 18);
 
 /**
  * @generated from message openbao.authorizer.v1.WatchEventsRequest
@@ -308,7 +395,7 @@ export type WatchEventsRequest = Message<"openbao.authorizer.v1.WatchEventsReque
  * Use `create(WatchEventsRequestSchema)` to create a new message.
  */
 export const WatchEventsRequestSchema: GenMessage<WatchEventsRequest> = /*@__PURE__*/
-  messageDesc(file_openbao_authorizer_v1_approver, 16);
+  messageDesc(file_openbao_authorizer_v1_approver, 19);
 
 /**
  * DashboardSnapshot is everything the PWA renders.
@@ -339,7 +426,7 @@ export type DashboardSnapshot = Message<"openbao.authorizer.v1.DashboardSnapshot
  * Use `create(DashboardSnapshotSchema)` to create a new message.
  */
 export const DashboardSnapshotSchema: GenMessage<DashboardSnapshot> = /*@__PURE__*/
-  messageDesc(file_openbao_authorizer_v1_approver, 17);
+  messageDesc(file_openbao_authorizer_v1_approver, 20);
 
 /**
  * @generated from message openbao.authorizer.v1.WatchEventsResponse
@@ -368,7 +455,7 @@ export type WatchEventsResponse = Message<"openbao.authorizer.v1.WatchEventsResp
  * Use `create(WatchEventsResponseSchema)` to create a new message.
  */
 export const WatchEventsResponseSchema: GenMessage<WatchEventsResponse> = /*@__PURE__*/
-  messageDesc(file_openbao_authorizer_v1_approver, 18);
+  messageDesc(file_openbao_authorizer_v1_approver, 21);
 
 /**
  * @generated from message openbao.authorizer.v1.GetPushPublicKeyRequest
@@ -381,7 +468,7 @@ export type GetPushPublicKeyRequest = Message<"openbao.authorizer.v1.GetPushPubl
  * Use `create(GetPushPublicKeyRequestSchema)` to create a new message.
  */
 export const GetPushPublicKeyRequestSchema: GenMessage<GetPushPublicKeyRequest> = /*@__PURE__*/
-  messageDesc(file_openbao_authorizer_v1_approver, 19);
+  messageDesc(file_openbao_authorizer_v1_approver, 22);
 
 /**
  * @generated from message openbao.authorizer.v1.GetPushPublicKeyResponse
@@ -400,7 +487,7 @@ export type GetPushPublicKeyResponse = Message<"openbao.authorizer.v1.GetPushPub
  * Use `create(GetPushPublicKeyResponseSchema)` to create a new message.
  */
 export const GetPushPublicKeyResponseSchema: GenMessage<GetPushPublicKeyResponse> = /*@__PURE__*/
-  messageDesc(file_openbao_authorizer_v1_approver, 20);
+  messageDesc(file_openbao_authorizer_v1_approver, 23);
 
 /**
  * @generated from message openbao.authorizer.v1.RegisterPushSubscriptionRequest
@@ -427,7 +514,7 @@ export type RegisterPushSubscriptionRequest = Message<"openbao.authorizer.v1.Reg
  * Use `create(RegisterPushSubscriptionRequestSchema)` to create a new message.
  */
 export const RegisterPushSubscriptionRequestSchema: GenMessage<RegisterPushSubscriptionRequest> = /*@__PURE__*/
-  messageDesc(file_openbao_authorizer_v1_approver, 21);
+  messageDesc(file_openbao_authorizer_v1_approver, 24);
 
 /**
  * @generated from message openbao.authorizer.v1.RegisterPushSubscriptionResponse
@@ -440,7 +527,7 @@ export type RegisterPushSubscriptionResponse = Message<"openbao.authorizer.v1.Re
  * Use `create(RegisterPushSubscriptionResponseSchema)` to create a new message.
  */
 export const RegisterPushSubscriptionResponseSchema: GenMessage<RegisterPushSubscriptionResponse> = /*@__PURE__*/
-  messageDesc(file_openbao_authorizer_v1_approver, 22);
+  messageDesc(file_openbao_authorizer_v1_approver, 25);
 
 /**
  * @generated from message openbao.authorizer.v1.DeletePushSubscriptionRequest
@@ -457,7 +544,7 @@ export type DeletePushSubscriptionRequest = Message<"openbao.authorizer.v1.Delet
  * Use `create(DeletePushSubscriptionRequestSchema)` to create a new message.
  */
 export const DeletePushSubscriptionRequestSchema: GenMessage<DeletePushSubscriptionRequest> = /*@__PURE__*/
-  messageDesc(file_openbao_authorizer_v1_approver, 23);
+  messageDesc(file_openbao_authorizer_v1_approver, 26);
 
 /**
  * @generated from message openbao.authorizer.v1.DeletePushSubscriptionResponse
@@ -470,7 +557,58 @@ export type DeletePushSubscriptionResponse = Message<"openbao.authorizer.v1.Dele
  * Use `create(DeletePushSubscriptionResponseSchema)` to create a new message.
  */
 export const DeletePushSubscriptionResponseSchema: GenMessage<DeletePushSubscriptionResponse> = /*@__PURE__*/
-  messageDesc(file_openbao_authorizer_v1_approver, 24);
+  messageDesc(file_openbao_authorizer_v1_approver, 27);
+
+/**
+ * @generated from enum openbao.authorizer.v1.LoginMethodType
+ */
+export enum LoginMethodType {
+  /**
+   * @generated from enum value: LOGIN_METHOD_TYPE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * Paste an existing OpenBao token.
+   *
+   * @generated from enum value: LOGIN_METHOD_TYPE_TOKEN = 1;
+   */
+  TOKEN = 1,
+
+  /**
+   * Username and password posted to `auth/<mount>/login/<username>`.
+   *
+   * @generated from enum value: LOGIN_METHOD_TYPE_USERPASS = 2;
+   */
+  USERPASS = 2,
+
+  /**
+   * Username and password posted to `auth/<mount>/login/<username>`.
+   *
+   * @generated from enum value: LOGIN_METHOD_TYPE_LDAP = 3;
+   */
+  LDAP = 3,
+
+  /**
+   * GitHub personal access token posted to `auth/<mount>/login`.
+   *
+   * @generated from enum value: LOGIN_METHOD_TYPE_GITHUB = 4;
+   */
+  GITHUB = 4,
+
+  /**
+   * OpenBao OIDC redirect flow through `auth/<mount>/oidc/auth_url`.
+   *
+   * @generated from enum value: LOGIN_METHOD_TYPE_OIDC = 5;
+   */
+  OIDC = 5,
+}
+
+/**
+ * Describes the enum openbao.authorizer.v1.LoginMethodType.
+ */
+export const LoginMethodTypeSchema: GenEnum<LoginMethodType> = /*@__PURE__*/
+  enumDesc(file_openbao_authorizer_v1_approver, 0);
 
 /**
  * @generated from enum openbao.authorizer.v1.GrantRequestFilter
@@ -500,7 +638,7 @@ export enum GrantRequestFilter {
  * Describes the enum openbao.authorizer.v1.GrantRequestFilter.
  */
 export const GrantRequestFilterSchema: GenEnum<GrantRequestFilter> = /*@__PURE__*/
-  enumDesc(file_openbao_authorizer_v1_approver, 0);
+  enumDesc(file_openbao_authorizer_v1_approver, 1);
 
 /**
  * @generated from enum openbao.authorizer.v1.Decision
@@ -526,12 +664,14 @@ export enum Decision {
  * Describes the enum openbao.authorizer.v1.Decision.
  */
 export const DecisionSchema: GenEnum<Decision> = /*@__PURE__*/
-  enumDesc(file_openbao_authorizer_v1_approver, 1);
+  enumDesc(file_openbao_authorizer_v1_approver, 2);
 
 /**
- * ApproverService is called by the PWA. Every RPC requires a same-origin
- * request; every RPC except Login also requires the HttpOnly, SameSite=Strict
- * session cookie that Login sets. No CSRF token is needed: the cookie is never
+ * ApproverService is called by the PWA. Approvers sign in to OpenBao directly
+ * with any auth method; the PWA exchanges the resulting token for an app
+ * session once. Every RPC requires a same-origin request; every RPC except
+ * GetLoginOptions and CreateSession also requires the HttpOnly,
+ * SameSite=Strict session cookie. No CSRF token is needed: the cookie is never
  * sent cross-site, Connect's content types force a CORS preflight that the
  * server never grants, and the origin check rejects sibling sites.
  *
@@ -539,17 +679,27 @@ export const DecisionSchema: GenEnum<Decision> = /*@__PURE__*/
  */
 export const ApproverService: GenService<{
   /**
-   * Login checks OpenBao userpass credentials and the approver policy, then
-   * revokes the OpenBao token at once: the authorizer keeps only its own
-   * session. The password is discarded; the session cookie is set on the
-   * response. It is the only RPC that needs no session.
+   * GetLoginOptions tells the PWA where OpenBao is and which login methods to
+   * offer. It needs no session.
    *
-   * @generated from rpc openbao.authorizer.v1.ApproverService.Login
+   * @generated from rpc openbao.authorizer.v1.ApproverService.GetLoginOptions
    */
-  login: {
+  getLoginOptions: {
     methodKind: "unary";
-    input: typeof LoginRequestSchema;
-    output: typeof LoginResponseSchema;
+    input: typeof GetLoginOptionsRequestSchema;
+    output: typeof GetLoginOptionsResponseSchema;
+  },
+  /**
+   * CreateSession checks an OpenBao token's approver policy, revokes the
+   * token unless asked to keep it, and sets the session cookie. The authorizer never sees
+   * passwords or other login credentials.
+   *
+   * @generated from rpc openbao.authorizer.v1.ApproverService.CreateSession
+   */
+  createSession: {
+    methodKind: "unary";
+    input: typeof CreateSessionRequestSchema;
+    output: typeof CreateSessionResponseSchema;
   },
   /**
    * GetSession restores the current session after a page load.

@@ -6,7 +6,6 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -20,6 +19,7 @@ import (
 
 	"connectrpc.com/connect"
 	openbao "github.com/openbao/openbao/api/v2"
+	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	authorizerv1 "github.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1"
@@ -118,12 +118,12 @@ func (r grantRequest) outcomeError(waited time.Duration) error {
 	if pending := r.pendingCount(); pending > 0 {
 		if waited == 0 {
 			return &exitError{code: exitPending, err: fmt.Errorf(
-				"%d Permission Item(s) pending; wait with: bao-cred request -wait %s", pending, r.ID,
+				"%d Permission Item(s) pending; wait with: bao-cred request --wait %s", pending, r.ID,
 			)}
 		}
 
 		return &exitError{code: exitPending, err: fmt.Errorf(
-			"%d Permission Item(s) still pending after %s; resume with: bao-cred request -wait %s", pending, waited, r.ID,
+			"%d Permission Item(s) still pending after %s; resume with: bao-cred request --wait %s", pending, waited, r.ID,
 		)}
 	}
 
@@ -163,8 +163,8 @@ type grantOutput struct {
 }
 
 // authorizerError is an RPC failure reduced to the authorizer's stable reason
-// and message. It never includes request headers, so the Session Token stays
-// out of output.
+// and message. It never includes request headers, so the token stays out of
+// output.
 type authorizerError struct {
 	code    connect.Code
 	reason  string
@@ -180,11 +180,11 @@ type authorizerError struct {
 func (e *authorizerError) Error() string {
 	switch e.reason {
 	case "INVALID_TOKEN":
-		return "the authorizer rejected the Session Token; it may be expired or revoked"
-	case "NOT_SESSION_IDENTITY":
-		return "the token is not a Session Token: its identity has no Agent Session alias"
+		return "the authorizer rejected the token; it may be expired or revoked"
+	case "NOT_REQUESTER":
+		return "this token is not allowed to request grants (no matching requester rule)"
 	case "NOT_FOUND":
-		return "not found for this Agent Session"
+		return "not found for this Requester"
 	case "OPENBAO_UNAVAILABLE":
 		return "the authorizer cannot reach OpenBao; try again later"
 	}
@@ -252,8 +252,8 @@ func tlsVerificationError(err error) bool {
 }
 
 type authorizerClient struct {
-	http  *http.Client
-	agent authorizerv1connect.AgentServiceClient
+	http    *http.Client
+	service authorizerv1connect.GrantServiceClient
 }
 
 func newAuthorizerClient(explicitURL, token string) (*authorizerClient, error) {
@@ -263,7 +263,7 @@ func newAuthorizerClient(explicitURL, token string) (*authorizerClient, error) {
 	}
 
 	if raw == "" {
-		return nil, errors.New("authorizer URL is required; use -authorizer or set OPENBAO_AUTHORIZER_URL")
+		return nil, errors.New("authorizer URL is required; use --authorizer or set OPENBAO_AUTHORIZER_URL")
 	}
 
 	parsed, err := url.Parse(raw)
@@ -272,7 +272,7 @@ func newAuthorizerClient(explicitURL, token string) (*authorizerClient, error) {
 	}
 
 	if !secureAuthorizerURL(parsed) {
-		return nil, errors.New("authorizer URL must use HTTPS unless its host is loopback; the Session Token would be sent in clear text")
+		return nil, errors.New("authorizer URL must use HTTPS unless its host is loopback; the token would be sent in clear text")
 	}
 
 	httpClient, err := authorizerHTTPClient()
@@ -280,17 +280,17 @@ func newAuthorizerClient(explicitURL, token string) (*authorizerClient, error) {
 		return nil, err
 	}
 
-	agent := authorizerv1connect.NewAgentServiceClient(
+	service := authorizerv1connect.NewGrantServiceClient(
 		httpClient, parsed.JoinPath("api").String(),
 		connect.WithInterceptors(bearerInterceptor(token)),
 		connect.WithReadMaxBytes(maxAuthorizerResponseBytes),
 	)
 
-	return &authorizerClient{http: httpClient, agent: agent}, nil
+	return &authorizerClient{http: httpClient, service: service}, nil
 }
 
 // bearerInterceptor authenticates every unary and streaming call with the
-// Session Token.
+// Requester's token.
 type bearerInterceptor string
 
 func (t bearerInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
@@ -314,7 +314,7 @@ func (bearerInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc)
 }
 
 // secureAuthorizerURL allows plain HTTP only to loopback hosts, where the
-// Session Token never crosses a network.
+// token never crosses a network.
 func secureAuthorizerURL(endpoint *url.URL) bool {
 	if endpoint.Scheme == "https" {
 		return true
@@ -352,7 +352,7 @@ func authorizerHTTPClient() (*http.Client, error) {
 
 	return &http.Client{Transport: transport, CheckRedirect: func(request *http.Request, via []*http.Request) error {
 		// Redirects keep the Authorization header on the same host, so a
-		// downgrade to plain HTTP would leak the Session Token.
+		// downgrade to plain HTTP would leak the token.
 		if !secureAuthorizerURL(request.URL) {
 			return errInsecureRedirect
 		}
@@ -423,7 +423,7 @@ func (c *authorizerClient) createGrantRequest(
 ) (grantRequest, error) {
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
-	response, err := c.agent.CreateGrantRequest(ctx, connect.NewRequest(input))
+	response, err := c.service.CreateGrantRequest(ctx, connect.NewRequest(input))
 	if err != nil {
 		return grantRequest{}, fmt.Errorf("file Grant Request: %w", newAuthorizerError(err))
 	}
@@ -439,7 +439,7 @@ func (c *authorizerClient) createGrantRequest(
 func (c *authorizerClient) grantRequest(ctx context.Context, id string) (grantRequest, error) {
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
-	response, err := c.agent.GetGrantRequest(ctx, connect.NewRequest(&authorizerv1.GetGrantRequestRequest{Id: id}))
+	response, err := c.service.GetGrantRequest(ctx, connect.NewRequest(&authorizerv1.GetGrantRequestRequest{Id: id}))
 	if err != nil {
 		return grantRequest{}, fmt.Errorf("read Grant Request %s: %w", id, newAuthorizerError(err))
 	}
@@ -462,7 +462,7 @@ func (c *authorizerClient) watchGrantRequest(
 	defer cancel(nil)
 	idle := time.AfterFunc(streamIdleTimeout, func() { cancel(errStreamIdle) })
 	defer idle.Stop()
-	stream, err := c.agent.WatchGrantRequest(ctx, connect.NewRequest(&authorizerv1.WatchGrantRequestRequest{Id: id}))
+	stream, err := c.service.WatchGrantRequest(ctx, connect.NewRequest(&authorizerv1.WatchGrantRequestRequest{Id: id}))
 	if err != nil {
 		return fmt.Errorf("watch Grant Request %s: %w", id, newAuthorizerError(err))
 	}
@@ -496,7 +496,7 @@ func (c *authorizerClient) watchGrantRequest(
 func (c *authorizerClient) grants(ctx context.Context) ([]grantOutput, error) {
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
-	response, err := c.agent.ListSessionGrants(ctx, connect.NewRequest(&authorizerv1.ListSessionGrantsRequest{}))
+	response, err := c.service.ListMyGrants(ctx, connect.NewRequest(&authorizerv1.ListMyGrantsRequest{}))
 	if err != nil {
 		return nil, fmt.Errorf("list Grants: %w", newAuthorizerError(err))
 	}
@@ -541,7 +541,7 @@ func waitForGrantRequest(
 	for request.pendingCount() > 0 {
 		err := client.watchGrantRequest(waitCtx, request.ID, onSnapshot, onMessage)
 		if ctx.Err() != nil {
-			return request, fmt.Errorf("stopped waiting: %w; resume with: bao-cred request -wait %s", ctx.Err(), request.ID)
+			return request, fmt.Errorf("stopped waiting: %w; resume with: bao-cred request --wait %s", ctx.Err(), request.ID)
 		}
 
 		if waitCtx.Err() != nil {
@@ -555,7 +555,7 @@ func waitForGrantRequest(
 
 			err = errors.New("watch stream ended with Permission Items still pending")
 		} else if !transientAuthorizerError(err) {
-			return request, fmt.Errorf("%w; resume with: bao-cred request -wait %s", err, request.ID)
+			return request, fmt.Errorf("%w; resume with: bao-cred request --wait %s", err, request.ID)
 		}
 
 		progress(fmt.Sprintf("%v; reconnecting in %s", err, delay))
@@ -583,48 +583,78 @@ func reportChanges(request grantRequest, seen map[string]string, progress progre
 	}
 }
 
-func runRequest(ctx context.Context, arguments []string, stdout, stderr io.Writer) error {
-	var rawItems repeatedFlag
-	flags := flag.NewFlagSet("bao-cred request", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	flags.Usage = func() { _, _ = fmt.Fprint(stderr, usageText) }
-	reason := flags.String("reason", "", "Grant Request reason")
-	flags.Var(&rawItems, "item", "PATH=CAP[,CAP] Permission Item")
-	ttl := flags.Duration("ttl", 0, "requested Grant lifetime")
-	timeout := flags.Duration("timeout", 15*time.Minute, "approval timeout")
-	noWait := flags.Bool("no-wait", false, "do not wait for decisions")
-	waitID := flags.String("wait", "", "resume waiting on a Grant Request")
-	authorizerURL := flags.String("authorizer", "", "authorizer URL")
-	quiet := flags.Bool("quiet", false, "suppress progress")
-	if err := flags.Parse(arguments); err != nil {
-		return flagError(err)
+type requestFlags struct {
+	reason     string
+	items      []string
+	ttl        time.Duration
+	timeout    time.Duration
+	noWait     bool
+	waitID     string
+	authorizer string
+	quiet      bool
+}
+
+func newRequestCommand() *cobra.Command {
+	var flags requestFlags
+	command := &cobra.Command{
+		Use:   "request --reason TEXT --item PATH=CAPS [--item ...] | --wait ID",
+		Short: "File a Grant Request and wait for an Approver",
+		Long: `Files a Grant Request for one or more Permission Items and waits until none
+is pending, or resumes waiting on an existing request with --wait. Prints the
+request as JSON on stdout.`,
+		Example: `  bao-cred request --reason "migrate app schema" --item database/creds/app=read --item kv/data/app=read,update
+  bao-cred request --no-wait --reason "rotate the CI token" --item github/token/project-ci=read
+  bao-cred request --wait <request-id>`,
+		Args: noPositionalArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			return runRequest(command.Context(), flags, command.OutOrStdout(), command.ErrOrStderr())
+		},
 	}
 
-	if flags.NArg() != 0 {
-		return usageError(errors.New("request accepts no positional arguments"))
+	set := command.Flags()
+	set.StringVar(&flags.reason, "reason", "", "why the Requester needs access (required)")
+	// StringArray, unlike StringSlice, keeps the commas between capabilities.
+	set.StringArrayVar(&flags.items, "item", nil,
+		"Permission Item PATH=CAP[,CAP]; CAP is create, read, update, patch, delete, or list; repeatable")
+	set.DurationVar(&flags.ttl, "ttl", 0, "requested Grant lifetime for every item")
+	set.DurationVar(&flags.timeout, "timeout", 15*time.Minute, "approval wait timeout")
+	set.BoolVar(&flags.noWait, "no-wait", false, "print the filed request without waiting")
+	set.StringVar(&flags.waitID, "wait", "", "resume waiting on an existing Grant Request")
+	set.StringVar(&flags.authorizer, "authorizer", "", "authorizer base URL (default $OPENBAO_AUTHORIZER_URL)")
+	set.BoolVar(&flags.quiet, "quiet", false, "suppress progress messages")
+	return command
+}
+
+func noPositionalArgs(command *cobra.Command, arguments []string) error {
+	if len(arguments) != 0 {
+		return usageError(fmt.Errorf("%s accepts no positional arguments", command.Name()))
 	}
 
-	if *timeout <= 0 || *ttl < 0 {
+	return nil
+}
+
+func runRequest(ctx context.Context, flags requestFlags, stdout, stderr io.Writer) error {
+	if flags.timeout <= 0 || flags.ttl < 0 {
 		return usageError(errors.New("timeout must be positive and ttl must not be negative"))
 	}
 
-	input := &authorizerv1.CreateGrantRequestRequest{Reason: strings.TrimSpace(*reason)}
-	id := strings.TrimSpace(*waitID)
+	input := &authorizerv1.CreateGrantRequestRequest{Reason: strings.TrimSpace(flags.reason)}
+	id := strings.TrimSpace(flags.waitID)
 	if id != "" {
-		if input.Reason != "" || len(rawItems) > 0 || *ttl != 0 || *noWait {
-			return usageError(errors.New("-wait cannot be combined with -reason, -item, -ttl, or -no-wait"))
+		if input.Reason != "" || len(flags.items) > 0 || flags.ttl != 0 || flags.noWait {
+			return usageError(errors.New("--wait cannot be combined with --reason, --item, --ttl, or --no-wait"))
 		}
 	} else {
 		if input.Reason == "" {
-			return usageError(errors.New("-reason is required"))
+			return usageError(errors.New("--reason is required"))
 		}
 
-		if len(rawItems) == 0 {
-			return usageError(errors.New("at least one -item is required"))
+		if len(flags.items) == 0 {
+			return usageError(errors.New("at least one --item is required"))
 		}
 
-		for _, raw := range rawItems {
-			item, err := parseItem(raw, *ttl)
+		for _, raw := range flags.items {
+			item, err := parseItem(raw, flags.ttl)
 			if err != nil {
 				return usageError(err)
 			}
@@ -633,17 +663,17 @@ func runRequest(ctx context.Context, arguments []string, stdout, stderr io.Write
 		}
 	}
 
-	token, err := sessionToken()
+	token, err := requesterToken()
 	if err != nil {
 		return err
 	}
 
-	client, err := newAuthorizerClient(*authorizerURL, token)
+	client, err := newAuthorizerClient(flags.authorizer, token)
 	if err != nil {
 		return err
 	}
 
-	progress := newProgress(stderr, *quiet)
+	progress := newProgress(stderr, flags.quiet)
 	var request grantRequest
 	if id != "" {
 		request, err = client.grantRequest(ctx, id)
@@ -662,9 +692,9 @@ func runRequest(ctx context.Context, arguments []string, stdout, stderr io.Write
 	}
 
 	var waited time.Duration
-	if !*noWait {
-		waited = *timeout
-		request, err = waitForGrantRequest(ctx, client, request, *timeout, progress)
+	if !flags.noWait {
+		waited = flags.timeout
+		request, err = waitForGrantRequest(ctx, client, request, flags.timeout, progress)
 		if err != nil {
 			return err
 		}
@@ -708,25 +738,28 @@ func parseItem(value string, ttl time.Duration) (*authorizerv1.PermissionItemInp
 	return item, nil
 }
 
-func runGrants(ctx context.Context, arguments []string, stdout, stderr io.Writer) error {
-	flags := flag.NewFlagSet("bao-cred grants", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	flags.Usage = func() { _, _ = fmt.Fprint(stderr, usageText) }
-	authorizerURL := flags.String("authorizer", "", "authorizer URL")
-	if err := flags.Parse(arguments); err != nil {
-		return flagError(err)
+func newGrantsCommand() *cobra.Command {
+	var authorizerURL string
+	command := &cobra.Command{
+		Use:   "grants",
+		Short: "List the Requester's active Grants as JSON",
+		Args:  noPositionalArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			return runGrants(command.Context(), authorizerURL, command.OutOrStdout())
+		},
 	}
 
-	if flags.NArg() != 0 {
-		return usageError(errors.New("grants accepts no positional arguments"))
-	}
+	command.Flags().StringVar(&authorizerURL, "authorizer", "", "authorizer base URL (default $OPENBAO_AUTHORIZER_URL)")
+	return command
+}
 
-	token, err := sessionToken()
+func runGrants(ctx context.Context, authorizerURL string, stdout io.Writer) error {
+	token, err := requesterToken()
 	if err != nil {
 		return err
 	}
 
-	client, err := newAuthorizerClient(*authorizerURL, token)
+	client, err := newAuthorizerClient(authorizerURL, token)
 	if err != nil {
 		return err
 	}

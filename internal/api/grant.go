@@ -1,4 +1,4 @@
-package httpapi
+package api
 
 import (
 	"context"
@@ -13,12 +13,12 @@ import (
 	"github.com/xtruder/openbao-authorizer/internal/store"
 )
 
-// agentService implements AgentService; authorizeAgent has already resolved
-// the caller's Agent Session.
-type agentService struct{ *server }
+// grantService implements GrantService; authorizeRequester has already
+// resolved the caller's Requester.
+type grantService struct{ *server }
 
-func (a agentService) CreateGrantRequest(ctx context.Context, request *connect.Request[authorizerv1.CreateGrantRequestRequest]) (*connect.Response[authorizerv1.CreateGrantRequestResponse], error) {
-	caller := agentFrom(ctx)
+func (a grantService) CreateGrantRequest(ctx context.Context, request *connect.Request[authorizerv1.CreateGrantRequestRequest]) (*connect.Response[authorizerv1.CreateGrantRequestResponse], error) {
+	caller := requesterFrom(ctx)
 	inputs := make([]grants.ItemInput, 0, len(request.Msg.GetItems()))
 	for _, item := range request.Msg.GetItems() {
 		ttl, ok := durationInput(item.GetTtl())
@@ -29,25 +29,25 @@ func (a agentService) CreateGrantRequest(ctx context.Context, request *connect.R
 		inputs = append(inputs, grants.ItemInput{Path: item.GetPath(), Capabilities: item.GetCapabilities(), TTL: ttl})
 	}
 
-	created, err := a.grants.CreateRequest(ctx, caller.Session, caller.token, request.Msg.GetReason(), inputs)
+	created, err := a.grants.CreateRequest(ctx, caller.Requester, caller.token, request.Msg.GetReason(), inputs)
 	if err != nil {
-		return nil, a.agentGrantError("grant request", err)
+		return nil, a.requesterGrantError("grant request", err)
 	}
 
 	return connect.NewResponse(&authorizerv1.CreateGrantRequestResponse{GrantRequest: requestProto(created, false)}), nil
 }
 
-func (a agentService) GetGrantRequest(ctx context.Context, request *connect.Request[authorizerv1.GetGrantRequestRequest]) (*connect.Response[authorizerv1.GetGrantRequestResponse], error) {
-	current, err := a.grants.Request(ctx, agentFrom(ctx).EntityID, request.Msg.GetId(), 0)
+func (a grantService) GetGrantRequest(ctx context.Context, request *connect.Request[authorizerv1.GetGrantRequestRequest]) (*connect.Response[authorizerv1.GetGrantRequestResponse], error) {
+	current, err := a.grants.Request(ctx, requesterFrom(ctx).EntityID, request.Msg.GetId(), 0)
 	if err != nil {
-		return nil, a.agentGrantError("grant request", err)
+		return nil, a.requesterGrantError("grant request", err)
 	}
 
 	return connect.NewResponse(&authorizerv1.GetGrantRequestResponse{GrantRequest: requestProto(current, false)}), nil
 }
 
-func (a agentService) WatchGrantRequest(ctx context.Context, request *connect.Request[authorizerv1.WatchGrantRequestRequest], stream *connect.ServerStream[authorizerv1.WatchGrantRequestResponse]) error {
-	caller := agentFrom(ctx)
+func (a grantService) WatchGrantRequest(ctx context.Context, request *connect.Request[authorizerv1.WatchGrantRequestRequest], stream *connect.ServerStream[authorizerv1.WatchGrantRequestResponse]) error {
+	caller := requesterFrom(ctx)
 	entityID := caller.EntityID
 	// Subscribe before the first read so no change between them is missed.
 	changes, unsubscribe := a.events.Subscribe()
@@ -56,10 +56,10 @@ func (a agentService) WatchGrantRequest(ctx context.Context, request *connect.Re
 		return stream.Send(&authorizerv1.WatchGrantRequestResponse{Event: &authorizerv1.WatchGrantRequestResponse_Heartbeat{Heartbeat: &authorizerv1.Heartbeat{}}})
 	})
 	defer watch.stop()
-	// A revoked Session Token ends the stream at the next heartbeat;
-	// transient OpenBao failures do not.
+	// A revoked token ends the stream at the next heartbeat; transient
+	// OpenBao failures do not.
 	reauthenticate := func() error {
-		if _, err := a.authenticateAgent(ctx, caller.token); err != nil && connect.CodeOf(err) != connect.CodeUnavailable {
+		if _, err := a.authenticateRequester(ctx, caller.token); err != nil && connect.CodeOf(err) != connect.CodeUnavailable {
 			return err
 		}
 
@@ -70,7 +70,7 @@ func (a agentService) WatchGrantRequest(ctx context.Context, request *connect.Re
 	for {
 		current, err := a.grants.Request(ctx, entityID, request.Msg.GetId(), 0)
 		if err != nil {
-			return a.agentGrantError("grant request", err)
+			return a.requesterGrantError("grant request", err)
 		}
 
 		// Unrelated changes also wake the stream; only real ones are sent.
@@ -93,13 +93,13 @@ func (a agentService) WatchGrantRequest(ctx context.Context, request *connect.Re
 	}
 }
 
-func (a agentService) ListSessionGrants(ctx context.Context, _ *connect.Request[authorizerv1.ListSessionGrantsRequest]) (*connect.Response[authorizerv1.ListSessionGrantsResponse], error) {
-	active, err := a.grants.Grants(ctx, agentFrom(ctx).EntityID)
+func (a grantService) ListMyGrants(ctx context.Context, _ *connect.Request[authorizerv1.ListMyGrantsRequest]) (*connect.Response[authorizerv1.ListMyGrantsResponse], error) {
+	active, err := a.grants.Grants(ctx, requesterFrom(ctx).EntityID)
 	if err != nil {
 		return nil, a.internalError(err)
 	}
 
-	return connect.NewResponse(&authorizerv1.ListSessionGrantsResponse{Grants: grantsProto(active, false)}), nil
+	return connect.NewResponse(&authorizerv1.ListMyGrantsResponse{Grants: grantsProto(active, false)}), nil
 }
 
 // streamWatch waits for the next change on a live stream while sending

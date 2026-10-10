@@ -1,4 +1,4 @@
-package httpapi
+package api
 
 import (
 	"errors"
@@ -17,7 +17,8 @@ import (
 const (
 	reasonInvalidToken       = "INVALID_TOKEN"
 	reasonSessionExpired     = "SESSION_EXPIRED"
-	reasonNotSessionIdentity = "NOT_SESSION_IDENTITY"
+	reasonNotRequester       = "NOT_REQUESTER"
+	reasonSelfApproval       = "SELF_APPROVAL"
 	reasonNotApprover        = "NOT_APPROVER"
 	reasonCrossOrigin        = "CROSS_ORIGIN"
 	reasonInvalidRequest     = "INVALID_REQUEST"
@@ -61,6 +62,8 @@ func (s *server) grantError(action, conflictReason string, err error) *connect.E
 		return invalidArgument(invalidErr.Message)
 	case errors.Is(err, grants.ErrNotFound):
 		return apiError(connect.CodeNotFound, reasonNotFound, "not found")
+	case errors.Is(err, grants.ErrSelfApproval):
+		return apiError(connect.CodePermissionDenied, reasonSelfApproval, err.Error())
 	case errors.As(err, &conflictErr):
 		return apiError(connect.CodeFailedPrecondition, conflictReason, conflictErr.Error(), conflictErr.IDs...)
 	case errors.As(err, &httpErr):
@@ -76,9 +79,9 @@ func (s *server) grantError(action, conflictReason string, err error) *connect.E
 	}
 }
 
-// agentGrantError hides OpenBao error text from agents: it comes from calls
-// made with the authorizer's own token and may describe its policy.
-func (s *server) agentGrantError(action string, err error) *connect.Error {
+// requesterGrantError hides OpenBao error text from Requesters: it comes from
+// calls made with the authorizer's own token and may describe its policy.
+func (s *server) requesterGrantError(action string, err error) *connect.Error {
 	if _, ok := errors.AsType[*openbao.HTTPError](err); !ok {
 		return s.grantError(action, reasonItemNotPending, err)
 	}

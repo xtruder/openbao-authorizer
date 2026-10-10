@@ -14,6 +14,10 @@ umask 077
 : "${GITHUB_PLUGIN_SHA256:?GITHUB_PLUGIN_SHA256 is required}"
 : "${GITHUB_APP_PRIVATE_KEY_FILE:?GITHUB_APP_PRIVATE_KEY_FILE is required}"
 
+# Approvers' browsers call OpenBao directly to sign in, so this address must be
+# reachable from them; it defaults to the address this script uses.
+APPROVER_OPENBAO_ADDRESS="${APPROVER_OPENBAO_ADDRESS:-${BAO_ADDR}}"
+
 export BAO_ADDR BAO_TOKEN
 
 for _ in $(seq 1 100); do
@@ -39,8 +43,12 @@ fi
 "${OPENBAO_BIN}" policy write opencode-session "${PROJECT_DIR}/deploy/local/opencode-session-policy.hcl" >/dev/null
 "${OPENBAO_BIN}" policy write opencode-minter "${PROJECT_DIR}/deploy/local/opencode-minter-policy.hcl" >/dev/null
 
+# The PWA signs approvers in to OpenBao from the browser.
+"${OPENBAO_BIN}" write sys/config/cors enabled=true allowed_origins="${PUBLIC_ORIGIN}" \
+  allowed_headers=X-Vault-Token,X-Vault-Namespace,X-Vault-Request,Content-Type >/dev/null
+
 # Session Tokens: one entity alias, and so one Session Identity, per agent
-# session. The authorizer accepts only tokens created through this role.
+# session. The "opencode" Requester Rule in app.hcl matches this role.
 "${OPENBAO_BIN}" write auth/token/roles/opencode-session \
   allowed_policies=opencode-session orphan=true renewable=true token_period=24h \
   allowed_entity_aliases='opencode-session-*' >/dev/null
@@ -135,7 +143,14 @@ openbao {
   address               = $(jq -Rn --arg value "${BAO_ADDR}" '$value')
   authorizer_token_file = "authorizer-token"
   approver_policy       = "openbao-authorizer-approver"
-  session_token_role    = "opencode-session"
+}
+approver_login {
+  openbao_address = $(jq -Rn --arg value "${APPROVER_OPENBAO_ADDRESS}" '$value')
+  method "userpass" {}
+  method "token" {}
+}
+requester "opencode" {
+  token_role = "opencode-session"
 }
 grants {
   default_ttl = "8h"

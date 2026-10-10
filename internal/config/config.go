@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,11 +19,36 @@ import (
 )
 
 const (
-	defaultGrantTTL         = 72 * time.Hour
-	defaultPendingTTL       = 24 * time.Hour
-	defaultSessionTTL       = 168 * time.Hour
-	defaultSessionTokenRole = "opencode-session"
+	defaultGrantTTL   = 72 * time.Hour
+	defaultPendingTTL = 24 * time.Hour
+	defaultSessionTTL = 168 * time.Hour
 )
+
+// loginLabels holds the supported approver login method types and the label
+// each shows when the operator sets none.
+var loginLabels = map[string]string{
+	"token":    "Token",
+	"userpass": "Username & password",
+	"ldap":     "LDAP",
+	"github":   "GitHub token",
+	"oidc":     "Single sign-on",
+}
+
+// ApproverLogin tells the PWA where and how Approvers sign in to OpenBao.
+type ApproverLogin struct {
+	OpenBaoAddress string
+	Namespace      string
+	Methods        []LoginMethod
+}
+
+// LoginMethod is one sign-in option offered by the PWA.
+type LoginMethod struct {
+	// Type is one of token, userpass, ldap, github or oidc.
+	Type     string
+	Mount    string
+	Label    string
+	OIDCRole string
+}
 
 // Config is the complete validated server configuration.
 type Config struct {
@@ -37,7 +63,8 @@ type Config struct {
 	OpenBaoAuthorizerToken string
 	OpenBaoCAFile          string
 	ApproverPolicy         string
-	SessionTokenRole       string
+	ApproverLogin          ApproverLogin
+	Requesters             []grants.RequesterRule
 	GrantPolicy            grants.Policy
 	PendingTTL             time.Duration
 	StaticDirectory        string
@@ -48,12 +75,14 @@ type Config struct {
 }
 
 type fileConfig struct {
-	Server    serverConfig      `hcl:"server,block"`
-	Storage   storageConfig     `hcl:"storage,block"`
-	OpenBao   openBaoConfig     `hcl:"openbao,block"`
-	Grants    *grantsConfig     `hcl:"grants,block"`
-	Grantable []grantableConfig `hcl:"grantable,block"`
-	WebPush   []webPushConfig   `hcl:"web_push,block"`
+	Server        serverConfig        `hcl:"server,block"`
+	Storage       storageConfig       `hcl:"storage,block"`
+	OpenBao       openBaoConfig       `hcl:"openbao,block"`
+	ApproverLogin approverLoginConfig `hcl:"approver_login,block"`
+	Requesters    []requesterConfig   `hcl:"requester,block"`
+	Grants        *grantsConfig       `hcl:"grants,block"`
+	Grantable     []grantableConfig   `hcl:"grantable,block"`
+	WebPush       []webPushConfig     `hcl:"web_push,block"`
 }
 
 type serverConfig struct {
@@ -75,7 +104,25 @@ type openBaoConfig struct {
 	CAFile              string `hcl:"ca_file,optional"`
 	AuthorizerTokenFile string `hcl:"authorizer_token_file"`
 	ApproverPolicy      string `hcl:"approver_policy"`
-	SessionTokenRole    string `hcl:"session_token_role,optional"`
+}
+
+type approverLoginConfig struct {
+	OpenBaoAddress string              `hcl:"openbao_address"`
+	Namespace      string              `hcl:"namespace,optional"`
+	Methods        []loginMethodConfig `hcl:"method,block"`
+}
+
+type loginMethodConfig struct {
+	Type  string `hcl:"type,label"`
+	Mount string `hcl:"mount,optional"`
+	Label string `hcl:"label,optional"`
+	Role  string `hcl:"role,optional"`
+}
+
+type requesterConfig struct {
+	Name      string `hcl:"name,label"`
+	TokenRole string `hcl:"token_role,optional"`
+	AuthMount string `hcl:"auth_mount,optional"`
 }
 
 type grantsConfig struct {
@@ -157,9 +204,14 @@ func Load(path string) (Config, error) {
 		}
 	}
 
-	sessionTokenRole := strings.TrimSpace(raw.OpenBao.SessionTokenRole)
-	if sessionTokenRole == "" {
-		sessionTokenRole = defaultSessionTokenRole
+	approverLogin, err := loadApproverLogin(raw.ApproverLogin)
+	if err != nil {
+		return Config{}, err
+	}
+
+	requesters, err := loadRequesters(raw.Requesters)
+	if err != nil {
+		return Config{}, err
 	}
 
 	grantPolicy, pendingTTL, err := loadGrants(raw.Grants, raw.Grantable)
@@ -179,7 +231,8 @@ func Load(path string) (Config, error) {
 		OpenBaoAuthorizerToken: authorizerToken,
 		OpenBaoCAFile:          resolvePath(raw.OpenBao.CAFile),
 		ApproverPolicy:         strings.TrimSpace(raw.OpenBao.ApproverPolicy),
-		SessionTokenRole:       sessionTokenRole,
+		ApproverLogin:          approverLogin,
+		Requesters:             requesters,
 		GrantPolicy:            grantPolicy,
 		PendingTTL:             pendingTTL,
 		StaticDirectory:        resolvePath(raw.Server.StaticDirectory),
@@ -209,6 +262,67 @@ func Load(path string) (Config, error) {
 	}
 
 	return result, nil
+}
+
+func loadApproverLogin(raw approverLoginConfig) (ApproverLogin, error) {
+	address, err := url.Parse(raw.OpenBaoAddress)
+	if err != nil || (address.Scheme != "http" && address.Scheme != "https") || address.Host == "" {
+		return ApproverLogin{}, errors.New("approver_login.openbao_address must be an http or https URL")
+	}
+
+	login := ApproverLogin{OpenBaoAddress: strings.TrimSuffix(raw.OpenBaoAddress, "/"), Namespace: raw.Namespace}
+	if len(raw.Methods) == 0 {
+		raw.Methods = []loginMethodConfig{{Type: "token"}}
+	}
+
+	for _, method := range raw.Methods {
+		defaultLabel, ok := loginLabels[method.Type]
+		if !ok {
+			return ApproverLogin{}, fmt.Errorf("approver_login method %q is not one of token, userpass, ldap, github or oidc", method.Type)
+		}
+
+		if method.Role != "" && method.Type != "oidc" {
+			return ApproverLogin{}, fmt.Errorf("approver_login method %q does not take a role", method.Type)
+		}
+
+		mount := strings.Trim(method.Mount, "/")
+		if mount == "" && method.Type != "token" {
+			mount = method.Type
+		}
+
+		label := method.Label
+		if label == "" {
+			label = defaultLabel
+		}
+
+		login.Methods = append(login.Methods, LoginMethod{Type: method.Type, Mount: mount, Label: label, OIDCRole: method.Role})
+	}
+
+	return login, nil
+}
+
+func loadRequesters(raw []requesterConfig) ([]grants.RequesterRule, error) {
+	if len(raw) == 0 {
+		return nil, errors.New("at least one requester block is required")
+	}
+
+	rules := make([]grants.RequesterRule, 0, len(raw))
+	names := make(map[string]bool, len(raw))
+	for _, entry := range raw {
+		if names[entry.Name] {
+			return nil, fmt.Errorf("requester %q is defined more than once", entry.Name)
+		}
+
+		names[entry.Name] = true
+		rule := grants.RequesterRule{Name: entry.Name, TokenRole: strings.TrimSpace(entry.TokenRole), AuthMount: strings.Trim(entry.AuthMount, "/ ")}
+		if (rule.TokenRole == "") == (rule.AuthMount == "") {
+			return nil, fmt.Errorf("requester %q must set exactly one of token_role or auth_mount", entry.Name)
+		}
+
+		rules = append(rules, rule)
+	}
+
+	return rules, nil
 }
 
 func loadGrants(raw *grantsConfig, grantable []grantableConfig) (grants.Policy, time.Duration, error) {

@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.12
 // 	protoc        (unknown)
-// source: openbao/authorizer/v1/agent.proto
+// source: openbao/authorizer/v1/grant.proto
 
 package authorizerv1
 
@@ -35,7 +35,7 @@ type PermissionItemInput struct {
 
 func (x *PermissionItemInput) Reset() {
 	*x = PermissionItemInput{}
-	mi := &file_openbao_authorizer_v1_agent_proto_msgTypes[0]
+	mi := &file_openbao_authorizer_v1_grant_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -47,7 +47,7 @@ func (x *PermissionItemInput) String() string {
 func (*PermissionItemInput) ProtoMessage() {}
 
 func (x *PermissionItemInput) ProtoReflect() protoreflect.Message {
-	mi := &file_openbao_authorizer_v1_agent_proto_msgTypes[0]
+	mi := &file_openbao_authorizer_v1_grant_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -60,7 +60,7 @@ func (x *PermissionItemInput) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PermissionItemInput.ProtoReflect.Descriptor instead.
 func (*PermissionItemInput) Descriptor() ([]byte, []int) {
-	return file_openbao_authorizer_v1_agent_proto_rawDescGZIP(), []int{0}
+	return file_openbao_authorizer_v1_grant_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *PermissionItemInput) GetPath() string {
@@ -95,7 +95,7 @@ type CreateGrantRequestRequest struct {
 
 func (x *CreateGrantRequestRequest) Reset() {
 	*x = CreateGrantRequestRequest{}
-	mi := &file_openbao_authorizer_v1_agent_proto_msgTypes[1]
+	mi := &file_openbao_authorizer_v1_grant_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -107,7 +107,7 @@ func (x *CreateGrantRequestRequest) String() string {
 func (*CreateGrantRequestRequest) ProtoMessage() {}
 
 func (x *CreateGrantRequestRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_openbao_authorizer_v1_agent_proto_msgTypes[1]
+	mi := &file_openbao_authorizer_v1_grant_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -120,7 +120,7 @@ func (x *CreateGrantRequestRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateGrantRequestRequest.ProtoReflect.Descriptor instead.
 func (*CreateGrantRequestRequest) Descriptor() ([]byte, []int) {
-	return file_openbao_authorizer_v1_agent_proto_rawDescGZIP(), []int{1}
+	return file_openbao_authorizer_v1_grant_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *CreateGrantRequestRequest) GetReason() string {
@@ -146,7 +146,7 @@ type CreateGrantRequestResponse struct {
 
 func (x *CreateGrantRequestResponse) Reset() {
 	*x = CreateGrantRequestResponse{}
-	mi := &file_openbao_authorizer_v1_agent_proto_msgTypes[2]
+	mi := &file_openbao_authorizer_v1_grant_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -158,7 +158,7 @@ func (x *CreateGrantRequestResponse) String() string {
 func (*CreateGrantRequestResponse) ProtoMessage() {}
 
 func (x *CreateGrantRequestResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_openbao_authorizer_v1_agent_proto_msgTypes[2]
+	mi := &file_openbao_authorizer_v1_grant_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -171,7 +171,7 @@ func (x *CreateGrantRequestResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateGrantRequestResponse.ProtoReflect.Descriptor instead.
 func (*CreateGrantRequestResponse) Descriptor() ([]byte, []int) {
-	return file_openbao_authorizer_v1_agent_proto_rawDescGZIP(), []int{2}
+	return file_openbao_authorizer_v1_grant_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *CreateGrantRequestResponse) GetGrantRequest() *GrantRequest {
@@ -190,7 +190,7 @@ type GetGrantRequestRequest struct {
 
 func (x *GetGrantRequestRequest) Reset() {
 	*x = GetGrantRequestRequest{}
-	mi := &file_openbao_authorizer_v1_agent_proto_msgTypes[3]
+	mi := &file_openbao_authorizer_v1_grant_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -202,7 +202,7 @@ func (x *GetGrantRequestRequest) String() string {
 func (*GetGrantRequestRequest) ProtoMessage() {}
 
 func (x *GetGrantRequestRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_openbao_authorizer_v1_agent_proto_msgTypes[3]
+	mi := &file_openbao_authorizer_v1_grant_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -215,7 +215,7 @@ func (x *GetGrantRequestRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetGrantRequestRequest.ProtoReflect.Descriptor instead.
 func (*GetGrantRequestRequest) Descriptor() ([]byte, []int) {
-	return file_openbao_authorizer_v1_agent_proto_rawDescGZIP(), []int{3}
+	return file_openbao_authorizer_v1_grant_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *GetGrantRequestRequest) GetId() string {
@@ -234,7 +234,7 @@ type GetGrantRequestResponse struct {
 
 func (x *GetGrantRequestResponse) Reset() {
 	*x = GetGrantRequestResponse{}
-	mi := &file_openbao_authorizer_v1_agent_proto_msgTypes[4]
+	mi := &file_openbao_authorizer_v1_grant_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -246,7 +246,7 @@ func (x *GetGrantRequestResponse) String() string {
 func (*GetGrantRequestResponse) ProtoMessage() {}
 
 func (x *GetGrantRequestResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_openbao_authorizer_v1_agent_proto_msgTypes[4]
+	mi := &file_openbao_authorizer_v1_grant_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -259,7 +259,7 @@ func (x *GetGrantRequestResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetGrantRequestResponse.ProtoReflect.Descriptor instead.
 func (*GetGrantRequestResponse) Descriptor() ([]byte, []int) {
-	return file_openbao_authorizer_v1_agent_proto_rawDescGZIP(), []int{4}
+	return file_openbao_authorizer_v1_grant_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *GetGrantRequestResponse) GetGrantRequest() *GrantRequest {
@@ -278,7 +278,7 @@ type WatchGrantRequestRequest struct {
 
 func (x *WatchGrantRequestRequest) Reset() {
 	*x = WatchGrantRequestRequest{}
-	mi := &file_openbao_authorizer_v1_agent_proto_msgTypes[5]
+	mi := &file_openbao_authorizer_v1_grant_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -290,7 +290,7 @@ func (x *WatchGrantRequestRequest) String() string {
 func (*WatchGrantRequestRequest) ProtoMessage() {}
 
 func (x *WatchGrantRequestRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_openbao_authorizer_v1_agent_proto_msgTypes[5]
+	mi := &file_openbao_authorizer_v1_grant_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -303,7 +303,7 @@ func (x *WatchGrantRequestRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchGrantRequestRequest.ProtoReflect.Descriptor instead.
 func (*WatchGrantRequestRequest) Descriptor() ([]byte, []int) {
-	return file_openbao_authorizer_v1_agent_proto_rawDescGZIP(), []int{5}
+	return file_openbao_authorizer_v1_grant_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *WatchGrantRequestRequest) GetId() string {
@@ -326,7 +326,7 @@ type WatchGrantRequestResponse struct {
 
 func (x *WatchGrantRequestResponse) Reset() {
 	*x = WatchGrantRequestResponse{}
-	mi := &file_openbao_authorizer_v1_agent_proto_msgTypes[6]
+	mi := &file_openbao_authorizer_v1_grant_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -338,7 +338,7 @@ func (x *WatchGrantRequestResponse) String() string {
 func (*WatchGrantRequestResponse) ProtoMessage() {}
 
 func (x *WatchGrantRequestResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_openbao_authorizer_v1_agent_proto_msgTypes[6]
+	mi := &file_openbao_authorizer_v1_grant_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -351,7 +351,7 @@ func (x *WatchGrantRequestResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchGrantRequestResponse.ProtoReflect.Descriptor instead.
 func (*WatchGrantRequestResponse) Descriptor() ([]byte, []int) {
-	return file_openbao_authorizer_v1_agent_proto_rawDescGZIP(), []int{6}
+	return file_openbao_authorizer_v1_grant_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *WatchGrantRequestResponse) GetEvent() isWatchGrantRequestResponse_Event {
@@ -396,27 +396,27 @@ func (*WatchGrantRequestResponse_GrantRequest) isWatchGrantRequestResponse_Event
 
 func (*WatchGrantRequestResponse_Heartbeat) isWatchGrantRequestResponse_Event() {}
 
-type ListSessionGrantsRequest struct {
+type ListMyGrantsRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ListSessionGrantsRequest) Reset() {
-	*x = ListSessionGrantsRequest{}
-	mi := &file_openbao_authorizer_v1_agent_proto_msgTypes[7]
+func (x *ListMyGrantsRequest) Reset() {
+	*x = ListMyGrantsRequest{}
+	mi := &file_openbao_authorizer_v1_grant_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ListSessionGrantsRequest) String() string {
+func (x *ListMyGrantsRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ListSessionGrantsRequest) ProtoMessage() {}
+func (*ListMyGrantsRequest) ProtoMessage() {}
 
-func (x *ListSessionGrantsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_openbao_authorizer_v1_agent_proto_msgTypes[7]
+func (x *ListMyGrantsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_openbao_authorizer_v1_grant_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -427,33 +427,33 @@ func (x *ListSessionGrantsRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ListSessionGrantsRequest.ProtoReflect.Descriptor instead.
-func (*ListSessionGrantsRequest) Descriptor() ([]byte, []int) {
-	return file_openbao_authorizer_v1_agent_proto_rawDescGZIP(), []int{7}
+// Deprecated: Use ListMyGrantsRequest.ProtoReflect.Descriptor instead.
+func (*ListMyGrantsRequest) Descriptor() ([]byte, []int) {
+	return file_openbao_authorizer_v1_grant_proto_rawDescGZIP(), []int{7}
 }
 
-type ListSessionGrantsResponse struct {
+type ListMyGrantsResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Grants        []*Grant               `protobuf:"bytes,1,rep,name=grants,proto3" json:"grants,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ListSessionGrantsResponse) Reset() {
-	*x = ListSessionGrantsResponse{}
-	mi := &file_openbao_authorizer_v1_agent_proto_msgTypes[8]
+func (x *ListMyGrantsResponse) Reset() {
+	*x = ListMyGrantsResponse{}
+	mi := &file_openbao_authorizer_v1_grant_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ListSessionGrantsResponse) String() string {
+func (x *ListMyGrantsResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ListSessionGrantsResponse) ProtoMessage() {}
+func (*ListMyGrantsResponse) ProtoMessage() {}
 
-func (x *ListSessionGrantsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_openbao_authorizer_v1_agent_proto_msgTypes[8]
+func (x *ListMyGrantsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_openbao_authorizer_v1_grant_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -464,23 +464,23 @@ func (x *ListSessionGrantsResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ListSessionGrantsResponse.ProtoReflect.Descriptor instead.
-func (*ListSessionGrantsResponse) Descriptor() ([]byte, []int) {
-	return file_openbao_authorizer_v1_agent_proto_rawDescGZIP(), []int{8}
+// Deprecated: Use ListMyGrantsResponse.ProtoReflect.Descriptor instead.
+func (*ListMyGrantsResponse) Descriptor() ([]byte, []int) {
+	return file_openbao_authorizer_v1_grant_proto_rawDescGZIP(), []int{8}
 }
 
-func (x *ListSessionGrantsResponse) GetGrants() []*Grant {
+func (x *ListMyGrantsResponse) GetGrants() []*Grant {
 	if x != nil {
 		return x.Grants
 	}
 	return nil
 }
 
-var File_openbao_authorizer_v1_agent_proto protoreflect.FileDescriptor
+var File_openbao_authorizer_v1_grant_proto protoreflect.FileDescriptor
 
-const file_openbao_authorizer_v1_agent_proto_rawDesc = "" +
+const file_openbao_authorizer_v1_grant_proto_rawDesc = "" +
 	"\n" +
-	"!openbao/authorizer/v1/agent.proto\x12\x15openbao.authorizer.v1\x1a\x1egoogle/protobuf/duration.proto\x1a!openbao/authorizer/v1/types.proto\"z\n" +
+	"!openbao/authorizer/v1/grant.proto\x12\x15openbao.authorizer.v1\x1a\x1egoogle/protobuf/duration.proto\x1a!openbao/authorizer/v1/types.proto\"z\n" +
 	"\x13PermissionItemInput\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\"\n" +
 	"\fcapabilities\x18\x02 \x03(\tR\fcapabilities\x12+\n" +
@@ -499,32 +499,32 @@ const file_openbao_authorizer_v1_agent_proto_rawDesc = "" +
 	"\x19WatchGrantRequestResponse\x12J\n" +
 	"\rgrant_request\x18\x01 \x01(\v2#.openbao.authorizer.v1.GrantRequestH\x00R\fgrantRequest\x12@\n" +
 	"\theartbeat\x18\x02 \x01(\v2 .openbao.authorizer.v1.HeartbeatH\x00R\theartbeatB\a\n" +
-	"\x05event\"\x1a\n" +
-	"\x18ListSessionGrantsRequest\"Q\n" +
-	"\x19ListSessionGrantsResponse\x124\n" +
-	"\x06grants\x18\x01 \x03(\v2\x1c.openbao.authorizer.v1.GrantR\x06grants2\xed\x03\n" +
-	"\fAgentService\x12y\n" +
+	"\x05event\"\x15\n" +
+	"\x13ListMyGrantsRequest\"L\n" +
+	"\x14ListMyGrantsResponse\x124\n" +
+	"\x06grants\x18\x01 \x03(\v2\x1c.openbao.authorizer.v1.GrantR\x06grants2\xde\x03\n" +
+	"\fGrantService\x12y\n" +
 	"\x12CreateGrantRequest\x120.openbao.authorizer.v1.CreateGrantRequestRequest\x1a1.openbao.authorizer.v1.CreateGrantRequestResponse\x12p\n" +
 	"\x0fGetGrantRequest\x12-.openbao.authorizer.v1.GetGrantRequestRequest\x1a..openbao.authorizer.v1.GetGrantRequestResponse\x12x\n" +
-	"\x11WatchGrantRequest\x12/.openbao.authorizer.v1.WatchGrantRequestRequest\x1a0.openbao.authorizer.v1.WatchGrantRequestResponse0\x01\x12v\n" +
-	"\x11ListSessionGrants\x12/.openbao.authorizer.v1.ListSessionGrantsRequest\x1a0.openbao.authorizer.v1.ListSessionGrantsResponseB\xee\x01\n" +
+	"\x11WatchGrantRequest\x12/.openbao.authorizer.v1.WatchGrantRequestRequest\x1a0.openbao.authorizer.v1.WatchGrantRequestResponse0\x01\x12g\n" +
+	"\fListMyGrants\x12*.openbao.authorizer.v1.ListMyGrantsRequest\x1a+.openbao.authorizer.v1.ListMyGrantsResponseB\xee\x01\n" +
 	"\x19com.openbao.authorizer.v1B\n" +
-	"AgentProtoP\x01ZOgithub.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1;authorizerv1\xa2\x02\x03OAX\xaa\x02\x15Openbao.Authorizer.V1\xca\x02\x15Openbao\\Authorizer\\V1\xe2\x02!Openbao\\Authorizer\\V1\\GPBMetadata\xea\x02\x17Openbao::Authorizer::V1b\x06proto3"
+	"GrantProtoP\x01ZOgithub.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1;authorizerv1\xa2\x02\x03OAX\xaa\x02\x15Openbao.Authorizer.V1\xca\x02\x15Openbao\\Authorizer\\V1\xe2\x02!Openbao\\Authorizer\\V1\\GPBMetadata\xea\x02\x17Openbao::Authorizer::V1b\x06proto3"
 
 var (
-	file_openbao_authorizer_v1_agent_proto_rawDescOnce sync.Once
-	file_openbao_authorizer_v1_agent_proto_rawDescData []byte
+	file_openbao_authorizer_v1_grant_proto_rawDescOnce sync.Once
+	file_openbao_authorizer_v1_grant_proto_rawDescData []byte
 )
 
-func file_openbao_authorizer_v1_agent_proto_rawDescGZIP() []byte {
-	file_openbao_authorizer_v1_agent_proto_rawDescOnce.Do(func() {
-		file_openbao_authorizer_v1_agent_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_openbao_authorizer_v1_agent_proto_rawDesc), len(file_openbao_authorizer_v1_agent_proto_rawDesc)))
+func file_openbao_authorizer_v1_grant_proto_rawDescGZIP() []byte {
+	file_openbao_authorizer_v1_grant_proto_rawDescOnce.Do(func() {
+		file_openbao_authorizer_v1_grant_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_openbao_authorizer_v1_grant_proto_rawDesc), len(file_openbao_authorizer_v1_grant_proto_rawDesc)))
 	})
-	return file_openbao_authorizer_v1_agent_proto_rawDescData
+	return file_openbao_authorizer_v1_grant_proto_rawDescData
 }
 
-var file_openbao_authorizer_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
-var file_openbao_authorizer_v1_agent_proto_goTypes = []any{
+var file_openbao_authorizer_v1_grant_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_openbao_authorizer_v1_grant_proto_goTypes = []any{
 	(*PermissionItemInput)(nil),        // 0: openbao.authorizer.v1.PermissionItemInput
 	(*CreateGrantRequestRequest)(nil),  // 1: openbao.authorizer.v1.CreateGrantRequestRequest
 	(*CreateGrantRequestResponse)(nil), // 2: openbao.authorizer.v1.CreateGrantRequestResponse
@@ -532,29 +532,29 @@ var file_openbao_authorizer_v1_agent_proto_goTypes = []any{
 	(*GetGrantRequestResponse)(nil),    // 4: openbao.authorizer.v1.GetGrantRequestResponse
 	(*WatchGrantRequestRequest)(nil),   // 5: openbao.authorizer.v1.WatchGrantRequestRequest
 	(*WatchGrantRequestResponse)(nil),  // 6: openbao.authorizer.v1.WatchGrantRequestResponse
-	(*ListSessionGrantsRequest)(nil),   // 7: openbao.authorizer.v1.ListSessionGrantsRequest
-	(*ListSessionGrantsResponse)(nil),  // 8: openbao.authorizer.v1.ListSessionGrantsResponse
+	(*ListMyGrantsRequest)(nil),        // 7: openbao.authorizer.v1.ListMyGrantsRequest
+	(*ListMyGrantsResponse)(nil),       // 8: openbao.authorizer.v1.ListMyGrantsResponse
 	(*durationpb.Duration)(nil),        // 9: google.protobuf.Duration
 	(*GrantRequest)(nil),               // 10: openbao.authorizer.v1.GrantRequest
 	(*Heartbeat)(nil),                  // 11: openbao.authorizer.v1.Heartbeat
 	(*Grant)(nil),                      // 12: openbao.authorizer.v1.Grant
 }
-var file_openbao_authorizer_v1_agent_proto_depIdxs = []int32{
+var file_openbao_authorizer_v1_grant_proto_depIdxs = []int32{
 	9,  // 0: openbao.authorizer.v1.PermissionItemInput.ttl:type_name -> google.protobuf.Duration
 	0,  // 1: openbao.authorizer.v1.CreateGrantRequestRequest.items:type_name -> openbao.authorizer.v1.PermissionItemInput
 	10, // 2: openbao.authorizer.v1.CreateGrantRequestResponse.grant_request:type_name -> openbao.authorizer.v1.GrantRequest
 	10, // 3: openbao.authorizer.v1.GetGrantRequestResponse.grant_request:type_name -> openbao.authorizer.v1.GrantRequest
 	10, // 4: openbao.authorizer.v1.WatchGrantRequestResponse.grant_request:type_name -> openbao.authorizer.v1.GrantRequest
 	11, // 5: openbao.authorizer.v1.WatchGrantRequestResponse.heartbeat:type_name -> openbao.authorizer.v1.Heartbeat
-	12, // 6: openbao.authorizer.v1.ListSessionGrantsResponse.grants:type_name -> openbao.authorizer.v1.Grant
-	1,  // 7: openbao.authorizer.v1.AgentService.CreateGrantRequest:input_type -> openbao.authorizer.v1.CreateGrantRequestRequest
-	3,  // 8: openbao.authorizer.v1.AgentService.GetGrantRequest:input_type -> openbao.authorizer.v1.GetGrantRequestRequest
-	5,  // 9: openbao.authorizer.v1.AgentService.WatchGrantRequest:input_type -> openbao.authorizer.v1.WatchGrantRequestRequest
-	7,  // 10: openbao.authorizer.v1.AgentService.ListSessionGrants:input_type -> openbao.authorizer.v1.ListSessionGrantsRequest
-	2,  // 11: openbao.authorizer.v1.AgentService.CreateGrantRequest:output_type -> openbao.authorizer.v1.CreateGrantRequestResponse
-	4,  // 12: openbao.authorizer.v1.AgentService.GetGrantRequest:output_type -> openbao.authorizer.v1.GetGrantRequestResponse
-	6,  // 13: openbao.authorizer.v1.AgentService.WatchGrantRequest:output_type -> openbao.authorizer.v1.WatchGrantRequestResponse
-	8,  // 14: openbao.authorizer.v1.AgentService.ListSessionGrants:output_type -> openbao.authorizer.v1.ListSessionGrantsResponse
+	12, // 6: openbao.authorizer.v1.ListMyGrantsResponse.grants:type_name -> openbao.authorizer.v1.Grant
+	1,  // 7: openbao.authorizer.v1.GrantService.CreateGrantRequest:input_type -> openbao.authorizer.v1.CreateGrantRequestRequest
+	3,  // 8: openbao.authorizer.v1.GrantService.GetGrantRequest:input_type -> openbao.authorizer.v1.GetGrantRequestRequest
+	5,  // 9: openbao.authorizer.v1.GrantService.WatchGrantRequest:input_type -> openbao.authorizer.v1.WatchGrantRequestRequest
+	7,  // 10: openbao.authorizer.v1.GrantService.ListMyGrants:input_type -> openbao.authorizer.v1.ListMyGrantsRequest
+	2,  // 11: openbao.authorizer.v1.GrantService.CreateGrantRequest:output_type -> openbao.authorizer.v1.CreateGrantRequestResponse
+	4,  // 12: openbao.authorizer.v1.GrantService.GetGrantRequest:output_type -> openbao.authorizer.v1.GetGrantRequestResponse
+	6,  // 13: openbao.authorizer.v1.GrantService.WatchGrantRequest:output_type -> openbao.authorizer.v1.WatchGrantRequestResponse
+	8,  // 14: openbao.authorizer.v1.GrantService.ListMyGrants:output_type -> openbao.authorizer.v1.ListMyGrantsResponse
 	11, // [11:15] is the sub-list for method output_type
 	7,  // [7:11] is the sub-list for method input_type
 	7,  // [7:7] is the sub-list for extension type_name
@@ -562,13 +562,13 @@ var file_openbao_authorizer_v1_agent_proto_depIdxs = []int32{
 	0,  // [0:7] is the sub-list for field type_name
 }
 
-func init() { file_openbao_authorizer_v1_agent_proto_init() }
-func file_openbao_authorizer_v1_agent_proto_init() {
-	if File_openbao_authorizer_v1_agent_proto != nil {
+func init() { file_openbao_authorizer_v1_grant_proto_init() }
+func file_openbao_authorizer_v1_grant_proto_init() {
+	if File_openbao_authorizer_v1_grant_proto != nil {
 		return
 	}
 	file_openbao_authorizer_v1_types_proto_init()
-	file_openbao_authorizer_v1_agent_proto_msgTypes[6].OneofWrappers = []any{
+	file_openbao_authorizer_v1_grant_proto_msgTypes[6].OneofWrappers = []any{
 		(*WatchGrantRequestResponse_GrantRequest)(nil),
 		(*WatchGrantRequestResponse_Heartbeat)(nil),
 	}
@@ -576,17 +576,17 @@ func file_openbao_authorizer_v1_agent_proto_init() {
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_openbao_authorizer_v1_agent_proto_rawDesc), len(file_openbao_authorizer_v1_agent_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_openbao_authorizer_v1_grant_proto_rawDesc), len(file_openbao_authorizer_v1_grant_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_openbao_authorizer_v1_agent_proto_goTypes,
-		DependencyIndexes: file_openbao_authorizer_v1_agent_proto_depIdxs,
-		MessageInfos:      file_openbao_authorizer_v1_agent_proto_msgTypes,
+		GoTypes:           file_openbao_authorizer_v1_grant_proto_goTypes,
+		DependencyIndexes: file_openbao_authorizer_v1_grant_proto_depIdxs,
+		MessageInfos:      file_openbao_authorizer_v1_grant_proto_msgTypes,
 	}.Build()
-	File_openbao_authorizer_v1_agent_proto = out.File
-	file_openbao_authorizer_v1_agent_proto_goTypes = nil
-	file_openbao_authorizer_v1_agent_proto_depIdxs = nil
+	File_openbao_authorizer_v1_grant_proto = out.File
+	file_openbao_authorizer_v1_grant_proto_goTypes = nil
+	file_openbao_authorizer_v1_grant_proto_depIdxs = nil
 }

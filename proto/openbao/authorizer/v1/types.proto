@@ -43,25 +43,28 @@ message PermissionItem {
   string grant_id = 10;
 }
 
-// AgentSession describes the session that filed a request, for Approvers.
-message AgentSession {
+// Requester describes who filed a request, for Approvers.
+message Requester {
+  // Agent Session ID from token metadata, or the entity's display name.
   string id = 1;
   string title = 2;
   string directory = 3;
   string entity_id = 4;
+  // Name of the Requester Rule the token matched.
+  string rule = 5;
 }
 
-// GrantRequest is a batch of Permission Items one Agent Session asked for at once.
+// GrantRequest is a batch of Permission Items one Requester asked for at once.
 message GrantRequest {
   string id = 1;
   string reason = 2;
   google.protobuf.Timestamp created_at = 3;
   // Only on the approver API.
-  AgentSession session = 4;
+  Requester requester = 4;
   repeated PermissionItem items = 5;
 }
 
-// Grant is an approved Permission Item in effect for an Agent Session.
+// Grant is an approved Permission Item in effect for a Requester.
 message Grant {
   string id = 1;
   string item_id = 2;
@@ -72,7 +75,7 @@ message Grant {
   // Only on the approver API.
   string approved_by = 7;
   // Only on the approver API.
-  AgentSession session = 8;
+  Requester requester = 8;
 }
 
 // Heartbeat keeps idle streams alive through proxies; clients ignore it.
@@ -80,7 +83,8 @@ message Heartbeat {}
 
 // ErrorDetail is attached to RPC errors so clients can branch on a stable reason.
 message ErrorDetail {
-  // Stable machine-readable reason, e.g. "ITEM_NOT_PENDING" or "SESSION_EXPIRED".
+  // Stable machine-readable reason, e.g. "ITEM_NOT_PENDING", "NOT_REQUESTER"
+  // or "SELF_APPROVAL".
   string reason = 1;
   // IDs of the items or grants the error concerns, when relevant.
   repeated string ids = 2;

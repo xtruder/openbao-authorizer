@@ -4,6 +4,8 @@ import { createApproverClient } from '../api'
 import {
   ApproverService,
   DashboardSnapshotSchema,
+  GetLoginOptionsResponseSchema,
+  LoginMethodType,
   WatchEventsResponseSchema,
   type WatchEventsResponse,
 } from '../gen/openbao/authorizer/v1/approver_pb'
@@ -63,10 +65,23 @@ interface FakeOptions {
   // Snapshot sent as soon as a stream opens; null leaves new streams silent.
   initialSnapshot?: MessageInitShape<typeof DashboardSnapshotSchema> | null
   handlers?: Partial<ServiceImpl<typeof ApproverService>>
+  loginOptions?: MessageInitShape<typeof GetLoginOptionsResponseSchema>
 }
 
+// Sessionless RPCs, as on the server.
+const publicMethods = new Set(['GetLoginOptions', 'CreateSession'])
+
+export const loginOptions = {
+  openbaoAddress: 'https://bao.example:8200',
+  namespace: '',
+  methods: [
+    { type: LoginMethodType.USERPASS, mount: 'userpass', label: 'Username' },
+    { type: LoginMethodType.TOKEN, label: 'Token' },
+  ],
+} satisfies MessageInitShape<typeof GetLoginOptionsResponseSchema>
+
 // fakeApprover serves ApproverService in memory and, like the server, requires
-// the session cookie on every RPC except Login.
+// the session cookie on every RPC except GetLoginOptions and CreateSession.
 export function fakeApprover(options: FakeOptions = {}) {
   const state = { cookie: false }
   const calls: string[] = []
@@ -79,7 +94,7 @@ export function fakeApprover(options: FakeOptions = {}) {
     return next(request)
   }
   const requireCookie: Interceptor = (next) => async (request) => {
-    if (request.method.name !== 'Login' && !state.cookie) throw rpcError(Code.Unauthenticated, 'SESSION_EXPIRED', 'session expired')
+    if (!publicMethods.has(request.method.name) && !state.cookie) throw rpcError(Code.Unauthenticated, 'SESSION_EXPIRED', 'session expired')
     return next(request)
   }
 
@@ -88,8 +103,9 @@ export function fakeApprover(options: FakeOptions = {}) {
   }
 
   const defaults: ServiceImpl<typeof ApproverService> = {
-    login: (request) => {
-      remember('Login', request)
+    getLoginOptions: () => options.loginOptions ?? loginOptions,
+    createSession: (request) => {
+      remember('CreateSession', request)
       state.cookie = true
       return { identity: { entityId: 'entity-1', displayName: 'SRE on-call' } }
     },

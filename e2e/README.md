@@ -41,23 +41,26 @@ The Go test:
 
 ## Verified workflow
 
-All credentials, OpenBao state and application state are disposable. The harness installs the repository's real `config/authorizer-policy.hcl` and `config/approver-policy.hcl`. It also creates the `opencode-session` token role, the baseline policy, and the `opencode-minter` policy and AppRole. Against the live processes, the test checks the following:
+All credentials, OpenBao state and application state are disposable. The harness installs the repository's real `config/authorizer-policy.hcl` and `config/approver-policy.hcl`. It also creates the `opencode-session` token role, the baseline policy, the `opencode-minter` policy and AppRole, and two more AppRoles: `ci`, and `self-approver`, which also carries the approver policy. The application config has `requester "opencode"` (token role) and `requester "ci"` (`auth_mount = "approle"`) rules. Against the live processes, the test checks the following:
+
+- **Approver sign-in:** OpenBao's `sys/config/cors` allows the application origin, and a CORS preflight from that origin succeeds. `GetLoginOptions` returns the OpenBao address and methods without a session. The test logs in to OpenBao with userpass directly, as the PWA does, and hands the token to `CreateSession`; afterwards the token is revoked.
 
 - **Minting:** the plugin's mint CLI logs in with AppRole and mints a Session Token for alias `opencode-session-<id>`. The baseline token can't read the KV secrets.
-- **API transport:** the approver side uses the generated ConnectRPC Go client with a cookie session, as the PWA does. bao-cred uses the same API through `AgentService`, waiting on `WatchGrantRequest`.
+- **API transport:** the approver side uses the generated ConnectRPC Go client with a cookie session, as the PWA does. bao-cred uses the same API through `GrantService`, waiting on `WatchGrantRequest`.
 - **Batch request:**
-  - `bao-cred request` files a batch. The approver learns about it from the `WatchEvents` stream, not by polling, and sees the reason and the session's ID and title.
+  - `bao-cred request` files a batch. The approver learns about it from the `WatchEvents` stream, not by polling, and sees the reason, the session's ID and title, and the matched rule.
   - The approver approves one item and rejects another. A path outside the Grantable Rules and a `sys/` path are refused before anyone sees them.
   - bao-cred exits with the denied code and prints every item's state.
-- **Approved access:** the session's **existing** token reads the approved path, both directly and through `bao-cred -field`. The rejected path stays denied. The session's entity carries exactly one `agent-grant-` policy.
+- **Approved access:** the session's **existing** token reads the approved path, both directly and through `bao-cred read --field`. The rejected path stays denied. The session's entity carries exactly one `agent-grant-` policy.
 - **No duplicates:**
   - Requesting an already-allowed path returns `already_granted` and no approver sees it.
-  - A request filed with `-no-wait` is approved, and `bao-cred request -wait <id>` resumes and sees the approval.
+  - A request filed with `--no-wait` is approved, and `bao-cred request --wait <id>` resumes and sees the approval.
 - **Session isolation:** another session can't use the Grant. A subagent minted with `--parent` resolves to the root session's identity and can.
 - **Expiry and revoke:**
   - A Grant with a 5s TTL stops working once its block's `expiration` passes, while other blocks of the same session policy keep working.
   - Revoking a Grant through the approver API takes effect at once and leaves other Grants intact.
-- **Request on denial:** `bao-cred -reason … <path>` files a request when a read is denied, waits, and prints the secret after approval. Without `-reason` it fails with a hint.
+- **Request on denial:** `bao-cred read --reason … <path>` files a request when a read is denied, waits, and prints the secret after approval. Without `--reason` it fails with a hint.
 - **Grant listing:** `bao-cred grants` lists only the session's active Grants.
-- **Agent API access:** a human userpass token gets `permission_denied` from `AgentService`.
+- **Requester Rules:** an approver's userpass token gets `NOT_REQUESTER` from `GrantService`. A `ci` AppRole token matches the `ci` rule, files a request, and reads the path once it is approved; session A can't.
+- **Self-approval:** a `self-approver` AppRole token files a request, then signs in as an Approver; deciding its own request fails with `SELF_APPROVAL`.
 - **Authorizer token limits:** the authorizer token can't rename or disable an entity, or write a policy outside `agent-grant-*`.

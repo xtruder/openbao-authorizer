@@ -18,7 +18,7 @@ import (
 
 	authorizerv1 "github.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1"
 	"github.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1/authorizerv1connect"
-	"github.com/xtruder/openbao-authorizer/internal/httpapi"
+	"github.com/xtruder/openbao-authorizer/internal/api"
 )
 
 func TestStaticFileSystemDefaultsToEmbeddedDistribution(t *testing.T) {
@@ -56,7 +56,7 @@ func TestStaticHandlerServesAssetsAndSPAFallback(t *testing.T) {
 		"index.html":    &fstest.MapFile{Data: []byte(`<!doctype html><div id="root"></div>`)},
 		"assets/app.js": &fstest.MapFile{Data: []byte(`console.log("app")`)},
 	}
-	handler := staticHandler(fs.FS(assets))
+	handler := staticHandler(fs.FS(assets), "https://bao.example:8200/v1-proxy")
 
 	tests := []struct {
 		name        string
@@ -87,7 +87,7 @@ func TestStaticHandlerServesAssetsAndSPAFallback(t *testing.T) {
 				t.Fatalf("Content-Type = %q, want prefix %q", got, test.contentType)
 			}
 
-			if got := recorder.Header().Get("Content-Security-Policy"); !strings.Contains(got, "default-src 'self'") {
+			if got := recorder.Header().Get("Content-Security-Policy"); !strings.Contains(got, "default-src 'self'") || !strings.Contains(got, "connect-src 'self' https://bao.example:8200;") {
 				t.Fatalf("Content-Security-Policy = %q", got)
 			}
 
@@ -103,7 +103,7 @@ func TestStaticHandlerReturnsNotFoundForMissingAsset(t *testing.T) {
 
 	handler := staticHandler(fstest.MapFS{
 		"index.html": &fstest.MapFile{Data: []byte(`<!doctype html><div id="root"></div>`)},
-	})
+	}, "")
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/assets/missing.js", nil))
 
@@ -119,16 +119,16 @@ func TestStaticHandlerReturnsNotFoundForMissingAsset(t *testing.T) {
 func TestRoutesServeConnectAPIHealthAndPWA(t *testing.T) {
 	t.Parallel()
 
-	server := httptest.NewServer(routes(httpapi.New(httpapi.Options{}), fstest.MapFS{
+	server := httptest.NewServer(routes(api.New(api.Options{}), fstest.MapFS{
 		"index.html": &fstest.MapFile{Data: []byte(`<!doctype html><div id="root"></div>`)},
-	}))
+	}, ""))
 	t.Cleanup(server.Close)
 
 	// An unauthenticated call proves the services are mounted under /api.
-	client := authorizerv1connect.NewAgentServiceClient(server.Client(), server.URL+"/api")
-	_, err := client.ListSessionGrants(t.Context(), connect.NewRequest(&authorizerv1.ListSessionGrantsRequest{}))
+	client := authorizerv1connect.NewGrantServiceClient(server.Client(), server.URL+"/api")
+	_, err := client.ListMyGrants(t.Context(), connect.NewRequest(&authorizerv1.ListMyGrantsRequest{}))
 	if connect.CodeOf(err) != connect.CodeUnauthenticated {
-		t.Fatalf("agent call error = %v", err)
+		t.Fatalf("grant call error = %v", err)
 	}
 
 	tests := []struct {

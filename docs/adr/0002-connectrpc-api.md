@@ -11,6 +11,6 @@ The authorizer exposes one API, defined in `proto/` and generated with `buf`. Bo
 
 ## Consequences
 
-- **Authentication runs in interceptors, which cover unary and streaming RPCs alike.** Agent RPCs take `Authorization: Bearer <Session Token>`. Approver RPCs use the app session cookie and a same-origin check ([ADR-0003](0003-approver-sessions.md)).
+- **Authentication runs in interceptors, which cover unary and streaming RPCs alike.** Grant RPCs take `Authorization: Bearer <OpenBao token>` from a Requester. Approver RPCs use the app session cookie and a same-origin check ([ADR-0003](0003-approver-sessions.md)).
 - **Reverse proxies must not buffer `/api/`.** Stream responses send `X-Accel-Buffering: no` for nginx.
 - **Browser Web Push stays separate.** It delivers notifications while the PWA is closed, through the browser vendor's push service. Only its enrollment moved to RPC.

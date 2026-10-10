@@ -30,13 +30,20 @@ empty so the service does not need a frontend directory at runtime.
   and an orphan authorizer token without the default policy;
 - the `approver` user, its `openbao-authorizer-approver` marker policy and the
   `local-approvers` identity group;
+- a `sys/config/cors` entry allowing the public origin, so the PWA can sign
+  approvers in to OpenBao from the browser;
 - the `opencode-session` baseline policy and token role
   (`orphan`, renewable, 24h period, entity aliases `opencode-session-*`);
 - the `opencode-minter` policy and AppRole, which can only call
   `auth/token/create/opencode-session`;
 - an example secret at `kv/opencode/example`, plus `grantable` rules in
   `app.hcl` for `kv/data/opencode/*`, `kv/metadata/opencode/*` and
-  `github/token/project-*`.
+  `github/token/project-*`;
+- in `app.hcl`, an `approver_login` block offering userpass and token sign-in,
+  and one `requester "opencode"` rule matching the `opencode-session` token
+  role. The minter AppRole shares the `approle` mount, so don't add an
+  `auth_mount = "approle"` rule here; mount a separate AppRole for other
+  Requesters.
 
 Generated material remains local:
 
@@ -49,9 +56,12 @@ Generated material remains local:
 ~/.config/openbao-authorizer/opencode-minter-secret-id
 ```
 
-Sign into the PWA as `approver` with the generated approver password. The app
-stores only OpenBao's renewable token, encrypted server-side; the password is
-not retained. The opencode plugin reads the minter role ID and secret ID files
+Sign into the PWA as `approver` with the generated approver password. The
+browser sends the password only to OpenBao and hands the resulting token to the
+authorizer, which revokes it once it has created the app session. Approvers'
+browsers must reach OpenBao at `approver_login.openbao_address`: it defaults to
+`BAO_ADDR`, and `APPROVER_OPENBAO_ADDRESS` in `bootstrap.env` overrides it,
+e.g. with a public route to OpenBao. The opencode plugin reads the minter role ID and secret ID files
 and mints one Session Token per agent session. Never publish these files.
 
 ## Operations
@@ -81,7 +91,7 @@ export BAO_TOKEN="$(BAO_TOKEN="${minter}" bao token create -role=opencode-sessio
   -entity-alias=opencode-session-manual -metadata=title="Manual test" \
   -metadata=directory="${PWD}" -field=token)"
 export OPENBAO_AUTHORIZER_URL=http://127.0.0.1:18202
-bao-cred -reason "Try the local authorizer" kv/data/opencode/example
+bao-cred read --reason "Try the local authorizer" kv/data/opencode/example
 ```
 
 ## Updating the application
@@ -193,8 +203,8 @@ Inside an opencode session the plugin has already put a Session Token in
 the given reason, waits for an Approver, and retries the read once:
 
 ```sh
-bao-cred -reason "Inspect the repository for the release" \
-  -map GH_TOKEN=token github/token/project-project-name -- \
+bao-cred read --reason "Inspect the repository for the release" \
+  --map GH_TOKEN=token github/token/project-project-name -- \
   gh repo view example-org/example-repo
 ```
 

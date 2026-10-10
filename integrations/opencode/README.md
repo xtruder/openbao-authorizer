@@ -28,7 +28,7 @@ If minting fails, the command runs without a token. Tokens live in memory only. 
 
 ## OpenBao prerequisites
 
-These objects are defined in the [plan's OpenBao setup](../../docs/plans/session-grants.md#openbao-setup-shared-by-deploylocal-e2e-docs). The authorizer setup itself is covered in the main README.
+These objects are described in the main README's [OpenBao setup](../../README.md#openbao-setup), which also covers the authorizer itself. The design of the token injection is recorded in [ADR-0004](../../docs/adr/0004-opencode-session-token-injection.md).
 
 ```sh
 # Baseline policy for Session Tokens. Site-defined; tokens also carry `default`

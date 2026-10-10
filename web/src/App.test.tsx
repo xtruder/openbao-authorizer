@@ -5,14 +5,14 @@ import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
-import { Decision, type DecideItemsRequest, type DeletePushSubscriptionRequest, type LoginRequest, type RegisterPushSubscriptionRequest, type RevokeGrantRequest } from './gen/openbao/authorizer/v1/approver_pb'
+import { Decision, type DecideItemsRequest, type DeletePushSubscriptionRequest, type RegisterPushSubscriptionRequest, type RevokeGrantRequest } from './gen/openbao/authorizer/v1/approver_pb'
 import { GrantRequestSchema, GrantSchema, ItemState } from './gen/openbao/authorizer/v1/types_pb'
 import { fakeApprover, rpcError } from './test/fakeApprover'
 
 const at = (value: string) => timestampFromDate(new Date(value))
 const hours = (count: number) => ({ seconds: BigInt(count * 3600) })
 
-const agentSession = { id: 'ses_abc123', title: 'Payments rollout', directory: '/src/payments', entityId: 'entity-2' }
+const requester = { id: 'ses_abc123', title: 'Payments rollout', directory: '/src/payments', entityId: 'entity-2', rule: 'opencode-sessions' }
 
 // Fixtures stay plain init objects so tests can derive variants by spreading;
 // spreading a created message would carry its $typeName and skip nested init.
@@ -20,7 +20,7 @@ const pendingInit = {
   id: 'req-7f31',
   reason: 'Deploy the payments service to staging',
   createdAt: at('2026-09-17T08:15:00Z'),
-  session: agentSession,
+  requester,
   items: [
     { id: 'item-a', path: 'kv/data/payments/db', capabilities: ['read'], ttl: hours(8), state: ItemState.PENDING, expiresAt: at('2026-09-18T08:15:00Z') },
     { id: 'item-b', path: 'kv/data/payments/api', capabilities: ['read', 'update'], ttl: hours(8), state: ItemState.PENDING, expiresAt: at('2026-09-18T08:15:00Z') },
@@ -46,7 +46,7 @@ const activeGrant = create(GrantSchema, {
   createdAt: at('2026-09-17T08:15:00Z'),
   expiresAt: at('2026-09-17T09:15:00Z'),
   approvedBy: 'Bob',
-  session: agentSession,
+  requester,
 })
 
 // signedIn starts each test with only the session cookie, as after a reload.
@@ -66,39 +66,6 @@ describe('OpenBao Authorizer user workflows', () => {
     expect(screen.getByText('SRE on-call')).toBeInTheDocument()
     expect(fake.callsTo('GetSession')).toHaveLength(1)
     await waitFor(() => expect(fake.callsTo('WatchEvents')).toHaveLength(1))
-  })
-
-  it('signs in and keeps nothing in browser storage', async () => {
-    const user = userEvent.setup()
-    const fake = fakeApprover()
-
-    render(<App client={fake.client} />)
-
-    await user.type(await screen.findByLabelText('Username'), 'bob')
-    await user.type(screen.getByLabelText('Password'), 'correct horse')
-    await user.click(screen.getByRole('button', { name: 'Sign in securely' }))
-
-    expect(await screen.findByRole('heading', { name: 'Access requests' })).toBeInTheDocument()
-    expect(fake.requests<LoginRequest>('Login')[0]).toEqual(expect.objectContaining({ username: 'bob', password: 'correct horse' }))
-    await waitFor(() => expect(fake.callsTo('WatchEvents')).toHaveLength(1))
-    // The password never touches browser storage; the session lives in the HttpOnly cookie.
-    expect(localStorage).toHaveLength(0)
-    expect(sessionStorage).toHaveLength(0)
-  })
-
-  it('shows the server explanation when sign in fails', async () => {
-    const user = userEvent.setup()
-    const fake = fakeApprover({
-      handlers: { login: () => { throw rpcError(Code.Unauthenticated, 'INVALID_CREDENTIALS', 'invalid username or password') } },
-    })
-
-    render(<App client={fake.client} />)
-
-    await user.type(await screen.findByLabelText('Username'), 'bob')
-    await user.type(screen.getByLabelText('Password'), 'wrong')
-    await user.click(screen.getByRole('button', { name: 'Sign in securely' }))
-
-    expect(await screen.findByRole('alert')).toHaveTextContent('invalid username or password')
   })
 
   it('opens the request linked by a notification', async () => {
@@ -122,6 +89,7 @@ describe('OpenBao Authorizer user workflows', () => {
     expect(scope.getByText('Payments rollout')).toBeInTheDocument()
     expect(scope.getByText('ses_abc123')).toBeInTheDocument()
     expect(scope.getByText('/src/payments')).toBeInTheDocument()
+    expect(scope.getByTitle('Requester rule')).toHaveTextContent('opencode-sessions')
     expect(scope.getByText('kv/data/payments/db')).toBeInTheDocument()
     expect(scope.getByText('paths under sys/ are on the hard denylist')).toBeInTheDocument()
     expect(scope.getByLabelText('TTL for kv/data/payments/db')).toHaveValue('8h')
@@ -141,7 +109,7 @@ describe('OpenBao Authorizer user workflows', () => {
     const hostile = create(GrantRequestSchema, {
       ...pendingInit,
       reason: `Need ${markup}`,
-      session: { ...agentSession, title: `<b>${markup}</b>`, directory: `/tmp/${markup}` },
+      requester: { ...requester, title: `<b>${markup}</b>`, directory: `/tmp/${markup}` },
       items: [{ ...pendingInit.items[0], path: `kv/data/${markup}` }],
     })
     const fake = signedIn({ initialSnapshot: { pendingRequests: [hostile] } })
@@ -382,6 +350,21 @@ describe('OpenBao Authorizer user workflows', () => {
     await user.click(await screen.findByRole('button', { name: 'Approve kv/data/payments/db' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent('ttl 9h may only shorten the resolved 8h')
+  })
+
+  it('refuses to let an approver decide their own request', async () => {
+    const user = userEvent.setup()
+    const fake = signedIn({
+      initialSnapshot: { pendingRequests: [pendingRequest] },
+      handlers: { decideItems: () => { throw rpcError(Code.PermissionDenied, 'SELF_APPROVAL', 'approver filed this request') } },
+    })
+
+    render(<App client={fake.client} />)
+
+    await user.click(await screen.findByRole('button', { name: 'Approve kv/data/payments/db' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent("You can't decide your own request")
+    expect(screen.getByRole('heading', { name: 'Access requests' })).toBeInTheDocument()
   })
 
   it('explains an item that someone else already decided', async () => {

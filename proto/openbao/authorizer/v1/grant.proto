@@ -5,10 +5,11 @@ package openbao.authorizer.v1;
 import "google/protobuf/duration.proto";
 import "openbao/authorizer/v1/types.proto";
 
-// AgentService is called by Agent Sessions (bao-cred) with
-// `Authorization: Bearer <Session Token>`. Only tokens whose entity has a
-// session alias may call it; a session sees only its own requests and Grants.
-service AgentService {
+// GrantService is called by Requesters (e.g. bao-cred in an Agent Session)
+// with `Authorization: Bearer <OpenBao token>`. Only tokens matching a
+// configured Requester Rule may call it; a Requester sees only its own
+// requests and Grants.
+service GrantService {
   // CreateGrantRequest files a batch of Permission Items. Items outside the
   // Grantable Rules are refused, items OpenBao already allows are answered as
   // already granted, and identical pending items join the existing one.
@@ -19,8 +20,8 @@ service AgentService {
   // every change, plus periodic heartbeats. The stream ends once no item is
   // pending; clients reconnect after a drop and rely on the snapshot.
   rpc WatchGrantRequest(WatchGrantRequestRequest) returns (stream WatchGrantRequestResponse);
-  // ListSessionGrants returns the caller's active Grants.
-  rpc ListSessionGrants(ListSessionGrantsRequest) returns (ListSessionGrantsResponse);
+  // ListMyGrants returns the caller's active Grants.
+  rpc ListMyGrants(ListMyGrantsRequest) returns (ListMyGrantsResponse);
 }
 
 // PermissionItemInput is one requested path and its capabilities.
@@ -61,8 +62,8 @@ message WatchGrantRequestResponse {
   }
 }
 
-message ListSessionGrantsRequest {}
+message ListMyGrantsRequest {}
 
-message ListSessionGrantsResponse {
+message ListMyGrantsResponse {
   repeated Grant grants = 1;
 }

@@ -9,9 +9,11 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"text/template"
 
 	openbao "github.com/openbao/openbao/api/v2"
@@ -221,11 +223,40 @@ func writeFile(path string, contents []byte) error {
 		return fmt.Errorf("close output: %w", err)
 	}
 
-	if err := replaceFile(temporaryPath, path); err != nil {
+	// Rename is atomic on the same filesystem, so readers never see a partial file.
+	if err := os.Rename(temporaryPath, path); err != nil {
 		return fmt.Errorf("replace output: %w", err)
 	}
 
 	return nil
+}
+
+// createSecureTemp creates the temporary file next to its destination, so the
+// final rename stays on one filesystem, and restricts it before any secret is
+// written.
+func createSecureTemp(directory string) (*os.File, error) {
+	file, err := os.CreateTemp(directory, ".bao-cred-*")
+	if err != nil {
+		return nil, err
+	}
+
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		_ = os.Remove(file.Name())
+		return nil, err
+	}
+
+	return file, nil
+}
+
+// commandExitCode follows the shell convention of 128+signal for a child
+// killed by a signal.
+func commandExitCode(processExit *exec.ExitError) int {
+	if status, ok := processExit.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+		return 128 + int(status.Signal())
+	}
+
+	return processExit.ExitCode()
 }
 
 func splitPath(path string) ([]string, error) {

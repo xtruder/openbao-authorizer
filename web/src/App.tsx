@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
 import { timestampDate, type Timestamp } from '@bufbuild/protobuf/wkt'
 import { ConnectError } from '@connectrpc/connect'
 import { createApproverClient, errorReason, getErrorMessage, isSessionLost, type ApproverClient, type Session } from './api'
-import { formatDuration, parseDuration } from './duration'
-import { Decision, type DashboardSnapshot, type Identity } from './gen/openbao/authorizer/v1/approver_pb'
-import { ItemState, type AgentSession, type Grant, type GrantRequest, type PermissionItem } from './gen/openbao/authorizer/v1/types_pb'
-import { pushEnrollmentErrorMessage } from './push'
+import { formatDuration, parseDuration, pushEnrollmentErrorMessage } from './utils'
+import { Decision, LoginMethodType, type DashboardSnapshot, type Identity, type LoginMethod } from './gen/openbao/authorizer/v1/approver_pb'
+import { ItemState, type Requester, type Grant, type GrantRequest, type PermissionItem } from './gen/openbao/authorizer/v1/types_pb'
+import { completeOidcLogin, discardOidcLogin, isOidcCallback, loginWithGitHub, loginWithPassword, startOidcLogin, type OpenBaoTarget } from './openbaoLogin'
 import {
   BellIcon,
   CheckIcon,
@@ -92,28 +92,283 @@ function SessionUnavailable({ message, onRetry }: { message: string; onRetry: ()
   )
 }
 
-function Login({ client, onAuthenticated }: { client: ApproverClient; onAuthenticated: (session: Session) => void }) {
-  const [username, setUsername] = useState('')
-  const [password, setPassword] = useState('')
-  const [showPassword, setShowPassword] = useState(false)
-  const [submitting, setSubmitting] = useState(false)
-  const [error, setError] = useState('')
+const methodNames: Record<LoginMethodType, string> = {
+  [LoginMethodType.UNSPECIFIED]: 'Sign in',
+  [LoginMethodType.TOKEN]: 'Token',
+  [LoginMethodType.USERPASS]: 'Username',
+  [LoginMethodType.LDAP]: 'LDAP',
+  [LoginMethodType.GITHUB]: 'GitHub',
+  [LoginMethodType.OIDC]: 'OIDC',
+}
 
-  async function submit(event: FormEvent<HTMLFormElement>) {
+function methodLabel(method: LoginMethod) {
+  return method.label.trim() || methodNames[method.type] || 'Sign in'
+}
+
+function SecretInput({ id, label, value, onChange, autoComplete, help }: {
+  id: string
+  label: string
+  value: string
+  onChange: (value: string) => void
+  autoComplete: string
+  help?: string
+}) {
+  const [visible, setVisible] = useState(false)
+  return (
+    <div>
+      <label htmlFor={id} className="mb-2.5 block text-sm font-medium text-zinc-200">{label}</label>
+      <div className="group relative">
+        <input
+          id={id}
+          name={id}
+          type={visible ? 'text' : 'password'}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          autoComplete={autoComplete}
+          autoCapitalize="none"
+          spellCheck={false}
+          required
+          className="secure-input"
+          aria-describedby={help ? `${id}-help` : undefined}
+        />
+        <button
+          type="button"
+          onClick={() => setVisible((current) => !current)}
+          className="absolute right-3 top-1/2 -translate-y-1/2 rounded-sm px-2 py-1 text-xs font-semibold text-zinc-400 transition hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
+          aria-label={visible ? `Hide ${label.toLowerCase()}` : `Show ${label.toLowerCase()}`}
+        >
+          {visible ? 'Hide' : 'Show'}
+        </button>
+      </div>
+      {help && (
+        <p id={`${id}-help`} className="mt-2.5 flex items-center gap-2 text-xs leading-5 text-zinc-500">
+          <ShieldIcon className="size-3.5 shrink-0" /> {help}
+        </p>
+      )}
+    </div>
+  )
+}
+
+function SubmitButton({ submitting, disabled, label }: { submitting: boolean; disabled: boolean; label: string }) {
+  return (
+    <button type="submit" disabled={disabled || submitting} className="primary-button w-full">
+      {submitting ? <><span className="button-spinner" /> Authenticating…</> : <>{label} <ChevronIcon className="size-4" /></>}
+    </button>
+  )
+}
+
+// Each form keeps its secrets in local state only, and clears them once they are sent.
+function MethodForm({ method, target, submitting, onSignIn, onOidc }: {
+  method: LoginMethod
+  target: OpenBaoTarget
+  submitting: boolean
+  onSignIn: (obtainToken: () => Promise<string>, keepToken?: boolean) => Promise<void>
+  onOidc: (method: LoginMethod) => void
+}) {
+  const [username, setUsername] = useState('')
+  const [secret, setSecret] = useState('')
+  const directHelp = 'Sent straight to OpenBao from this browser, never to the authorizer.'
+
+  function submit(event: FormEvent<HTMLFormElement>, obtainToken: () => Promise<string>, keepToken = false) {
     event.preventDefault()
-    if (!username.trim() || !password || submitting) return
+    if (submitting) return
+    setSecret('')
+    void onSignIn(obtainToken, keepToken)
+  }
+
+  switch (method.type) {
+    case LoginMethodType.TOKEN: {
+      const token = secret.trim()
+      return (
+        <form onSubmit={(event) => submit(event, async () => token, true)} className="space-y-5">
+          <SecretInput id="openbao-token" label="OpenBao token" value={secret} onChange={setSecret} autoComplete="off" help="Checked once by the authorizer and never stored. It stays valid." />
+          <SubmitButton submitting={submitting} disabled={!token} label="Sign in with token" />
+        </form>
+      )
+    }
+    case LoginMethodType.USERPASS:
+    case LoginMethodType.LDAP: {
+      const name = username.trim()
+      const password = secret
+      return (
+        <form onSubmit={(event) => submit(event, () => loginWithPassword(target, method.mount, name, password))} className="space-y-5">
+          <div>
+            <label htmlFor="username" className="mb-2.5 block text-sm font-medium text-zinc-200">Username</label>
+            <input
+              id="username"
+              name="username"
+              type="text"
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              autoComplete="username"
+              autoCapitalize="none"
+              spellCheck={false}
+              required
+              className="secure-input"
+            />
+          </div>
+          <SecretInput id="password" label="Password" value={secret} onChange={setSecret} autoComplete="current-password" help={directHelp} />
+          <SubmitButton submitting={submitting} disabled={!name || !password} label="Sign in securely" />
+        </form>
+      )
+    }
+    case LoginMethodType.GITHUB: {
+      const token = secret.trim()
+      return (
+        <form onSubmit={(event) => submit(event, () => loginWithGitHub(target, method.mount, token))} className="space-y-5">
+          <SecretInput id="github-token" label="GitHub personal access token" value={secret} onChange={setSecret} autoComplete="off" help={directHelp} />
+          <SubmitButton submitting={submitting} disabled={!token} label="Sign in with GitHub" />
+        </form>
+      )
+    }
+    case LoginMethodType.OIDC:
+      return (
+        <form onSubmit={(event) => { event.preventDefault(); if (!submitting) onOidc(method) }} className="space-y-5">
+          <p className="text-sm leading-6 text-zinc-400">You will be sent to your identity provider and brought back here.</p>
+          <SubmitButton submitting={submitting} disabled={false} label={`Continue with ${methodLabel(method)}`} />
+        </form>
+      )
+    default:
+      return null
+  }
+}
+
+type LoginOptionsState =
+  | { status: 'loading' }
+  | { status: 'error'; message: string }
+  | { status: 'ready'; target: OpenBaoTarget; methods: LoginMethod[] }
+
+function Login({ client, onAuthenticated }: { client: ApproverClient; onAuthenticated: (session: Session) => void }) {
+  const [options, setOptions] = useState<LoginOptionsState>({ status: 'loading' })
+  const [selected, setSelected] = useState(0)
+  const [submitting, setSubmitting] = useState(false)
+  const [completingOidc, setCompletingOidc] = useState(isOidcCallback)
+  const [error, setError] = useState('')
+  const oidcHandled = useRef(false)
+  const tabRefs = useRef<(HTMLButtonElement | null)[]>([])
+
+  // The token lives only in this call, from OpenBao's response to CreateSession.
+  // Pasted tokens are kept (keepToken); tokens from an OpenBao login exist only for this exchange.
+  const signIn = useCallback(async (obtainToken: () => Promise<string>, keepToken = false) => {
     setSubmitting(true)
     setError('')
     try {
-      const response = await client.login({ username: username.trim(), password })
-      setPassword('')
+      const response = await client.createSession({ openbaoToken: await obtainToken(), keepToken })
       onAuthenticated({ identity: response.identity })
     } catch (caught) {
-      setError(getErrorMessage(caught, 'Unable to sign in. Check your username and password.'))
+      setError(getErrorMessage(caught, 'Unable to sign in.'))
     } finally {
-      setPassword('')
       setSubmitting(false)
     }
+  }, [client, onAuthenticated])
+
+  const loadOptions = useCallback((isActive: () => boolean) => {
+    client.getLoginOptions({})
+      .then((response) => {
+        if (!isActive()) return
+        const target = { address: response.openbaoAddress, namespace: response.namespace }
+        setOptions({ status: 'ready', target, methods: response.methods.filter((method) => method.type !== LoginMethodType.UNSPECIFIED) })
+        // A ref, not isActive, keeps a double-run effect from replaying the one-time callback.
+        if (!isOidcCallback() || oidcHandled.current) return
+        oidcHandled.current = true
+        const search = window.location.search
+        window.history.replaceState({}, '', '/')
+        void signIn(() => completeOidcLogin(target, search)).finally(() => setCompletingOidc(false))
+      })
+      .catch((caught: unknown) => {
+        if (!isActive()) return
+        setOptions({ status: 'error', message: getErrorMessage(caught, 'Unable to load sign-in options.') })
+      })
+  }, [client, signIn])
+
+  useEffect(() => {
+    let active = true
+    loadOptions(() => active)
+    return () => { active = false }
+  }, [loadOptions])
+
+  async function startOidc(method: LoginMethod) {
+    if (options.status !== 'ready') return
+    setSubmitting(true)
+    setError('')
+    try {
+      await startOidcLogin(options.target, method.mount, method.oidcRole)
+      // The page is navigating away; keep the button busy until it does.
+    } catch (caught) {
+      setError(getErrorMessage(caught, 'Unable to start OIDC sign in.'))
+      setSubmitting(false)
+    }
+  }
+
+  function onTabKeyDown(event: KeyboardEvent<HTMLButtonElement>, count: number) {
+    const offsets: Record<string, number> = { ArrowRight: 1, ArrowLeft: -1 }
+    let next: number | null = null
+    if (event.key in offsets) next = (selected + offsets[event.key] + count) % count
+    else if (event.key === 'Home') next = 0
+    else if (event.key === 'End') next = count - 1
+    if (next === null) return
+    event.preventDefault()
+    setSelected(next)
+    setError('')
+    tabRefs.current[next]?.focus()
+  }
+
+  function renderMethods() {
+    if (completingOidc) {
+      return (
+        <div className="flex items-center gap-3 text-sm text-zinc-300" role="status" aria-live="polite">
+          <span className="button-spinner" aria-hidden="true" /> Completing sign in…
+        </div>
+      )
+    }
+    if (options.status === 'loading') {
+      return (
+        <div className="flex items-center gap-3 text-sm text-zinc-400" role="status" aria-live="polite">
+          <span className="button-spinner" aria-hidden="true" /> Loading sign-in options…
+        </div>
+      )
+    }
+    if (options.status === 'error') {
+      return (
+        <div className="space-y-4">
+          <div role="alert" className="error-banner">{options.message}</div>
+          <button type="button" onClick={() => { setOptions({ status: 'loading' }); loadOptions(() => true) }} className="secondary-button">Retry</button>
+        </div>
+      )
+    }
+    const { methods, target } = options
+    if (methods.length === 0) return <div role="alert" className="error-banner">No sign-in methods are configured on this server.</div>
+    const current = Math.min(selected, methods.length - 1)
+    const method = methods[current]
+    return (
+      <div className="space-y-6">
+        {methods.length > 1 && (
+          <div className="login-tabs" role="tablist" aria-label="Sign-in method">
+            {methods.map((entry, index) => (
+              <button
+                key={`${entry.type}-${entry.mount}-${index}`}
+                ref={(element) => { tabRefs.current[index] = element }}
+                id={`login-tab-${index}`}
+                type="button"
+                role="tab"
+                aria-selected={index === current}
+                aria-controls="login-panel"
+                tabIndex={index === current ? 0 : -1}
+                onClick={() => { setSelected(index); setError('') }}
+                onKeyDown={(event) => onTabKeyDown(event, methods.length)}
+                disabled={submitting}
+              >
+                {methodLabel(entry)}
+              </button>
+            ))}
+          </div>
+        )}
+        <div id="login-panel" role={methods.length > 1 ? 'tabpanel' : undefined} aria-labelledby={methods.length > 1 ? `login-tab-${current}` : undefined}>
+          {/* Keyed so switching methods drops anything typed into the previous form. */}
+          <MethodForm key={current} method={method} target={target} submitting={submitting} onSignIn={signIn} onOidc={(entry) => void startOidc(entry)} />
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -128,7 +383,7 @@ function Login({ client, onAuthenticated }: { client: ApproverClient; onAuthenti
             Sensitive changes.<br /><span className="text-brand">Human judgment.</span>
           </h1>
           <p className="mt-7 max-w-lg text-lg leading-8 text-zinc-400">
-            Review what AI agent sessions ask for, decide each permission on its own, and revoke access at any time.
+            Review what requesters such as AI agent sessions ask for, decide each permission on its own, and revoke access at any time.
           </p>
           <div className="mt-12 grid max-w-xl grid-cols-3 gap-3">
             {[
@@ -143,7 +398,7 @@ function Login({ client, onAuthenticated }: { client: ApproverClient; onAuthenti
             ))}
           </div>
         </div>
-        <p className="relative z-10 text-xs text-zinc-600">Your password is exchanged directly for a renewable OpenBao session and is never stored by this app.</p>
+        <p className="relative z-10 text-xs text-zinc-600">You sign in to OpenBao directly. The authorizer only checks the resulting token once, then revokes it.</p>
       </section>
 
       <section className="flex min-h-svh items-center justify-center px-5 py-10 sm:px-10 lg:px-12">
@@ -154,63 +409,16 @@ function Login({ client, onAuthenticated }: { client: ApproverClient; onAuthenti
               <KeyIcon className="size-6" />
             </div>
             <h2 className="text-3xl font-semibold tracking-[-0.035em] text-white">Operator sign in</h2>
-            <p className="mt-3 leading-7 text-zinc-400">Sign in with your OpenBao username and password. Your secure session stays active for background access-request notifications.</p>
+            <p className="mt-3 leading-7 text-zinc-400">Sign in with OpenBao. Your secure session stays active for background access-request notifications.</p>
           </div>
 
-          <form onSubmit={submit} className="space-y-5">
-            <div>
-              <label htmlFor="username" className="mb-2.5 block text-sm font-medium text-zinc-200">Username</label>
-              <input
-                id="username"
-                name="username"
-                type="text"
-                value={username}
-                onChange={(event) => setUsername(event.target.value)}
-                autoComplete="username"
-                autoCapitalize="none"
-                spellCheck={false}
-                required
-                className="secure-input"
-              />
-            </div>
-            <div>
-              <label htmlFor="password" className="mb-2.5 block text-sm font-medium text-zinc-200">Password</label>
-              <div className="group relative">
-                <input
-                  id="password"
-                  name="password"
-                  type={showPassword ? 'text' : 'password'}
-                  value={password}
-                  onChange={(event) => setPassword(event.target.value)}
-                  autoComplete="current-password"
-                  required
-                  className="secure-input"
-                  aria-describedby="password-help"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword((visible) => !visible)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 rounded-sm px-2 py-1 text-xs font-semibold text-zinc-400 transition hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
-                  aria-label={showPassword ? 'Hide password' : 'Show password'}
-                >
-                  {showPassword ? 'Hide' : 'Show'}
-                </button>
-              </div>
-              <p id="password-help" className="mt-2.5 flex items-center gap-2 text-xs leading-5 text-zinc-500">
-                <ShieldIcon className="size-3.5 shrink-0" /> Sent to OpenBao over the server connection and never retained.
-              </p>
-            </div>
+          {renderMethods()}
 
-            {error && <div role="alert" className="error-banner">{error}</div>}
-
-            <button type="submit" disabled={!username.trim() || !password || submitting} className="primary-button w-full">
-              {submitting ? <><span className="button-spinner" /> Authenticating…</> : <>Sign in securely <ChevronIcon className="size-4" /></>}
-            </button>
-          </form>
+          {error && <div role="alert" className="error-banner mt-5">{error}</div>}
 
           <div className="mt-8 border-t border-white/10 pt-6">
             <p className="text-xs leading-5 text-zinc-500">
-              The secure HTTP-only session lasts 30 days while the server renews its OpenBao token. Signing out revokes that token and browser access.
+              The secure HTTP-only session is the authorizer's own and holds no OpenBao token. Signing out ends it on this device.
             </p>
           </div>
         </div>
@@ -246,17 +454,18 @@ const stateStyles: Record<ItemState, { label: string; slug: string }> = {
   [ItemState.REVOKED]: { label: 'Revoked', slug: 'revoked' },
 }
 
-function sessionLabel(session: AgentSession) {
-  return session.title.trim() || `Session ${session.id}`
+function requesterLabel(requester: Requester) {
+  return requester.title.trim() || requester.id
 }
 
-function SessionDetails({ session }: { session: AgentSession | undefined }) {
-  if (!session) return null
+function RequesterDetails({ requester }: { requester: Requester | undefined }) {
+  if (!requester) return null
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-zinc-500">
-      <span className="inline-flex min-w-0 items-center gap-1.5 font-medium text-zinc-800"><UserIcon className="size-3.5 shrink-0" /><span className="truncate">{sessionLabel(session)}</span></span>
-      <span className="font-mono text-[11px]" title="Agent session ID">{session.id}</span>
-      {session.directory && <span className="min-w-0 truncate font-mono text-[11px]" title={session.directory}>{session.directory}</span>}
+      <span className="inline-flex min-w-0 items-center gap-1.5 font-medium text-zinc-800"><UserIcon className="size-3.5 shrink-0" /><span className="truncate">{requesterLabel(requester)}</span></span>
+      {requester.rule && <span className="rounded-full border border-zinc-200 px-1.5 text-[10px] leading-4 text-zinc-400" title="Requester rule">{requester.rule}</span>}
+      {requester.title.trim() && <span className="font-mono text-[11px]" title="Requester ID">{requester.id}</span>}
+      {requester.directory && <span className="min-w-0 truncate font-mono text-[11px]" title={requester.directory}>{requester.directory}</span>}
     </div>
   )
 }
@@ -339,7 +548,7 @@ function RequestCard({ request, highlighted, busyItemId, error, onDecide }: {
   return (
     <article className={`request-card ${highlighted ? 'highlighted' : ''}`} aria-labelledby={`request-${request.id}`}>
       <header className="request-card-header">
-        <SessionDetails session={request.session} />
+        <RequesterDetails requester={request.requester} />
         <h3 ref={headingRef} id={`request-${request.id}`} tabIndex={-1} className="mt-3 text-[15px] font-medium leading-6 text-zinc-950 whitespace-pre-wrap break-words">{request.reason}</h3>
         <p className="mt-1.5 inline-flex items-center gap-1.5 text-xs text-zinc-400"><ClockIcon className="size-3.5" />Requested {formatDate(request.createdAt)}</p>
       </header>
@@ -367,7 +576,7 @@ function GrantRow({ grant, busy, disabled, onRevoke }: { grant: Grant; busy: boo
           {grant.capabilities.map((capability) => <span key={capability} className="operation-pill">{capability}</span>)}
         </div>
         <p className="break-all font-mono text-[13px] font-semibold text-zinc-900">{grant.path}</p>
-        <div className="mt-2"><SessionDetails session={grant.session} /></div>
+        <div className="mt-2"><RequesterDetails requester={grant.requester} /></div>
         <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500">
           <span className="inline-flex items-center gap-1"><ClockIcon className="size-3.5" />Expires {formatDate(grant.expiresAt)}</span>
           {grant.approvedBy && <span>Approved by {grant.approvedBy}</span>}
@@ -384,7 +593,7 @@ function GrantRow({ grant, busy, disabled, onRevoke }: { grant: Grant; busy: boo
 
 function EmptyState({ tab }: { tab: DashboardTab }) {
   const content = {
-    pending: ['Queue is clear', 'New access requests from agent sessions will appear here as they arrive.'],
+    pending: ['Queue is clear', 'New access requests from requesters will appear here as they arrive.'],
     history: ['No decided requests', 'Requests leave the queue once every item is decided, refused or expired.'],
     grants: ['No active grants', 'Approved permissions appear here until they expire or you revoke them.'],
   }[tab]
@@ -758,9 +967,9 @@ function Dashboard({ client, session, onSignedOut }: { client: ApproverClient; s
       <main className="mx-auto max-w-[1100px] px-4 py-7 sm:px-6 sm:py-9 lg:px-8">
         <div className="mb-7 flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <p className="eyebrow text-zinc-500"><span className="size-1.5 rounded-full bg-brand-dark" />Agent session grants</p>
+            <p className="eyebrow text-zinc-500"><span className="size-1.5 rounded-full bg-brand-dark" />Requester grants</p>
             <h1 className="mt-3 text-3xl font-semibold tracking-[-0.04em] text-zinc-950 sm:text-4xl">Access requests</h1>
-            <p className="mt-2 text-sm leading-6 text-zinc-500">Decide each permission an agent session asks for. Approved grants expire on their own.</p>
+            <p className="mt-2 text-sm leading-6 text-zinc-500">Decide each permission a requester asks for. Approved grants expire on their own.</p>
           </div>
           <button type="button" onClick={() => restartStream(true)} disabled={refreshing} className="secondary-button self-start sm:self-auto">
             <RefreshIcon className={`size-4 ${refreshing ? 'animate-spin' : ''}`} />Refresh
@@ -832,6 +1041,11 @@ export default function App({ client = defaultClient }: { client?: ApproverClien
     client.getSession({})
       .then((response) => {
         if (!isActive()) return
+        // An OIDC callback reached with a live session has nothing left to complete.
+        if (isOidcCallback()) {
+          discardOidcLogin()
+          window.history.replaceState({}, '', '/')
+        }
         setAuth({ status: 'signed-in', session: { identity: response.identity } })
       })
       .catch((caught: unknown) => {

@@ -30,10 +30,12 @@ const (
 )
 
 var (
-	// ErrInvalidToken means OpenBao rejected the presented Session Token.
+	// ErrInvalidToken means OpenBao rejected the presented token.
 	ErrInvalidToken = errors.New("OpenBao token is invalid")
-	// ErrNotSession means the token does not belong to an Agent Session.
-	ErrNotSession = errors.New("token does not belong to an agent session")
+	// ErrNotRequester means the token matches no Requester Rule or has no entity.
+	ErrNotRequester = errors.New("token does not match any requester rule")
+	// ErrSelfApproval means an Approver tried to decide their own request.
+	ErrSelfApproval = errors.New("approvers cannot decide their own requests")
 	// ErrNotFound means the request or Grant does not exist for the caller.
 	ErrNotFound = errors.New("not found")
 	// ErrConflict means the item or Grant left the state a decision expects.
@@ -100,16 +102,33 @@ type Notifier interface {
 type Config struct {
 	Policy     Policy
 	PendingTTL time.Duration
-	// SessionTokenRole is the token role every Session Token is created with.
-	SessionTokenRole string
-	Logger           *slog.Logger
-	Now              func() time.Time
+	// Requesters decide which tokens may file Grant Requests; the first
+	// matching rule wins.
+	Requesters []RequesterRule
+	Logger     *slog.Logger
+	Now        func() time.Time
 }
 
-// Session is an authenticated Agent Session.
-type Session struct {
+// RequesterRule matches tokens by exactly one of TokenRole, the `role` from
+// lookup-self, or AuthMount, the auth mount the token was issued from.
+type RequesterRule struct {
+	Name      string
+	TokenRole string
+	AuthMount string
+}
+
+func (r RequesterRule) matches(identity openbao.Identity) bool {
+	if r.TokenRole != "" {
+		return identity.Role == r.TokenRole
+	}
+
+	return strings.HasPrefix(identity.Path, "auth/"+r.AuthMount+"/")
+}
+
+// Requester is an authenticated Requester.
+type Requester struct {
 	EntityID string
-	Display  store.SessionDisplay
+	Display  store.RequesterDisplay
 }
 
 // Decision is an Approver's verdict on one item.
@@ -160,40 +179,45 @@ func New(bao OpenBao, storage Store, notifier Notifier, config Config) *Service 
 	}
 }
 
-// Authenticate resolves a Session Token to its Agent Session. Only tokens
-// created through the session token role qualify: only the minter can use that
-// role, and it pins one entity alias per session, so human and machine tokens
-// are rejected without reading the entity.
-func (s *Service) Authenticate(ctx context.Context, token string) (Session, error) {
+// Authenticate resolves a token to its Requester. Only tokens with an entity
+// that match a Requester Rule qualify, so Grants always land on an identity
+// and human or machine tokens outside every rule are refused.
+func (s *Service) Authenticate(ctx context.Context, token string) (Requester, error) {
 	identity, err := s.bao.LookupSelf(ctx, token)
 	if err != nil {
 		var httpErr *openbao.HTTPError
 		if errors.As(err, &httpErr) && (httpErr.StatusCode == http.StatusForbidden || httpErr.StatusCode == http.StatusBadRequest || httpErr.StatusCode == http.StatusUnauthorized) {
-			return Session{}, ErrInvalidToken
+			return Requester{}, ErrInvalidToken
 		}
 
-		return Session{}, fmt.Errorf("look up session token: %w", err)
+		return Requester{}, fmt.Errorf("look up requester token: %w", err)
 	}
 
-	if identity.Role != s.config.SessionTokenRole || identity.EntityID == "" {
-		return Session{}, ErrNotSession
+	index := slices.IndexFunc(s.config.Requesters, func(rule RequesterRule) bool { return rule.matches(identity) })
+	if index < 0 || identity.EntityID == "" {
+		return Requester{}, ErrNotRequester
 	}
 
-	sessionID := sanitizeText(identity.Meta["session_id"], maxMetaLength)
-	if sessionID == "" {
-		sessionID = identity.EntityID
+	id := sanitizeText(identity.Meta["session_id"], maxMetaLength)
+	if id == "" {
+		id = sanitizeText(identity.DisplayName, maxMetaLength)
 	}
 
-	return Session{EntityID: identity.EntityID, Display: store.SessionDisplay{
-		ID:        sessionID,
+	if id == "" {
+		id = identity.EntityID
+	}
+
+	return Requester{EntityID: identity.EntityID, Display: store.RequesterDisplay{
+		ID:        id,
 		Title:     sanitizeText(identity.Meta["title"], maxMetaLength),
 		Directory: sanitizeText(identity.Meta["directory"], maxMetaLength),
+		Rule:      s.config.Requesters[index].Name,
 	}}, nil
 }
 
 // CreateRequest validates items and stores a Grant Request. token is the
-// requester's Session Token; it is used for capabilities-self and never stored.
-func (s *Service) CreateRequest(ctx context.Context, session Session, token, reason string, inputs []ItemInput) (store.GrantRequest, error) {
+// Requester's token; it is used for capabilities-self and never stored.
+func (s *Service) CreateRequest(ctx context.Context, requester Requester, token, reason string, inputs []ItemInput) (store.GrantRequest, error) {
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
 		return store.GrantRequest{}, invalid("reason is required")
@@ -278,7 +302,7 @@ func (s *Service) CreateRequest(ctx context.Context, session Session, token, rea
 	}
 
 	request := store.GrantRequest{
-		ID: requestID, EntityID: session.EntityID, Session: session.Display, Reason: reason,
+		ID: requestID, EntityID: requester.EntityID, Requester: requester.Display, Reason: reason,
 		CreatedAt: now, PendingUntil: now.Add(s.config.PendingTTL), Items: items,
 	}
 	if err := s.store.CreateGrantRequest(ctx, request); err != nil {
@@ -358,7 +382,9 @@ func (s *Service) Grants(ctx context.Context, entityID string) ([]store.Grant, e
 
 // Decide applies an Approver's decisions to items of one request, all or
 // nothing: approvals become blocks of the session policy, written once, and
-// every decision is stored in one transaction.
+// every decision is stored in one transaction. An Approver never decides a
+// request filed by their own entity, since that would let them grant
+// themselves access.
 func (s *Service) Decide(ctx context.Context, approver store.Approver, requestID string, decisions []Decision) (store.GrantRequest, error) {
 	if len(decisions) == 0 {
 		return store.GrantRequest{}, invalid("at least one decision is required")
@@ -371,6 +397,10 @@ func (s *Service) Decide(ctx context.Context, approver store.Approver, requestID
 
 	if err != nil {
 		return store.GrantRequest{}, err
+	}
+
+	if request.EntityID == approver.EntityID {
+		return store.GrantRequest{}, ErrSelfApproval
 	}
 
 	unlock := s.lockSession(request.EntityID)
@@ -449,7 +479,7 @@ func (s *Service) decide(ctx context.Context, approver store.Approver, requestID
 		item.State, item.DecidedBy, item.GrantID, item.GrantExpires = store.ItemApproved, approver, grantID, expiresAt
 		grants = append(grants, store.Grant{
 			ID: grantID, RequestID: request.ID, ItemID: item.ID, EntityID: request.EntityID, Path: item.Path, Capabilities: item.Capabilities,
-			Session: request.Session, CreatedAt: now, ExpiresAt: expiresAt, ApprovedBy: approver.Name,
+			Requester: request.Requester, CreatedAt: now, ExpiresAt: expiresAt, ApprovedBy: approver.Name,
 		})
 	}
 

@@ -44,14 +44,16 @@ type Entity struct {
 
 // Identity is the authenticated identity associated with a token.
 type Identity struct {
-	EntityID         string            `json:"entity_id"`
-	DisplayName      string            `json:"display_name"`
-	Policies         []string          `json:"policies"`
-	TokenPolicies    []string          `json:"token_policies"`
-	IdentityPolicies []string          `json:"identity_policies"`
-	TTL              int               `json:"ttl"`
-	Role             string            `json:"role"`
-	Meta             map[string]string `json:"meta"`
+	EntityID         string   `json:"entity_id"`
+	DisplayName      string   `json:"display_name"`
+	Policies         []string `json:"policies"`
+	TokenPolicies    []string `json:"token_policies"`
+	IdentityPolicies []string `json:"identity_policies"`
+	TTL              int      `json:"ttl"`
+	Role             string   `json:"role"`
+	// Path is the login path the token was issued from, e.g. auth/approle/login.
+	Path string            `json:"path"`
+	Meta map[string]string `json:"meta"`
 }
 
 // HasPolicy reports whether the token or its identity grants policy.
@@ -107,33 +109,9 @@ func New(config Config) (*Client, error) {
 	}, nil
 }
 
-// LoginUserpass exchanges an operator username and password for a human token.
-// The password is sent only to OpenBao and is never retained by the client.
-func (c *Client) LoginUserpass(ctx context.Context, username, password string) (string, error) {
-	if username == "" || strings.ContainsAny(username, "/\\") {
-		return "", errors.New("invalid OpenBao username")
-	}
-
-	var envelope struct {
-		Auth struct {
-			ClientToken string `json:"client_token"`
-		} `json:"auth"`
-	}
-	path := "/v1/auth/userpass/login/" + url.PathEscape(username)
-	if err := c.call(ctx, http.MethodPost, path, "", map[string]string{"password": password}, &envelope, ""); err != nil {
-		return "", err
-	}
-
-	if envelope.Auth.ClientToken == "" {
-		return "", errors.New("OpenBao userpass login returned no token")
-	}
-
-	return envelope.Auth.ClientToken, nil
-}
-
-// RevokeSelf revokes a human token once login has identified its caller.
+// RevokeSelf revokes a human token once its approver session exists.
 func (c *Client) RevokeSelf(ctx context.Context, token string) error {
-	return c.call(ctx, http.MethodPost, "/v1/auth/token/revoke-self", token, map[string]string{}, nil, "")
+	return c.call(ctx, http.MethodPost, "/v1/auth/token/revoke-self", token, map[string]string{}, nil)
 }
 
 // ReadEntity reads an identity entity with the authorizer token.
@@ -141,7 +119,7 @@ func (c *Client) ReadEntity(ctx context.Context, id string) (Entity, error) {
 	var envelope struct {
 		Data *Entity `json:"data"`
 	}
-	if err := c.call(ctx, http.MethodGet, "/v1/identity/entity/id/"+url.PathEscape(id), c.token, nil, &envelope, ""); err != nil {
+	if err := c.call(ctx, http.MethodGet, "/v1/identity/entity/id/"+url.PathEscape(id), c.token, nil, &envelope); err != nil {
 		return Entity{}, err
 	}
 
@@ -156,18 +134,18 @@ func (c *Client) ReadEntity(ctx context.Context, id string) (Entity, error) {
 func (c *Client) SetEntityPolicies(ctx context.Context, id string, policies []string) error {
 	// A non-nil slice so an empty list encodes as [] and detaches every policy.
 	payload := map[string][]string{"policies": append([]string{}, policies...)}
-	return c.call(ctx, http.MethodPost, "/v1/identity/entity/id/"+url.PathEscape(id), c.token, payload, nil, "")
+	return c.call(ctx, http.MethodPost, "/v1/identity/entity/id/"+url.PathEscape(id), c.token, payload, nil)
 }
 
 // WritePolicy creates or replaces an ACL policy that OpenBao drops at expiration.
 func (c *Client) WritePolicy(ctx context.Context, name, policy string, expiration time.Time) error {
 	payload := map[string]string{"policy": policy, "expiration": expiration.UTC().Format(time.RFC3339)}
-	return c.call(ctx, http.MethodPost, "/v1/sys/policies/acl/"+url.PathEscape(name), c.token, payload, nil, "")
+	return c.call(ctx, http.MethodPost, "/v1/sys/policies/acl/"+url.PathEscape(name), c.token, payload, nil)
 }
 
 // DeletePolicy deletes an ACL policy; a missing policy is not an error.
 func (c *Client) DeletePolicy(ctx context.Context, name string) error {
-	err := c.call(ctx, http.MethodDelete, "/v1/sys/policies/acl/"+url.PathEscape(name), c.token, nil, nil, "")
+	err := c.call(ctx, http.MethodDelete, "/v1/sys/policies/acl/"+url.PathEscape(name), c.token, nil, nil)
 	var httpErr *HTTPError
 	if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
 		return nil
@@ -182,7 +160,7 @@ func (c *Client) CapabilitiesSelf(ctx context.Context, token string, paths []str
 	var envelope struct {
 		Data map[string]json.RawMessage `json:"data"`
 	}
-	if err := c.call(ctx, http.MethodPost, "/v1/sys/capabilities-self", token, map[string][]string{"paths": paths}, &envelope, ""); err != nil {
+	if err := c.call(ctx, http.MethodPost, "/v1/sys/capabilities-self", token, map[string][]string{"paths": paths}, &envelope); err != nil {
 		return nil, err
 	}
 
@@ -209,14 +187,14 @@ func (c *Client) LookupSelf(ctx context.Context, token string) (Identity, error)
 	var envelope struct {
 		Data Identity `json:"data"`
 	}
-	if err := c.call(ctx, http.MethodGet, "/v1/auth/token/lookup-self", token, nil, &envelope, ""); err != nil {
+	if err := c.call(ctx, http.MethodGet, "/v1/auth/token/lookup-self", token, nil, &envelope); err != nil {
 		return Identity{}, err
 	}
 
 	return envelope.Data, nil
 }
 
-func (c *Client) call(ctx context.Context, method, path, token string, payload, output any, methodOverride string) error {
+func (c *Client) call(ctx context.Context, method, path, token string, payload, output any) error {
 	var body io.Reader
 	if payload != nil {
 		encoded, err := json.Marshal(payload)
@@ -231,10 +209,6 @@ func (c *Client) call(ctx context.Context, method, path, token string, payload, 
 	req, err := http.NewRequestWithContext(ctx, method, endpoint.String(), body)
 	if err != nil {
 		return fmt.Errorf("create OpenBao request: %w", err)
-	}
-
-	if methodOverride != "" {
-		req.Method = methodOverride
 	}
 
 	req.Header.Set("Accept", "application/json")

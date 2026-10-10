@@ -144,46 +144,6 @@ func TestGrantWritesUseAuthorizerToken(t *testing.T) {
 	}
 }
 
-func TestLoginUserpassExchangesPasswordForToken(t *testing.T) {
-	t.Parallel()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/auth/userpass/login/bob" || r.Method != http.MethodPost {
-			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
-		}
-
-		if got := r.Header.Get("X-Vault-Token"); got != "" {
-			t.Fatalf("unexpected token header %q", got)
-		}
-
-		var payload map[string]string
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			t.Fatal(err)
-		}
-
-		if payload["password"] != "correct horse" {
-			t.Fatalf("password = %q", payload["password"])
-		}
-
-		_, _ = w.Write([]byte(`{"auth":{"client_token":"human-token","renewable":true,"lease_duration":86400}}`))
-	}))
-	defer server.Close()
-
-	client, err := New(Config{Address: server.URL, HTTPClient: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	token, err := client.LoginUserpass(t.Context(), "bob", "correct horse")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if token != "human-token" {
-		t.Fatalf("token = %q", token)
-	}
-}
-
 func TestRevokeSelfUsesHumanToken(t *testing.T) {
 	t.Parallel()
 

@@ -1,4 +1,4 @@
-//go:build e2e && linux
+//go:build e2e
 
 package e2e
 
@@ -38,6 +38,8 @@ const (
 	minterPolicy     = "opencode-minter"
 	tokenRole        = "opencode-session"
 	aliasPrefix      = "opencode-session-"
+	ciRole           = "ci"
+	selfRole         = "self-approver"
 )
 
 // Exit codes documented by bao-cred.
@@ -125,7 +127,7 @@ func TestSessionGrantWorkflow(t *testing.T) {
 	mustCall(t, ctx, bao, rootToken, http.MethodPost, "sys/mounts/kv", map[string]any{
 		"type": "kv", "options": map[string]string{"version": "2"},
 	}, http.StatusOK, http.StatusNoContent)
-	for _, name := range []string{"alpha", "beta", "gamma", "delta", "epsilon"} {
+	for _, name := range []string{"alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta"} {
 		mustCall(t, ctx, bao, rootToken, http.MethodPost, "kv/data/e2e/"+name, map[string]any{
 			"data": map[string]string{"value": "secret-" + name},
 		}, http.StatusOK)
@@ -142,6 +144,12 @@ func TestSessionGrantWorkflow(t *testing.T) {
 	mustCall(t, ctx, bao, rootToken, http.MethodPost, "sys/auth/approle", map[string]string{"type": "approle"}, http.StatusOK, http.StatusNoContent)
 	mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/approle/role/opencode-minter", map[string]any{
 		"token_policies": []string{minterPolicy}, "token_ttl": "15m",
+	}, http.StatusOK, http.StatusNoContent)
+	// AppRole logins match the "ci" Requester Rule: one role is a plain CI
+	// identity, the other also holds the approver policy.
+	mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/approle/role/"+ciRole, map[string]any{"token_ttl": "15m"}, http.StatusOK, http.StatusNoContent)
+	mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/approle/role/"+selfRole, map[string]any{
+		"token_policies": []string{approverPolicy}, "token_ttl": "15m",
 	}, http.StatusOK, http.StatusNoContent)
 	roleIDFile := filepath.Join(runtimeDirectory, "minter-role-id")
 	secretIDFile := filepath.Join(runtimeDirectory, "minter-secret-id")
@@ -184,7 +192,17 @@ openbao {
   address               = %q
   authorizer_token_file = %q
   approver_policy       = %q
-  session_token_role    = %q
+}
+approver_login {
+  openbao_address = %q
+  method "token" {}
+  method "userpass" {}
+}
+requester "opencode" {
+  token_role = %q
+}
+requester "ci" {
+  auth_mount = "approle"
 }
 grants {
   default_ttl = "1h"
@@ -195,7 +213,7 @@ grantable "e2e-kv" {
   capabilities = ["read"]
   max_ttl      = "2h"
 }
-`, staticDirectory, filepath.Join(runtimeDirectory, "app.db"), encryptionKeyFile, baoAddress, authorizerTokenFile, approverPolicy, tokenRole)
+`, staticDirectory, filepath.Join(runtimeDirectory, "app.db"), encryptionKeyFile, baoAddress, authorizerTokenFile, approverPolicy, baoAddress, tokenRole)
 	writeSecretFile(t, appConfig, configuration)
 
 	appLog := filepath.Join(runtimeDirectory, "app.log")
@@ -212,19 +230,34 @@ grantable "e2e-kv" {
 		t.Fatalf("wait for application listener: %v\n%s", err, readProcessLog(appLog))
 	}
 
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		t.Fatalf("create cookie jar: %v", err)
-	}
-
 	application := &liveAPI{
 		baseURL: fmt.Sprintf("http://127.0.0.1:%d", appPort),
-		client:  &http.Client{Timeout: 15 * time.Second, Jar: jar},
+		client:  &http.Client{Timeout: 15 * time.Second},
 		process: appProcess,
 		port:    appPort,
 	}
 	mustCall(t, ctx, application, "", http.MethodGet, "healthz", nil, http.StatusOK)
-	approver := newApproverClient(ctx, t, application)
+
+	// The PWA calls OpenBao directly, so OpenBao must allow its origin.
+	mustCall(t, ctx, bao, rootToken, http.MethodPut, "sys/config/cors", map[string]any{
+		"enabled": true, "allowed_origins": []string{application.baseURL},
+		"allowed_headers": []string{"X-Vault-Token", "X-Vault-Namespace", "X-Vault-Request", "Content-Type"},
+	}, http.StatusOK, http.StatusNoContent)
+	if allowed := corsPreflight(ctx, t, bao, "auth/userpass/login/approver", application.baseURL); allowed != application.baseURL {
+		t.Fatalf("OpenBao CORS preflight allowed origin %q, want %q", allowed, application.baseURL)
+	}
+
+	options, err := newApproverRPC(application).GetLoginOptions(ctx, connect.NewRequest(&authorizerv1.GetLoginOptionsRequest{}))
+	if err != nil || options.Msg.GetOpenbaoAddress() != baoAddress || len(options.Msg.GetMethods()) != 2 || options.Msg.GetMethods()[1].GetMount() != "userpass" {
+		t.Fatalf("login options = %v, %v", options, err)
+	}
+
+	// The approver signs in to OpenBao itself, as the PWA does, and hands
+	// the token over once; the authorizer revokes it.
+	approverToken := responseAuthToken(t, mustCall(t, ctx, bao, "", http.MethodPost, "auth/userpass/login/approver", map[string]string{"password": approverPassword}, http.StatusOK))
+	approver := newApproverClient(ctx, t, application, approverToken)
+	mustCall(t, ctx, bao, approverToken, http.MethodGet, "auth/token/lookup-self", nil, http.StatusForbidden)
+	t.Log("OpenBao allows the PWA origin; the approver's userpass token became an app session and was revoked")
 
 	mint := sessionMinter{
 		bun:     bunBinary,
@@ -248,15 +281,15 @@ grantable "e2e-kv" {
 	// A batch where the approver approves one item and rejects another, and the
 	// authorizer refuses two before anyone sees them.
 	batch := cred.start(ctx, sessionA.Token,
-		"request", "-reason", "e2e: deploy needs alpha and beta",
-		"-item", "kv/data/e2e/alpha=read",
-		"-item", "kv/data/e2e/beta=read",
-		"-item", "kv/data/outside/rules=read",
-		"-item", "sys/policies/acl/agent-grant-x=read",
-		"-timeout", "2m",
+		"request", "--reason", "e2e: deploy needs alpha and beta",
+		"--item", "kv/data/e2e/alpha=read",
+		"--item", "kv/data/e2e/beta=read",
+		"--item", "kv/data/outside/rules=read",
+		"--item", "sys/policies/acl/agent-grant-x=read",
+		"--timeout", "2m",
 	)
 	pending := approver.waitForPending(ctx, t, "kv/data/e2e/alpha", "kv/data/e2e/beta")
-	if pending.GetReason() != "e2e: deploy needs alpha and beta" || pending.GetSession().GetId() != "e2e-session-a" || pending.GetSession().GetTitle() != "E2E session A" {
+	if requester := pending.GetRequester(); pending.GetReason() != "e2e: deploy needs alpha and beta" || requester.GetId() != "e2e-session-a" || requester.GetTitle() != "E2E session A" || requester.GetRule() != "opencode" {
 		t.Fatalf("approver view of the request = %+v", pending)
 	}
 
@@ -281,7 +314,7 @@ grantable "e2e-kv" {
 
 	assertRead(ctx, t, bao, sessionA.Token, "alpha", http.StatusOK)
 	assertRead(ctx, t, bao, sessionA.Token, "beta", http.StatusForbidden)
-	read := cred.run(ctx, t, sessionA.Token, "-field", "data.value", "kv/data/e2e/alpha")
+	read := cred.run(ctx, t, sessionA.Token, "read", "--field", "data.value", "kv/data/e2e/alpha")
 	if read.exitCode != 0 || read.stdout != "secret-alpha" {
 		t.Fatalf("bao-cred read = %+v", read)
 	}
@@ -300,7 +333,7 @@ grantable "e2e-kv" {
 	t.Log("approved item works for session A's existing token through its one session policy; rejected and refused items do not")
 
 	// Asking again for something OpenBao already allows needs no approver.
-	repeat := cred.run(ctx, t, sessionA.Token, "request", "-reason", "e2e: again", "-item", "kv/data/e2e/alpha=read", "-timeout", "30s")
+	repeat := cred.run(ctx, t, sessionA.Token, "request", "--reason", "e2e: again", "--item", "kv/data/e2e/alpha=read", "--timeout", "30s")
 	if repeat.exitCode != 0 || itemStates(t, repeat.stdout)["kv/data/e2e/alpha"] != "already_granted" {
 		t.Fatalf("repeated request = %+v", repeat)
 	}
@@ -310,20 +343,20 @@ grantable "e2e-kv" {
 	}
 
 	// A request filed without waiting can be resumed by its ID.
-	filed := cred.run(ctx, t, sessionA.Token, "request", "-reason", "e2e: gamma", "-item", "kv/data/e2e/gamma=read", "-no-wait")
+	filed := cred.run(ctx, t, sessionA.Token, "request", "--reason", "e2e: gamma", "--item", "kv/data/e2e/gamma=read", "--no-wait")
 	if filed.exitCode != exitPending {
 		t.Fatalf("no-wait request = %+v", filed)
 	}
 
 	gamma := approver.waitForPending(ctx, t, "kv/data/e2e/gamma")
 	approver.decide(ctx, t, gamma, map[string]authorizerv1.Decision{"kv/data/e2e/gamma": authorizerv1.Decision_DECISION_APPROVE}, nil)
-	resumed := cred.run(ctx, t, sessionA.Token, "request", "-wait", requestID(t, filed.stdout), "-timeout", "30s")
+	resumed := cred.run(ctx, t, sessionA.Token, "request", "--wait", requestID(t, filed.stdout), "--timeout", "30s")
 	if resumed.exitCode != 0 || itemStates(t, resumed.stdout)["kv/data/e2e/gamma"] != "approved" {
 		t.Fatalf("resumed wait = %+v", resumed)
 	}
 
 	assertRead(ctx, t, bao, sessionA.Token, "gamma", http.StatusOK)
-	t.Log("already-granted items skip approval; a request filed with -no-wait resumes with -wait")
+	t.Log("already-granted items skip approval; a request filed with --no-wait resumes with --wait")
 
 	// Grants belong to the session, not to other sessions; subagents share their root's grants.
 	sessionB := mint.mint(ctx, t, "e2e-session-b", "E2E session B")
@@ -342,7 +375,7 @@ grantable "e2e-kv" {
 
 	// A short-lived Grant's block lapses through OpenBao's own expiration while
 	// the other blocks of the session policy keep working.
-	short := cred.start(ctx, sessionA.Token, "request", "-reason", "e2e: brief delta", "-item", "kv/data/e2e/delta=read", "-ttl", "5s", "-timeout", "2m")
+	short := cred.start(ctx, sessionA.Token, "request", "--reason", "e2e: brief delta", "--item", "kv/data/e2e/delta=read", "--ttl", "5s", "--timeout", "2m")
 	delta := approver.waitForPending(ctx, t, "kv/data/e2e/delta")
 	approver.decide(ctx, t, delta, map[string]authorizerv1.Decision{"kv/data/e2e/delta": authorizerv1.Decision_DECISION_APPROVE}, nil)
 	if result := short.wait(t); result.exitCode != 0 {
@@ -356,25 +389,25 @@ grantable "e2e-kv" {
 
 	// Revoking a Grant takes effect immediately.
 	grantID := approver.activeGrant(ctx, t, "e2e-session-a", "kv/data/e2e/gamma")
-	if _, err := approver.rpc.RevokeGrant(ctx, connect.NewRequest(&authorizerv1.RevokeGrantRequest{GrantId: grantID})); err != nil {
-		t.Fatalf("revoke Grant: %v", err)
+	if _, revokeErr := approver.rpc.RevokeGrant(ctx, connect.NewRequest(&authorizerv1.RevokeGrantRequest{GrantId: grantID})); revokeErr != nil {
+		t.Fatalf("revoke Grant: %v", revokeErr)
 	}
 
 	assertRead(ctx, t, bao, sessionA.Token, "gamma", http.StatusForbidden)
 	assertRead(ctx, t, bao, sessionA.Token, "alpha", http.StatusOK)
 	t.Log("revoking one Grant removed only that access")
 
-	// A read with -reason files a request on permission denied and retries after approval.
-	autoRead := cred.start(ctx, sessionA.Token, "-reason", "e2e: read epsilon", "-field", "data.value", "-timeout", "2m", "kv/data/e2e/epsilon")
+	// A read with --reason files a request on permission denied and retries after approval.
+	autoRead := cred.start(ctx, sessionA.Token, "read", "--reason", "e2e: read epsilon", "--field", "data.value", "--timeout", "2m", "kv/data/e2e/epsilon")
 	epsilon := approver.waitForPending(ctx, t, "kv/data/e2e/epsilon")
 	approver.decide(ctx, t, epsilon, map[string]authorizerv1.Decision{"kv/data/e2e/epsilon": authorizerv1.Decision_DECISION_APPROVE}, nil)
 	if result := autoRead.wait(t); result.exitCode != 0 || result.stdout != "secret-epsilon" {
 		t.Fatalf("auto-requesting read = %+v", result)
 	}
 
-	withoutReason := cred.run(ctx, t, sessionB.Token, "kv/data/e2e/epsilon")
-	if withoutReason.exitCode != 1 || !strings.Contains(withoutReason.stderr, "-reason") {
-		t.Fatalf("denied read without -reason = %+v", withoutReason)
+	withoutReason := cred.run(ctx, t, sessionB.Token, "read", "kv/data/e2e/epsilon")
+	if withoutReason.exitCode != 1 || !strings.Contains(withoutReason.stderr, "--reason") {
+		t.Fatalf("denied read without --reason = %+v", withoutReason)
 	}
 
 	grants := cred.run(ctx, t, sessionA.Token, "grants")
@@ -382,24 +415,55 @@ grantable "e2e-kv" {
 		t.Fatalf("bao-cred grants = %+v", grants)
 	}
 
-	t.Log("bao-cred -reason requested access on denial and read the secret after approval")
+	t.Log("bao-cred read --reason requested access on denial and read the secret after approval")
 
-	// Only Session Identities may request Grants, and the authorizer token can
-	// change nothing on an entity except its policies.
+	// Only tokens matching a Requester Rule may request Grants.
 	humanToken := responseAuthToken(t, mustCall(t, ctx, bao, "", http.MethodPost, "auth/userpass/login/approver", map[string]string{"password": approverPassword}, http.StatusOK))
-	agent := authorizerv1connect.NewAgentServiceClient(application.rpcHTTPClient(), application.baseURL+"/api")
-	humanRequest := connect.NewRequest(&authorizerv1.CreateGrantRequestRequest{
-		Reason: "human", Items: []*authorizerv1.PermissionItemInput{{Path: "kv/data/e2e/alpha", Capabilities: []string{"read"}}},
-	})
-	humanRequest.Header().Set("Authorization", "Bearer "+humanToken)
-	if _, err := agent.CreateGrantRequest(ctx, humanRequest); connect.CodeOf(err) != connect.CodePermissionDenied {
-		t.Fatalf("human token on the Agent API: %v, want permission_denied", err)
+	grantAPI := authorizerv1connect.NewGrantServiceClient(application.rpcHTTPClient(), application.baseURL+"/api")
+	if _, err = grantAPI.CreateGrantRequest(ctx, grantRequest(humanToken, "human", "kv/data/e2e/alpha")); errorReason(err) != "NOT_REQUESTER" {
+		t.Fatalf("approver token on the Grant API: %v, want NOT_REQUESTER", err)
 	}
+
+	// An AppRole login matches the "ci" Requester Rule and gets its own Grant.
+	ciToken := appRoleLogin(ctx, t, bao, ciRole)
+	if _, err = grantAPI.CreateGrantRequest(ctx, grantRequest(ciToken, "e2e: ci needs zeta", "kv/data/e2e/zeta")); err != nil {
+		t.Fatalf("AppRole grant request: %v", err)
+	}
+
+	zeta := approver.waitForPending(ctx, t, "kv/data/e2e/zeta")
+	if rule := zeta.GetRequester().GetRule(); rule != "ci" {
+		t.Fatalf("AppRole request matched rule %q, want ci", rule)
+	}
+
+	approver.decide(ctx, t, zeta, map[string]authorizerv1.Decision{"kv/data/e2e/zeta": authorizerv1.Decision_DECISION_APPROVE}, nil)
+	assertRead(ctx, t, bao, ciToken, "zeta", http.StatusOK)
+	assertRead(ctx, t, bao, sessionA.Token, "zeta", http.StatusForbidden)
+
+	// An identity that is both Requester and Approver can't decide its own request.
+	selfToken := appRoleLogin(ctx, t, bao, selfRole)
+	selfRequest, err := grantAPI.CreateGrantRequest(ctx, grantRequest(selfToken, "e2e: self", "kv/data/e2e/eta"))
+	if err != nil {
+		t.Fatalf("self-approver grant request: %v", err)
+	}
+
+	selfApprover := newApproverClient(ctx, t, application, selfToken)
+	item := selfRequest.Msg.GetGrantRequest().GetItems()[0]
+	_, err = selfApprover.rpc.DecideItems(ctx, connect.NewRequest(&authorizerv1.DecideItemsRequest{
+		GrantRequestId: selfRequest.Msg.GetGrantRequest().GetId(),
+		Decisions:      []*authorizerv1.ItemDecision{{ItemId: item.GetId(), Decision: authorizerv1.Decision_DECISION_APPROVE}},
+	}))
+	if errorReason(err) != "SELF_APPROVAL" {
+		t.Fatalf("self-approval: %v, want SELF_APPROVAL", err)
+	}
+
+	t.Log("approver tokens are refused by the Grant API; an AppRole Requester got a Grant; self-approval is refused")
+
+	// The authorizer token can change nothing on an entity except its policies.
 
 	mustCall(t, ctx, bao, authorizerToken, http.MethodPost, "identity/entity/id/"+sessionA.EntityID, map[string]any{"name": "renamed"}, http.StatusForbidden)
 	mustCall(t, ctx, bao, authorizerToken, http.MethodPost, "identity/entity/id/"+sessionA.EntityID, map[string]any{"disabled": true}, http.StatusForbidden)
 	mustCall(t, ctx, bao, authorizerToken, http.MethodPost, "sys/policies/acl/not-a-grant", map[string]string{"policy": "path \"kv/*\" { capabilities = [\"read\"] }"}, http.StatusForbidden)
-	t.Log("human tokens are refused by the Agent API; the authorizer token cannot rename or disable entities or write other policies")
+	t.Log("the authorizer token cannot rename or disable entities or write other policies")
 
 	t.Log("real OpenBao session-grant workflow passed")
 }
@@ -537,14 +601,56 @@ type approverClient struct {
 	rpc authorizerv1connect.ApproverServiceClient
 }
 
-func newApproverClient(ctx context.Context, t *testing.T, application *liveAPI) *approverClient {
+// newApproverRPC returns an Approver API client with its own cookie jar, so
+// each client is a separate browser session.
+func newApproverRPC(application *liveAPI) authorizerv1connect.ApproverServiceClient {
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar, Transport: ownedTransport{api: application}}
+	return authorizerv1connect.NewApproverServiceClient(client, application.baseURL+"/api")
+}
+
+// newApproverClient exchanges an OpenBao token for an app session.
+func newApproverClient(ctx context.Context, t *testing.T, application *liveAPI, openBaoToken string) *approverClient {
 	t.Helper()
-	client := &approverClient{rpc: authorizerv1connect.NewApproverServiceClient(application.rpcHTTPClient(), application.baseURL+"/api")}
-	if _, err := client.rpc.Login(ctx, connect.NewRequest(&authorizerv1.LoginRequest{Username: "approver", Password: approverPassword})); err != nil {
-		t.Fatalf("approver login: %v", err)
+	client := &approverClient{rpc: newApproverRPC(application)}
+	if _, err := client.rpc.CreateSession(ctx, connect.NewRequest(&authorizerv1.CreateSessionRequest{OpenbaoToken: openBaoToken})); err != nil {
+		t.Fatalf("approver session: %v", err)
 	}
 
 	return client
+}
+
+func grantRequest(token, reason, path string) *connect.Request[authorizerv1.CreateGrantRequestRequest] {
+	request := connect.NewRequest(&authorizerv1.CreateGrantRequestRequest{
+		Reason: reason, Items: []*authorizerv1.PermissionItemInput{{Path: path, Capabilities: []string{"read"}}},
+	})
+	request.Header().Set("Authorization", "Bearer "+token)
+	return request
+}
+
+// errorReason returns the ErrorDetail reason of an RPC error.
+func errorReason(err error) string {
+	connectErr, ok := errors.AsType[*connect.Error](err)
+	if !ok {
+		return ""
+	}
+
+	for _, detail := range connectErr.Details() {
+		if value, valueErr := detail.Value(); valueErr == nil {
+			if errorDetail, ok := value.(*authorizerv1.ErrorDetail); ok {
+				return errorDetail.GetReason()
+			}
+		}
+	}
+
+	return ""
+}
+
+func appRoleLogin(ctx context.Context, t *testing.T, bao *liveAPI, role string) string {
+	t.Helper()
+	roleID := responseString(t, mustCall(t, ctx, bao, rootToken, http.MethodGet, "auth/approle/role/"+role+"/role-id", nil, http.StatusOK), "role_id")
+	secretID := responseString(t, mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/approle/role/"+role+"/secret-id", map[string]any{}, http.StatusOK), "secret_id")
+	return responseAuthToken(t, mustCall(t, ctx, bao, "", http.MethodPost, "auth/approle/login", map[string]string{"role_id": roleID, "secret_id": secretID}, http.StatusOK))
 }
 
 func (a *approverClient) list(ctx context.Context, t *testing.T, filter authorizerv1.GrantRequestFilter) []*authorizerv1.GrantRequest {
@@ -616,7 +722,7 @@ func (a *approverClient) activeGrant(ctx context.Context, t *testing.T, sessionI
 	}
 
 	for _, grant := range response.Msg.GetGrants() {
-		if grant.GetPath() == path && grant.GetSession().GetId() == sessionID {
+		if grant.GetPath() == path && grant.GetRequester().GetId() == sessionID {
 			return grant.GetId()
 		}
 	}
@@ -627,7 +733,7 @@ func (a *approverClient) activeGrant(ctx context.Context, t *testing.T, sessionI
 
 // rpcHTTPClient checks listener ownership around every RPC, like callAPI does.
 func (api *liveAPI) rpcHTTPClient() *http.Client {
-	return &http.Client{Jar: api.client.Jar, Transport: ownedTransport{api: api}}
+	return &http.Client{Transport: ownedTransport{api: api}}
 }
 
 type ownedTransport struct {
@@ -817,6 +923,27 @@ func mustCallWithHeaders(t *testing.T, ctx context.Context, api *liveAPI, token,
 	}
 
 	return body
+}
+
+// corsPreflight sends the preflight a browser on origin sends before a JSON
+// POST to path, and returns the origin OpenBao allows.
+func corsPreflight(ctx context.Context, t *testing.T, api *liveAPI, path, origin string) string {
+	t.Helper()
+	request, err := http.NewRequestWithContext(ctx, http.MethodOptions, api.baseURL+"/"+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request.Header.Set("Origin", origin)
+	request.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	request.Header.Set("Access-Control-Request-Headers", "content-type,x-vault-request")
+	response, err := api.rpcHTTPClient().Do(request)
+	if err != nil {
+		t.Fatalf("CORS preflight: %v", err)
+	}
+
+	_ = response.Body.Close()
+	return response.Header.Get("Access-Control-Allow-Origin")
 }
 
 func callAPI(ctx context.Context, api *liveAPI, token, method, path string, payload any, headers map[string]string) ([]byte, int, error) {

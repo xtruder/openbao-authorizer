@@ -1,4 +1,4 @@
-package httpapi
+package api
 
 import (
 	"context"
@@ -44,48 +44,48 @@ func (authorize authInterceptor) WrapStreamingHandler(next connect.StreamingHand
 	}
 }
 
-type agentSession struct {
-	grants.Session
+type requesterCaller struct {
+	grants.Requester
 
 	token string
 }
 
-type agentSessionKey struct{}
+type requesterKey struct{}
 
-func agentFrom(ctx context.Context) agentSession {
-	value, _ := ctx.Value(agentSessionKey{}).(agentSession)
+func requesterFrom(ctx context.Context) requesterCaller {
+	value, _ := ctx.Value(requesterKey{}).(requesterCaller)
 	return value
 }
 
-// authorizeAgent accepts only a bearer Session Token. Agent RPCs use no
+// authorizeRequester accepts only a bearer OpenBao token. Grant RPCs use no
 // cookies, so browsers cannot be tricked into sending the credential.
-func (s *server) authorizeAgent(ctx context.Context, _ string, header http.Header) (context.Context, error) {
+func (s *server) authorizeRequester(ctx context.Context, _ string, header http.Header) (context.Context, error) {
 	scheme, token, found := strings.Cut(header.Get("Authorization"), " ")
 	token = strings.TrimSpace(token)
 	if !found || !strings.EqualFold(scheme, "Bearer") || token == "" {
-		return nil, bearerChallenge(apiError(connect.CodeUnauthenticated, reasonInvalidToken, "a bearer session token is required"))
+		return nil, bearerChallenge(apiError(connect.CodeUnauthenticated, reasonInvalidToken, "a bearer OpenBao token is required"))
 	}
 
-	session, err := s.authenticateAgent(ctx, token)
+	requester, err := s.authenticateRequester(ctx, token)
 	if err != nil {
 		return nil, err
 	}
 
-	return context.WithValue(ctx, agentSessionKey{}, agentSession{Session: session, token: token}), nil
+	return context.WithValue(ctx, requesterKey{}, requesterCaller{Requester: requester, token: token}), nil
 }
 
-func (s *server) authenticateAgent(ctx context.Context, token string) (grants.Session, error) {
-	session, err := s.grants.Authenticate(ctx, token)
+func (s *server) authenticateRequester(ctx context.Context, token string) (grants.Requester, error) {
+	requester, err := s.grants.Authenticate(ctx, token)
 	switch {
 	case errors.Is(err, grants.ErrInvalidToken):
-		return grants.Session{}, bearerChallenge(apiError(connect.CodeUnauthenticated, reasonInvalidToken, err.Error()))
-	case errors.Is(err, grants.ErrNotSession):
-		return grants.Session{}, apiError(connect.CodePermissionDenied, reasonNotSessionIdentity, err.Error())
+		return grants.Requester{}, bearerChallenge(apiError(connect.CodeUnauthenticated, reasonInvalidToken, err.Error()))
+	case errors.Is(err, grants.ErrNotRequester):
+		return grants.Requester{}, apiError(connect.CodePermissionDenied, reasonNotRequester, err.Error())
 	case err != nil:
-		return grants.Session{}, s.openBaoUnavailable("session lookup", err)
+		return grants.Requester{}, s.openBaoUnavailable("requester lookup", err)
 	}
 
-	return session, nil
+	return requester, nil
 }
 
 // streamHeaders keeps reverse proxies such as nginx from buffering server
@@ -119,7 +119,7 @@ func approverFrom(ctx context.Context) store.Session {
 }
 
 // authorizeApprover requires a same-origin request on every approver RPC and,
-// except for Login, a live session cookie. Streams are covered too, so a
+// except for GetLoginOptions and CreateSession, a live session cookie. Streams are covered too, so a
 // cross-site page cannot read dashboard snapshots. No CSRF token is needed:
 // the cookie is SameSite=Strict, Connect's content types force a CORS
 // preflight that is never granted, and the origin check rejects sibling sites.
@@ -128,7 +128,7 @@ func (s *server) authorizeApprover(ctx context.Context, procedure string, header
 		return nil, err
 	}
 
-	if procedure == authorizerv1connect.ApproverServiceLoginProcedure {
+	if procedure == authorizerv1connect.ApproverServiceGetLoginOptionsProcedure || procedure == authorizerv1connect.ApproverServiceCreateSessionProcedure {
 		return ctx, nil
 	}
 

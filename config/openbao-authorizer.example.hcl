@@ -17,8 +17,37 @@ openbao {
   ca_file               = "/etc/ssl/certs/organization-openbao-ca.pem"
   authorizer_token_file = "/run/secrets/openbao-authorizer-token"
   approver_policy       = "openbao-authorizer-approver"
-  # Only tokens created through this token role are accepted as Session Tokens.
-  session_token_role = "opencode-session"
+}
+
+# Approvers sign in to OpenBao from the PWA, which then trades the token for an
+# app session; the authorizer never sees their credentials. OpenBao must allow
+# the public origin in sys/config/cors. Without method blocks only pasting a
+# token is offered.
+approver_login {
+  openbao_address = "https://openbao.example.com" # as reachable from approvers' browsers
+  namespace       = ""
+  method "token" {}
+  method "userpass" {
+    mount = "userpass"
+    label = "Username & password"
+  }
+  method "oidc" {
+    mount = "oidc"
+    label = "Single sign-on"
+    role  = "" # empty uses the mount's default role; it must allow <public_origin>/oidc/callback
+  }
+}
+
+# Requester Rules decide which tokens may file Grant Requests; the first match
+# wins. token_role matches the token's role, auth_mount the auth mount it was
+# issued from, so every token of that mount qualifies: don't share the mount with
+# other machine logins. Tokens without an identity entity are always refused.
+requester "opencode" {
+  token_role = "opencode-session"
+}
+
+requester "ci" {
+  auth_mount = "approle"
 }
 
 grants {

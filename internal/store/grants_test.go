@@ -33,7 +33,7 @@ func pendingRequest(id, entityID string, now time.Time, items ...Item) GrantRequ
 	return GrantRequest{ID: id, EntityID: entityID, Reason: "x", CreatedAt: now, PendingUntil: now.Add(time.Hour), Items: items}
 }
 
-func TestGrantRequestRoundTripEncryptsReasonAndSession(t *testing.T) {
+func TestGrantRequestRoundTripEncryptsReasonAndRequester(t *testing.T) {
 	t.Parallel()
 
 	db, path := openTestDB(t)
@@ -43,7 +43,7 @@ func TestGrantRequestRoundTripEncryptsReasonAndSession(t *testing.T) {
 		Item{ID: "item-2", Path: "sys/policies", Capabilities: []string{"read"}, State: ItemRefused, Reason: "hard denylist"},
 	)
 	request.Reason = "rotate the payroll credentials"
-	request.Session = SessionDisplay{ID: "session-abc", Title: "Payroll migration", Directory: "/srv/secret-project"}
+	request.Requester = RequesterDisplay{ID: "session-abc", Title: "Payroll migration", Directory: "/srv/secret-project"}
 	if err := db.CreateGrantRequest(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestGrantRequestRoundTripEncryptsReasonAndSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got.Reason != request.Reason || got.Session != request.Session || !got.CreatedAt.Equal(now) || !got.PendingUntil.Equal(now.Add(time.Hour)) || len(got.Items) != 2 {
+	if got.Reason != request.Reason || got.Requester != request.Requester || !got.CreatedAt.Equal(now) || !got.PendingUntil.Equal(now.Add(time.Hour)) || len(got.Items) != 2 {
 		t.Fatalf("request = %#v", got)
 	}
 
@@ -96,7 +96,7 @@ func TestDecisionsGrantsAndRevocation(t *testing.T) {
 	db, _ := openTestDB(t)
 	now := time.Now().UTC()
 	request := pendingRequest("request-1", "entity-1", now, pendingItem("item-1", "kv/data/a"), pendingItem("item-2", "kv/data/b"))
-	request.Session = SessionDisplay{ID: "abc", Title: "Deploy"}
+	request.Requester = RequesterDisplay{ID: "abc", Title: "Deploy"}
 	if err := db.CreateGrantRequest(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestDecisionsGrantsAndRevocation(t *testing.T) {
 	request.Items[1].State, request.Items[1].DecidedBy = ItemRejected, approver
 	grant := Grant{
 		ID: "grant-1", RequestID: "request-1", ItemID: "item-1", EntityID: "entity-1", Path: "kv/data/a", Capabilities: []string{"read", "update"},
-		Session: request.Session, CreatedAt: now, ExpiresAt: now.Add(time.Hour), ApprovedBy: "Bob",
+		Requester: request.Requester, CreatedAt: now, ExpiresAt: now.Add(time.Hour), ApprovedBy: "Bob",
 	}
 	if err := db.DecideItems(t.Context(), request, []Grant{grant}); err != nil {
 		t.Fatal(err)
@@ -135,7 +135,7 @@ func TestDecisionsGrantsAndRevocation(t *testing.T) {
 
 	active, err := db.ActiveGrants(t.Context(), "entity-1", now)
 	if err != nil || len(active) != 1 || active[0].Path != "kv/data/a" || len(active[0].Capabilities) != 2 || active[0].ApprovedBy != "Bob" ||
-		active[0].Session.Title != "Deploy" || active[0].RequestID != "request-1" {
+		active[0].Requester.Title != "Deploy" || active[0].RequestID != "request-1" {
 		t.Fatalf("active = %#v, %v", active, err)
 	}
 

@@ -1,10 +1,9 @@
-// Command bao-cred reads OpenBao credentials and requests Grants for the current Agent Session.
+// Command bao-cred reads OpenBao credentials and requests Grants for the current Requester.
 package main
 
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -15,41 +14,15 @@ import (
 	"time"
 
 	openbao "github.com/openbao/openbao/api/v2"
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	authorizerv1 "github.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1"
 )
 
-const usageText = `usage:
-  bao-cred [flags] <openbao-path> [-- command [args...]]
-  bao-cred request -reason TEXT -item PATH=CAP[,CAP] [-item ...] [-ttl D] [-timeout D] [-no-wait]
-  bao-cred request -wait ID [-timeout D]
-  bao-cred grants
-
-Reads credentials from OpenBao with the Session Token in BAO_TOKEN (or
+const rootLong = `Reads credentials from OpenBao with the Requester's token in BAO_TOKEN (or
 VAULT_TOKEN). When the token lacks access, bao-cred can file a Grant Request
 with the authorizer and wait for an Approver to decide it.
-
-Output flags:
-  -format string       json (default), template, dotenv, or shell
-  -field path          print one scalar field with no trailing newline
-  -template string     render the data object with a Go template
-  -map NAME=path       map a field for dotenv, shell, or command execution; repeatable
-  -output path         atomically overwrite a file with mode 0600 instead of stdout
-
-Access flags:
-  -reason TEXT         on permission denied, request read access with this reason,
-                       wait for a decision, and retry the read once
-  -authorizer URL      authorizer base URL (default $OPENBAO_AUTHORIZER_URL)
-  -timeout duration    approval wait timeout (default 15m)
-  -quiet               suppress progress messages
-
-Request flags:
-  -reason TEXT         why the session needs access (required)
-  -item PATH=CAPS      Permission Item; CAPS is a comma-separated list of
-                       create, read, update, patch, delete, list; repeatable
-  -ttl duration        requested Grant lifetime for every item
-  -no-wait             print the filed request without waiting
-  -wait ID             resume waiting on an existing Grant Request
 
 Request outcomes are printed as JSON on stdout; progress goes to stderr.
 
@@ -58,16 +31,14 @@ Exit status:
   1  error
   2  usage error
   3  a Permission Item was rejected, refused, expired, or revoked
-  4  a Permission Item is still pending (timeout or -no-wait)
-  In command mode, the command's own exit status is returned.
+  4  a Permission Item is still pending (timeout or --no-wait)
+  In command mode, the command's own exit status is returned.`
 
-Examples:
-  bao-cred -field token github/token/project-example
-  bao-cred -reason "open a PR in org/repo" -field token github/token/project-example
-  bao-cred request -reason "migrate app schema" -item database/creds/app=read -item kv/data/app=read,update
-  bao-cred -format dotenv -map DB_USER=username -map DB_PASSWORD=password database/creds/app
-  bao-cred -map GH_TOKEN=token github/token/project-example -- gh repo view org/repo
-`
+const rootExample = `  bao-cred read --field token github/token/project-example
+  bao-cred read --reason "open a PR in org/repo" --field token github/token/project-example
+  bao-cred request --reason "migrate app schema" --item database/creds/app=read --item kv/data/app=read,update
+  bao-cred read --format dotenv --map DB_USER=username --map DB_PASSWORD=password database/creds/app
+  bao-cred read --map GH_TOKEN=token github/token/project-example -- gh repo view org/repo`
 
 const (
 	exitFailure    = 1
@@ -88,14 +59,6 @@ type options struct {
 	quiet      bool
 	mappings   []mapping
 	command    []string
-}
-
-type repeatedFlag []string
-
-func (m *repeatedFlag) String() string { return strings.Join(*m, ",") }
-func (m *repeatedFlag) Set(value string) error {
-	*m = append(*m, value)
-	return nil
 }
 
 // exitError carries a specific exit status. A nil err means the status came
@@ -119,7 +82,7 @@ func usageError(err error) error { return &exitError{code: exitUsage, err: err} 
 
 func main() {
 	err := run(os.Args[1:], os.Stdout, os.Stderr)
-	if err == nil || errors.Is(err, flag.ErrHelp) {
+	if err == nil {
 		return
 	}
 
@@ -140,25 +103,105 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if len(arguments) > 0 {
-		switch arguments[0] {
-		case "request":
-			return runRequest(ctx, arguments[1:], stdout, stderr)
-		case "grants":
-			return runGrants(ctx, arguments[1:], stdout, stderr)
+	root := newRootCommand(runRead)
+	root.SetArgs(arguments)
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	command, err := root.ExecuteContextC(ctx)
+	if coded, ok := errors.AsType[*exitError](err); ok && coded.code == exitUsage {
+		coded.err = fmt.Errorf("%w\nrun '%s --help' for usage", coded.err, command.CommandPath())
+	}
+
+	return err
+}
+
+// readFunc runs the read command; tests replace it to inspect parsed options.
+type readFunc func(ctx context.Context, opts options, stdout, stderr io.Writer) error
+
+func newRootCommand(read readFunc) *cobra.Command {
+	root := &cobra.Command{
+		Use:     "bao-cred",
+		Short:   "Read OpenBao credentials and request Grants",
+		Long:    rootLong,
+		Example: rootExample,
+		Args:    cobra.ArbitraryArgs,
+		RunE: func(_ *cobra.Command, arguments []string) error {
+			if len(arguments) > 0 {
+				return usageError(fmt.Errorf("unknown command %q", arguments[0]))
+			}
+
+			return usageError(errors.New("a command is required"))
+		},
+		// main reports errors with the right exit status; cobra would print
+		// them a second time, and print usage after runtime failures.
+		SilenceErrors: true,
+		SilenceUsage:  true,
+	}
+	root.CompletionOptions.DisableDefaultCmd = true
+	root.SetFlagErrorFunc(flagError)
+	root.AddCommand(newReadCommand(read), newRequestCommand(), newGrantsCommand())
+	return root
+}
+
+// flagError makes flag parsing failures usage errors. Earlier versions took
+// single-dash long flags such as -reason, which pflag reads as a group of
+// shorthands, so those get a pointer to the double-dash form.
+func flagError(command *cobra.Command, err error) error {
+	if notExist, ok := errors.AsType[*pflag.NotExistError](err); ok {
+		name, _, _ := strings.Cut(notExist.GetSpecifiedShortnames(), "=")
+		if len(name) > 1 && command.Flags().Lookup(name) != nil {
+			return usageError(fmt.Errorf("%w; long flags take two dashes: --%s", err, name))
 		}
 	}
 
-	return runRead(ctx, arguments, stdout, stderr)
+	return usageError(err)
 }
 
-func runRead(ctx context.Context, arguments []string, stdout, stderr io.Writer) error {
-	opts, err := parseOptions(arguments, stderr)
-	if err != nil {
-		return err
+func newReadCommand(read readFunc) *cobra.Command {
+	var (
+		opts        options
+		rawMappings []string
+	)
+
+	command := &cobra.Command{
+		Use:   "read [flags] <openbao-path> [-- command [args...]]",
+		Short: "Read credentials from an OpenBao path",
+		Long: `Reads <openbao-path> and prints its data object, or runs a command with
+mapped fields in its environment.
+
+On permission denied, --reason files a Grant Request for PATH=read, waits for
+a decision, and retries the read once. Without --reason the read fails with a
+hint.`,
+		Example: `  bao-cred read --field token github/token/project-example
+  bao-cred read --reason "open a PR in org/repo" --field token github/token/project-example
+  bao-cred read --map GH_TOKEN=token github/token/project-example -- gh repo view org/repo`,
+		RunE: func(command *cobra.Command, arguments []string) error {
+			parsed, err := parseOptions(opts, rawMappings, arguments, command.ArgsLenAtDash())
+			if err != nil {
+				return err
+			}
+
+			return read(command.Context(), parsed, command.OutOrStdout(), command.ErrOrStderr())
+		},
 	}
 
-	token, err := sessionToken()
+	flags := command.Flags()
+	flags.StringVar(&opts.format, "format", "json", "output format: json, template, dotenv, or shell")
+	flags.StringVar(&opts.field, "field", "", "print one scalar field at this dot path with no trailing newline")
+	flags.StringVar(&opts.template, "template", "", "render the data object with a Go template")
+	flags.StringArrayVar(&rawMappings, "map", nil,
+		"NAME=path mapping for dotenv, shell, or command execution; repeatable")
+	flags.StringVar(&opts.output, "output", "", "atomically overwrite this file with mode 0600 instead of stdout")
+	flags.StringVar(&opts.reason, "reason", "",
+		"on permission denied, request read access with this reason and retry once")
+	flags.StringVar(&opts.authorizer, "authorizer", "", "authorizer base URL (default $OPENBAO_AUTHORIZER_URL)")
+	flags.DurationVar(&opts.timeout, "timeout", 15*time.Minute, "approval wait timeout")
+	flags.BoolVar(&opts.quiet, "quiet", false, "suppress progress messages")
+	return command
+}
+
+func runRead(ctx context.Context, opts options, stdout, stderr io.Writer) error {
+	token, err := requesterToken()
 	if err != nil {
 		return err
 	}
@@ -173,8 +216,8 @@ func runRead(ctx context.Context, arguments []string, stdout, stderr io.Writer) 
 	if isPermissionDenied(err) {
 		if opts.reason == "" {
 			return fmt.Errorf(
-				"%w\nhint: rerun with -reason TEXT to request read access, or file a Grant Request with "+
-					"bao-cred request -reason TEXT -item %s=read",
+				"%w\nhint: rerun with --reason TEXT to request read access, or file a Grant Request with "+
+					"bao-cred request --reason TEXT --item %s=read",
 				err, opts.path,
 			)
 		}
@@ -231,79 +274,43 @@ func requestReadAccess(ctx context.Context, opts options, token string, progress
 	return request.outcomeError(opts.timeout)
 }
 
-func parseOptions(arguments []string, stderr io.Writer) (options, error) {
-	var rawMappings repeatedFlag
-	separator := len(arguments)
-	for index, argument := range arguments {
-		if argument == "--" {
-			separator = index
-			break
-		}
-	}
-
-	flagArguments := arguments[:separator]
-	var command []string
-	if separator < len(arguments) {
-		command = arguments[separator+1:]
-		if len(command) == 0 {
+// parseOptions completes the flag values with the positional arguments.
+// dash is cobra's ArgsLenAtDash: the number of arguments before "--", or -1.
+func parseOptions(opts options, rawMappings, arguments []string, dash int) (options, error) {
+	if dash < 0 {
+		dash = len(arguments)
+	} else {
+		opts.command = arguments[dash:]
+		if len(opts.command) == 0 {
 			return options{}, usageError(errors.New("-- must be followed by a command"))
 		}
 	}
 
-	flags := flag.NewFlagSet("bao-cred", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	flags.Usage = func() { _, _ = fmt.Fprint(stderr, usageText) }
-	format := flags.String("format", "json", "output format")
-	field := flags.String("field", "", "scalar field")
-	templateSource := flags.String("template", "", "Go template")
-	output := flags.String("output", "", "output file")
-	reason := flags.String("reason", "", "Grant Request reason")
-	authorizer := flags.String("authorizer", "", "authorizer URL")
-	timeout := flags.Duration("timeout", 15*time.Minute, "approval timeout")
-	quiet := flags.Bool("quiet", false, "suppress progress")
-	flags.Var(&rawMappings, "map", "NAME=dot.path mapping")
-	if err := flags.Parse(flagArguments); err != nil {
-		return options{}, flagError(err)
-	}
-
-	if flags.NArg() != 1 {
-		flags.Usage()
+	if dash != 1 {
 		return options{}, usageError(errors.New("exactly one OpenBao path is required"))
 	}
 
-	if *timeout <= 0 {
+	opts.path = arguments[0]
+	opts.reason = strings.TrimSpace(opts.reason)
+	if opts.timeout <= 0 {
 		return options{}, usageError(errors.New("timeout must be positive"))
 	}
 
-	mappings := make([]mapping, 0, len(rawMappings))
+	opts.mappings = make([]mapping, 0, len(rawMappings))
 	for _, raw := range rawMappings {
 		parsedMapping, err := parseMapping(raw)
 		if err != nil {
 			return options{}, usageError(err)
 		}
 
-		mappings = append(mappings, parsedMapping)
+		opts.mappings = append(opts.mappings, parsedMapping)
 	}
 
-	parsed := options{
-		path: flags.Arg(0), format: *format, field: *field, template: *templateSource,
-		output: *output, reason: strings.TrimSpace(*reason), authorizer: *authorizer, timeout: *timeout,
-		quiet: *quiet, mappings: mappings, command: command,
-	}
-	if err := validateOptions(parsed); err != nil {
+	if err := validateOptions(opts); err != nil {
 		return options{}, usageError(err)
 	}
 
-	return parsed, nil
-}
-
-// flagError keeps -h a clean exit while making other parse failures usage errors.
-func flagError(err error) error {
-	if errors.Is(err, flag.ErrHelp) {
-		return err
-	}
-
-	return usageError(err)
+	return opts, nil
 }
 
 func validateOptions(options options) error {
@@ -322,7 +329,7 @@ func validateOptions(options options) error {
 		}
 
 		if len(options.mappings) == 0 {
-			return errors.New("command execution requires at least one -map")
+			return errors.New("command execution requires at least one --map")
 		}
 
 		return nil
@@ -330,7 +337,7 @@ func validateOptions(options options) error {
 
 	if options.field != "" {
 		if options.format != "json" || options.template != "" || len(options.mappings) > 0 {
-			return errors.New("-field cannot be combined with -format, -template, or -map")
+			return errors.New("--field cannot be combined with --format, --template, or --map")
 		}
 
 		return nil
@@ -343,23 +350,23 @@ func validateOptions(options options) error {
 	switch options.format {
 	case "json":
 		if options.template != "" || len(options.mappings) > 0 {
-			return errors.New("json output cannot be combined with -template or -map")
+			return errors.New("json output cannot be combined with --template or --map")
 		}
 	case "template":
 		if options.template == "" {
-			return errors.New("template output requires -template")
+			return errors.New("template output requires --template")
 		}
 
 		if len(options.mappings) > 0 {
-			return errors.New("template output cannot be combined with -map")
+			return errors.New("template output cannot be combined with --map")
 		}
 	case "dotenv", "shell":
 		if options.template != "" {
-			return fmt.Errorf("%s output cannot be combined with -template", options.format)
+			return fmt.Errorf("%s output cannot be combined with --template", options.format)
 		}
 
 		if len(options.mappings) == 0 {
-			return fmt.Errorf("%s output requires at least one -map", options.format)
+			return fmt.Errorf("%s output requires at least one --map", options.format)
 		}
 	default:
 		return fmt.Errorf("unsupported format %q", options.format)
@@ -416,8 +423,8 @@ func execute(ctx context.Context, arguments []string, data map[string]any, mappi
 	return nil
 }
 
-// mergeEnvironment withholds the Session Token from the child: exec mode hands
-// it only the mapped credentials, not the session's access to request more.
+// mergeEnvironment withholds the Requester's token from the child: exec mode
+// hands it only the mapped credentials, not the access to request more.
 func mergeEnvironment(environment, mapped []string) []string {
 	names := map[string]struct{}{"BAO_TOKEN": {}, "VAULT_TOKEN": {}}
 	for _, value := range mapped {
@@ -436,14 +443,14 @@ func mergeEnvironment(environment, mapped []string) []string {
 	return append(result, mapped...)
 }
 
-func sessionToken() (string, error) {
+func requesterToken() (string, error) {
 	for _, name := range []string{"BAO_TOKEN", "VAULT_TOKEN"} {
 		if token := strings.TrimSpace(os.Getenv(name)); token != "" {
 			return token, nil
 		}
 	}
 
-	return "", errors.New("no Session Token: set BAO_TOKEN (or VAULT_TOKEN)")
+	return "", errors.New("no token: set BAO_TOKEN (or VAULT_TOKEN)")
 }
 
 func newOpenBaoClient(token string) (*openbao.Client, error) {

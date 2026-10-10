@@ -217,31 +217,34 @@ func (x *PermissionItem) GetGrantId() string {
 	return ""
 }
 
-// AgentSession describes the session that filed a request, for Approvers.
-type AgentSession struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Title         string                 `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
-	Directory     string                 `protobuf:"bytes,3,opt,name=directory,proto3" json:"directory,omitempty"`
-	EntityId      string                 `protobuf:"bytes,4,opt,name=entity_id,json=entityId,proto3" json:"entity_id,omitempty"`
+// Requester describes who filed a request, for Approvers.
+type Requester struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Agent Session ID from token metadata, or the entity's display name.
+	Id        string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Title     string `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
+	Directory string `protobuf:"bytes,3,opt,name=directory,proto3" json:"directory,omitempty"`
+	EntityId  string `protobuf:"bytes,4,opt,name=entity_id,json=entityId,proto3" json:"entity_id,omitempty"`
+	// Name of the Requester Rule the token matched.
+	Rule          string `protobuf:"bytes,5,opt,name=rule,proto3" json:"rule,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *AgentSession) Reset() {
-	*x = AgentSession{}
+func (x *Requester) Reset() {
+	*x = Requester{}
 	mi := &file_openbao_authorizer_v1_types_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *AgentSession) String() string {
+func (x *Requester) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*AgentSession) ProtoMessage() {}
+func (*Requester) ProtoMessage() {}
 
-func (x *AgentSession) ProtoReflect() protoreflect.Message {
+func (x *Requester) ProtoReflect() protoreflect.Message {
 	mi := &file_openbao_authorizer_v1_types_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -253,47 +256,54 @@ func (x *AgentSession) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use AgentSession.ProtoReflect.Descriptor instead.
-func (*AgentSession) Descriptor() ([]byte, []int) {
+// Deprecated: Use Requester.ProtoReflect.Descriptor instead.
+func (*Requester) Descriptor() ([]byte, []int) {
 	return file_openbao_authorizer_v1_types_proto_rawDescGZIP(), []int{1}
 }
 
-func (x *AgentSession) GetId() string {
+func (x *Requester) GetId() string {
 	if x != nil {
 		return x.Id
 	}
 	return ""
 }
 
-func (x *AgentSession) GetTitle() string {
+func (x *Requester) GetTitle() string {
 	if x != nil {
 		return x.Title
 	}
 	return ""
 }
 
-func (x *AgentSession) GetDirectory() string {
+func (x *Requester) GetDirectory() string {
 	if x != nil {
 		return x.Directory
 	}
 	return ""
 }
 
-func (x *AgentSession) GetEntityId() string {
+func (x *Requester) GetEntityId() string {
 	if x != nil {
 		return x.EntityId
 	}
 	return ""
 }
 
-// GrantRequest is a batch of Permission Items one Agent Session asked for at once.
+func (x *Requester) GetRule() string {
+	if x != nil {
+		return x.Rule
+	}
+	return ""
+}
+
+// GrantRequest is a batch of Permission Items one Requester asked for at once.
 type GrantRequest struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	Id        string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	Reason    string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
 	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	// Only on the approver API.
-	Session       *AgentSession     `protobuf:"bytes,4,opt,name=session,proto3" json:"session,omitempty"`
+	Requester     *Requester        `protobuf:"bytes,4,opt,name=requester,proto3" json:"requester,omitempty"`
 	Items         []*PermissionItem `protobuf:"bytes,5,rep,name=items,proto3" json:"items,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -350,9 +360,9 @@ func (x *GrantRequest) GetCreatedAt() *timestamppb.Timestamp {
 	return nil
 }
 
-func (x *GrantRequest) GetSession() *AgentSession {
+func (x *GrantRequest) GetRequester() *Requester {
 	if x != nil {
-		return x.Session
+		return x.Requester
 	}
 	return nil
 }
@@ -364,7 +374,7 @@ func (x *GrantRequest) GetItems() []*PermissionItem {
 	return nil
 }
 
-// Grant is an approved Permission Item in effect for an Agent Session.
+// Grant is an approved Permission Item in effect for a Requester.
 type Grant struct {
 	state        protoimpl.MessageState `protogen:"open.v1"`
 	Id           string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -376,7 +386,7 @@ type Grant struct {
 	// Only on the approver API.
 	ApprovedBy string `protobuf:"bytes,7,opt,name=approved_by,json=approvedBy,proto3" json:"approved_by,omitempty"`
 	// Only on the approver API.
-	Session       *AgentSession `protobuf:"bytes,8,opt,name=session,proto3" json:"session,omitempty"`
+	Requester     *Requester `protobuf:"bytes,8,opt,name=requester,proto3" json:"requester,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -460,9 +470,9 @@ func (x *Grant) GetApprovedBy() string {
 	return ""
 }
 
-func (x *Grant) GetSession() *AgentSession {
+func (x *Grant) GetRequester() *Requester {
 	if x != nil {
-		return x.Session
+		return x.Requester
 	}
 	return nil
 }
@@ -507,7 +517,8 @@ func (*Heartbeat) Descriptor() ([]byte, []int) {
 // ErrorDetail is attached to RPC errors so clients can branch on a stable reason.
 type ErrorDetail struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Stable machine-readable reason, e.g. "ITEM_NOT_PENDING" or "SESSION_EXPIRED".
+	// Stable machine-readable reason, e.g. "ITEM_NOT_PENDING", "NOT_REQUESTER"
+	// or "SELF_APPROVAL".
 	Reason string `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"`
 	// IDs of the items or grants the error concerns, when relevant.
 	Ids           []string `protobuf:"bytes,2,rep,name=ids,proto3" json:"ids,omitempty"`
@@ -578,19 +589,20 @@ const file_openbao_authorizer_v1_types_proto_rawDesc = "" +
 	"\n" +
 	"decided_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\tdecidedAt\x12\x19\n" +
 	"\bgrant_id\x18\n" +
-	" \x01(\tR\agrantId\"o\n" +
-	"\fAgentSession\x12\x0e\n" +
+	" \x01(\tR\agrantId\"\x80\x01\n" +
+	"\tRequester\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05title\x18\x02 \x01(\tR\x05title\x12\x1c\n" +
 	"\tdirectory\x18\x03 \x01(\tR\tdirectory\x12\x1b\n" +
-	"\tentity_id\x18\x04 \x01(\tR\bentityId\"\xed\x01\n" +
+	"\tentity_id\x18\x04 \x01(\tR\bentityId\x12\x12\n" +
+	"\x04rule\x18\x05 \x01(\tR\x04rule\"\xee\x01\n" +
 	"\fGrantRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\x129\n" +
 	"\n" +
-	"created_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x12=\n" +
-	"\asession\x18\x04 \x01(\v2#.openbao.authorizer.v1.AgentSessionR\asession\x12;\n" +
-	"\x05items\x18\x05 \x03(\v2%.openbao.authorizer.v1.PermissionItemR\x05items\"\xbe\x02\n" +
+	"created_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x12>\n" +
+	"\trequester\x18\x04 \x01(\v2 .openbao.authorizer.v1.RequesterR\trequester\x12;\n" +
+	"\x05items\x18\x05 \x03(\v2%.openbao.authorizer.v1.PermissionItemR\x05items\"\xbf\x02\n" +
 	"\x05Grant\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x17\n" +
 	"\aitem_id\x18\x02 \x01(\tR\x06itemId\x12\x12\n" +
@@ -601,8 +613,8 @@ const file_openbao_authorizer_v1_types_proto_rawDesc = "" +
 	"\n" +
 	"expires_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12\x1f\n" +
 	"\vapproved_by\x18\a \x01(\tR\n" +
-	"approvedBy\x12=\n" +
-	"\asession\x18\b \x01(\v2#.openbao.authorizer.v1.AgentSessionR\asession\"\v\n" +
+	"approvedBy\x12>\n" +
+	"\trequester\x18\b \x01(\v2 .openbao.authorizer.v1.RequesterR\trequester\"\v\n" +
 	"\tHeartbeat\"7\n" +
 	"\vErrorDetail\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason\x12\x10\n" +
@@ -636,7 +648,7 @@ var file_openbao_authorizer_v1_types_proto_msgTypes = make([]protoimpl.MessageIn
 var file_openbao_authorizer_v1_types_proto_goTypes = []any{
 	(ItemState)(0),                // 0: openbao.authorizer.v1.ItemState
 	(*PermissionItem)(nil),        // 1: openbao.authorizer.v1.PermissionItem
-	(*AgentSession)(nil),          // 2: openbao.authorizer.v1.AgentSession
+	(*Requester)(nil),             // 2: openbao.authorizer.v1.Requester
 	(*GrantRequest)(nil),          // 3: openbao.authorizer.v1.GrantRequest
 	(*Grant)(nil),                 // 4: openbao.authorizer.v1.Grant
 	(*Heartbeat)(nil),             // 5: openbao.authorizer.v1.Heartbeat
@@ -650,11 +662,11 @@ var file_openbao_authorizer_v1_types_proto_depIdxs = []int32{
 	8,  // 2: openbao.authorizer.v1.PermissionItem.expires_at:type_name -> google.protobuf.Timestamp
 	8,  // 3: openbao.authorizer.v1.PermissionItem.decided_at:type_name -> google.protobuf.Timestamp
 	8,  // 4: openbao.authorizer.v1.GrantRequest.created_at:type_name -> google.protobuf.Timestamp
-	2,  // 5: openbao.authorizer.v1.GrantRequest.session:type_name -> openbao.authorizer.v1.AgentSession
+	2,  // 5: openbao.authorizer.v1.GrantRequest.requester:type_name -> openbao.authorizer.v1.Requester
 	1,  // 6: openbao.authorizer.v1.GrantRequest.items:type_name -> openbao.authorizer.v1.PermissionItem
 	8,  // 7: openbao.authorizer.v1.Grant.created_at:type_name -> google.protobuf.Timestamp
 	8,  // 8: openbao.authorizer.v1.Grant.expires_at:type_name -> google.protobuf.Timestamp
-	2,  // 9: openbao.authorizer.v1.Grant.session:type_name -> openbao.authorizer.v1.AgentSession
+	2,  // 9: openbao.authorizer.v1.Grant.requester:type_name -> openbao.authorizer.v1.Requester
 	10, // [10:10] is the sub-list for method output_type
 	10, // [10:10] is the sub-list for method input_type
 	10, // [10:10] is the sub-list for extension type_name

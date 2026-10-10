@@ -100,7 +100,7 @@ type fixture struct {
 	bao      *openbaotest.Fake
 	notifier *recordingNotifier
 	clock    *clock
-	session  Session
+	session  Requester
 }
 
 var approver = store.Approver{EntityID: "approver-1", Name: "Bob"}
@@ -123,9 +123,9 @@ func newFixture(t *testing.T) fixture {
 		Policy: Policy{DefaultTTL: 72 * time.Hour, Rules: []Rule{
 			{Name: "kv", Path: "kv/data/*", Capabilities: []string{"read", "update"}, MaxTTL: 8 * time.Hour},
 		}},
-		PendingTTL:       time.Hour,
-		SessionTokenRole: "opencode-session",
-		Now:              now.Now,
+		PendingTTL: time.Hour,
+		Requesters: []RequesterRule{{Name: "opencode", TokenRole: "opencode-session"}, {Name: "ci", AuthMount: "approle"}},
+		Now:        now.Now,
 	})
 	session, err := service.Authenticate(t.Context(), "token-a")
 	if err != nil {
@@ -190,42 +190,70 @@ func (f fixture) approve(t *testing.T, ttl string, paths ...string) store.GrantR
 	return decided
 }
 
-func TestAuthenticateRequiresSessionTokenRole(t *testing.T) {
+func TestAuthenticateMatchesRequesterRules(t *testing.T) {
 	t.Parallel()
 
 	f := newFixture(t)
-	if f.session.EntityID != "entity-a" || f.session.Display != (store.SessionDisplay{ID: "aaa", Title: "Fix CI", Directory: "/src/app"}) {
-		t.Fatalf("session = %#v", f.session)
+	if f.session.EntityID != "entity-a" || f.session.Display != (store.RequesterDisplay{ID: "aaa", Title: "Fix CI", Directory: "/src/app", Rule: "opencode"}) {
+		t.Fatalf("requester = %#v", f.session)
 	}
 
-	// Without meta.session_id the entity ID still identifies the session.
-	session, err := f.service.Authenticate(t.Context(), "token-b")
-	if err != nil || session.Display != (store.SessionDisplay{ID: "entity-b"}) {
-		t.Fatalf("session = %#v, %v", session, err)
+	// Without meta.session_id the display name, then the entity ID, identifies the Requester.
+	requester, err := f.service.Authenticate(t.Context(), "token-b")
+	if err != nil || requester.Display != (store.RequesterDisplay{ID: "token", Rule: "opencode"}) {
+		t.Fatalf("requester = %#v, %v", requester, err)
+	}
+
+	f.bao.SetIdentity("approle-token", openbao.Identity{EntityID: "ci-entity", Path: "auth/approle/login"})
+	requester, err = f.service.Authenticate(t.Context(), "approle-token")
+	if err != nil || requester.EntityID != "ci-entity" || requester.Display != (store.RequesterDisplay{ID: "ci-entity", Rule: "ci"}) {
+		t.Fatalf("AppRole requester = %#v, %v", requester, err)
 	}
 
 	if _, err := f.service.Authenticate(t.Context(), "unknown"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("unknown token error = %v", err)
 	}
 
-	f.bao.SetIdentity("human-token", openbao.Identity{EntityID: "human", Meta: map[string]string{"session_id": "x"}})
-	if _, err := f.service.Authenticate(t.Context(), "human-token"); !errors.Is(err, ErrNotSession) {
-		t.Fatalf("human token error = %v", err)
-	}
-
-	f.bao.SetIdentity("other-role", openbao.Identity{EntityID: "other", Role: "other-role"})
-	if _, err := f.service.Authenticate(t.Context(), "other-role"); !errors.Is(err, ErrNotSession) {
-		t.Fatalf("token from another role error = %v", err)
-	}
-
-	f.bao.SetIdentity("no-entity", openbao.Identity{Role: "opencode-session"})
-	if _, err := f.service.Authenticate(t.Context(), "no-entity"); !errors.Is(err, ErrNotSession) {
-		t.Fatalf("token without entity error = %v", err)
+	for token, identity := range map[string]openbao.Identity{
+		"human-token":    {EntityID: "human", Path: "auth/userpass/login/bob", Meta: map[string]string{"session_id": "x"}},
+		"other-role":     {EntityID: "other", Role: "other-role", Path: "auth/token/create/other-role"},
+		"mount-prefix":   {EntityID: "other", Path: "auth/approle-other/login"},
+		"no-entity":      {Role: "opencode-session"},
+		"approle-orphan": {Path: "auth/approle/login"},
+	} {
+		f.bao.SetIdentity(token, identity)
+		if _, err := f.service.Authenticate(t.Context(), token); !errors.Is(err, ErrNotRequester) {
+			t.Fatalf("%s error = %v", token, err)
+		}
 	}
 
 	f.bao.Fail("LookupSelf", &openbao.HTTPError{StatusCode: http.StatusInternalServerError})
-	if _, err := f.service.Authenticate(t.Context(), "token-a"); err == nil || errors.Is(err, ErrInvalidToken) || errors.Is(err, ErrNotSession) {
+	if _, err := f.service.Authenticate(t.Context(), "token-a"); err == nil || errors.Is(err, ErrInvalidToken) || errors.Is(err, ErrNotRequester) {
 		t.Fatalf("transient lookup error = %v", err)
+	}
+}
+
+func TestApproversCannotDecideTheirOwnRequests(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+	request, err := f.service.CreateRequest(t.Context(), f.session, "token-a", "x", []ItemInput{read("kv/data/a")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	self := store.Approver{EntityID: f.session.EntityID, Name: "Self"}
+	if _, err := f.service.Decide(t.Context(), self, request.ID, []Decision{{ItemID: request.Items[0].ID, Approve: true}}); !errors.Is(err, ErrSelfApproval) {
+		t.Fatalf("self-approval error = %v", err)
+	}
+
+	if f.bao.Calls("WritePolicy") != 0 {
+		t.Fatal("self-approval wrote a policy")
+	}
+
+	decided := f.approve(t, "", "kv/data/b")
+	if err := f.service.Revoke(t.Context(), self, decided.Items[0].GrantID); err != nil {
+		t.Fatalf("revoking one's own Grant: %v", err)
 	}
 }
 

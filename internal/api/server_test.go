@@ -1,4 +1,4 @@
-package httpapi
+package api
 
 import (
 	"bytes"
@@ -15,10 +15,12 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	authorizerv1 "github.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1"
 	"github.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1/authorizerv1connect"
+	"github.com/xtruder/openbao-authorizer/internal/config"
 	"github.com/xtruder/openbao-authorizer/internal/grants"
 	"github.com/xtruder/openbao-authorizer/internal/openbao"
 	"github.com/xtruder/openbao-authorizer/internal/openbao/openbaotest"
@@ -37,7 +39,7 @@ type testServer struct {
 	database *store.DB
 	events   *EventBus
 	approver authorizerv1connect.ApproverServiceClient
-	agent    authorizerv1connect.AgentServiceClient
+	grant    authorizerv1connect.GrantServiceClient
 }
 
 type testConfig struct {
@@ -58,7 +60,7 @@ func newTestServer(t *testing.T, configs ...testConfig) *testServer {
 		}
 	})
 	bao := openbaotest.New()
-	bao.AddUser("bob", "correct horse", "human-token", approverIdentity)
+	bao.SetIdentity("human-token", approverIdentity)
 	bao.AddSession("session-a", "entity-a", map[string]string{"session_id": "aaa", "title": "Fix CI", "directory": "/src/app"})
 	bao.AddSession("session-b", "entity-b", map[string]string{"session_id": "bbb"})
 	events := NewEventBus()
@@ -66,16 +68,16 @@ func newTestServer(t *testing.T, configs ...testConfig) *testServer {
 		Policy: grants.Policy{DefaultTTL: 72 * time.Hour, Rules: []grants.Rule{
 			{Name: "kv", Path: "kv/data/*", Capabilities: []string{"read"}, MaxTTL: 8 * time.Hour},
 		}},
-		PendingTTL:       time.Hour,
-		SessionTokenRole: "opencode-session",
+		PendingTTL: time.Hour,
+		Requesters: []grants.RequesterRule{{Name: "opencode", TokenRole: "opencode-session"}},
 	})
 	options := Options{
 		OpenBao: bao, Store: database, Grants: service, Events: events,
 		ApproverPolicy: "approver", InsecureCookies: true, HeartbeatInterval: testHeartbeat,
 	}
-	for _, config := range configs {
-		if config.options != nil {
-			config.options(&options)
+	for _, setup := range configs {
+		if setup.options != nil {
+			setup.options(&options)
 		}
 	}
 
@@ -83,9 +85,9 @@ func newTestServer(t *testing.T, configs ...testConfig) *testServer {
 	mux := http.NewServeMux()
 	mux.Handle("/api/", New(options))
 	server := httptest.NewUnstartedServer(mux)
-	for _, config := range configs {
-		if config.server != nil {
-			config.server(server.Config)
+	for _, setup := range configs {
+		if setup.server != nil {
+			setup.server(server.Config)
 		}
 	}
 
@@ -103,13 +105,13 @@ func newTestServer(t *testing.T, configs ...testConfig) *testServer {
 		t: t, url: server.URL, http: client, bao: bao, database: database, events: events,
 		// The PWA speaks Connect JSON; bao-cred the binary default.
 		approver: authorizerv1connect.NewApproverServiceClient(client, baseURL, connect.WithProtoJSON()),
-		agent:    authorizerv1connect.NewAgentServiceClient(client, baseURL),
+		grant:    authorizerv1connect.NewGrantServiceClient(client, baseURL),
 	}
 }
 
 func (s *testServer) login() {
 	s.t.Helper()
-	_, err := s.approver.Login(s.t.Context(), connect.NewRequest(&authorizerv1.LoginRequest{Username: "bob", Password: "correct horse"}))
+	_, err := s.approver.CreateSession(s.t.Context(), connect.NewRequest(&authorizerv1.CreateSessionRequest{OpenbaoToken: "human-token"}))
 	if err != nil {
 		s.t.Fatalf("login: %v", err)
 	}
@@ -150,7 +152,7 @@ func requireError(t *testing.T, err error, code connect.Code, reason string) *au
 
 func (s *testServer) create(token, reason string, items ...*authorizerv1.PermissionItemInput) *authorizerv1.GrantRequest {
 	s.t.Helper()
-	response, err := s.agent.CreateGrantRequest(s.t.Context(), bearer(token, &authorizerv1.CreateGrantRequestRequest{Reason: reason, Items: items}))
+	response, err := s.grant.CreateGrantRequest(s.t.Context(), bearer(token, &authorizerv1.CreateGrantRequestRequest{Reason: reason, Items: items}))
 	if err != nil {
 		s.t.Fatalf("create grant request: %v", err)
 	}
@@ -237,7 +239,7 @@ func TestApproverSessionLifecycle(t *testing.T) {
 	_, err := server.approver.ListGrantRequests(t.Context(), connect.NewRequest(&authorizerv1.ListGrantRequestsRequest{}))
 	requireError(t, err, connect.CodeUnauthenticated, reasonSessionExpired)
 
-	login, err := server.approver.Login(t.Context(), connect.NewRequest(&authorizerv1.LoginRequest{Username: " bob ", Password: "correct horse"}))
+	login, err := server.approver.CreateSession(t.Context(), connect.NewRequest(&authorizerv1.CreateSessionRequest{OpenbaoToken: " human-token "}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +255,7 @@ func TestApproverSessionLifecycle(t *testing.T) {
 		t.Fatalf("login identity = %v", login.Msg.GetIdentity())
 	}
 
-	// The human token only proves who logged in.
+	// The OpenBao token only proves who signed in.
 	if revoked := server.bao.RevokedTokens(); !slices.Equal(revoked, []string{"human-token"}) {
 		t.Fatalf("revoked tokens = %#v", revoked)
 	}
@@ -306,17 +308,31 @@ func sessionID(t *testing.T, header http.Header) string {
 	return cookie.Value
 }
 
-func TestLoginReplacesPreviousSession(t *testing.T) {
+func TestCreateSessionKeepsPastedToken(t *testing.T) {
 	t.Parallel()
 
 	server := newTestServer(t)
-	server.bao.AddUser("carol", "secret", "carol-token", openbao.Identity{EntityID: "carol-id", IdentityPolicies: []string{"approver"}})
-	first, err := server.approver.Login(t.Context(), connect.NewRequest(&authorizerv1.LoginRequest{Username: "bob", Password: "correct horse"}))
+	_, err := server.approver.CreateSession(t.Context(), connect.NewRequest(&authorizerv1.CreateSessionRequest{OpenbaoToken: "human-token", KeepToken: true}))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	second, err := server.approver.Login(t.Context(), connect.NewRequest(&authorizerv1.LoginRequest{Username: "carol", Password: "secret"}))
+	if revoked := server.bao.RevokedTokens(); len(revoked) != 0 {
+		t.Fatalf("pasted token was revoked: %#v", revoked)
+	}
+}
+
+func TestCreateSessionReplacesPreviousSession(t *testing.T) {
+	t.Parallel()
+
+	server := newTestServer(t)
+	server.bao.SetIdentity("carol-token", openbao.Identity{EntityID: "carol-id", IdentityPolicies: []string{"approver"}})
+	first, err := server.approver.CreateSession(t.Context(), connect.NewRequest(&authorizerv1.CreateSessionRequest{OpenbaoToken: "human-token"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := server.approver.CreateSession(t.Context(), connect.NewRequest(&authorizerv1.CreateSessionRequest{OpenbaoToken: "carol-token"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +351,7 @@ func TestSessionTTL(t *testing.T) {
 	t.Parallel()
 
 	server := newTestServer(t, testConfig{options: func(options *Options) { options.SessionTTL = 2 * time.Hour }})
-	login, err := server.approver.Login(t.Context(), connect.NewRequest(&authorizerv1.LoginRequest{Username: "bob", Password: "correct horse"}))
+	login, err := server.approver.CreateSession(t.Context(), connect.NewRequest(&authorizerv1.CreateSessionRequest{OpenbaoToken: "human-token"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +366,7 @@ func TestSecureCookieAttributes(t *testing.T) {
 	t.Parallel()
 
 	server := newTestServer(t, testConfig{options: func(options *Options) { options.InsecureCookies = false }})
-	login, err := server.approver.Login(t.Context(), connect.NewRequest(&authorizerv1.LoginRequest{Username: "bob", Password: "correct horse"}))
+	login, err := server.approver.CreateSession(t.Context(), connect.NewRequest(&authorizerv1.CreateSessionRequest{OpenbaoToken: "human-token"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,34 +377,71 @@ func TestSecureCookieAttributes(t *testing.T) {
 	}
 }
 
-func TestLoginFailures(t *testing.T) {
+func TestCreateSessionFailures(t *testing.T) {
 	t.Parallel()
 
 	server := newTestServer(t)
-	server.bao.AddUser("alice", "secret", "requester-token", openbao.Identity{EntityID: "alice-id", IdentityPolicies: []string{"requester"}})
+	server.bao.SetIdentity("requester-token", openbao.Identity{EntityID: "alice-id", IdentityPolicies: []string{"requester"}})
+	server.bao.SetIdentity("orphan-token", openbao.Identity{Policies: []string{"approver"}})
 
-	_, err := server.approver.Login(t.Context(), connect.NewRequest(&authorizerv1.LoginRequest{Username: "bob"}))
+	_, err := server.approver.CreateSession(t.Context(), connect.NewRequest(&authorizerv1.CreateSessionRequest{}))
 	requireError(t, err, connect.CodeInvalidArgument, reasonInvalidRequest)
 
-	_, err = server.approver.Login(t.Context(), connect.NewRequest(&authorizerv1.LoginRequest{Username: "bob", Password: "wrong"}))
+	_, err = server.approver.CreateSession(t.Context(), connect.NewRequest(&authorizerv1.CreateSessionRequest{OpenbaoToken: "unknown-token"}))
 	requireError(t, err, connect.CodeUnauthenticated, reasonInvalidToken)
 
-	_, err = server.approver.Login(t.Context(), connect.NewRequest(&authorizerv1.LoginRequest{Username: "alice", Password: "secret"}))
+	_, err = server.approver.CreateSession(t.Context(), connect.NewRequest(&authorizerv1.CreateSessionRequest{OpenbaoToken: "requester-token"}))
 	requireError(t, err, connect.CodePermissionDenied, reasonNotApprover)
-	if revoked := server.bao.RevokedTokens(); !slices.Equal(revoked, []string{"requester-token"}) {
-		t.Fatalf("rejected login token was not revoked: %#v", revoked)
+
+	_, err = server.approver.CreateSession(t.Context(), connect.NewRequest(&authorizerv1.CreateSessionRequest{OpenbaoToken: "orphan-token"}))
+	requireError(t, err, connect.CodePermissionDenied, reasonNotApprover)
+	if revoked := server.bao.RevokedTokens(); !slices.Equal(revoked, []string{"requester-token", "orphan-token"}) {
+		t.Fatalf("refused tokens were not revoked: %#v", revoked)
 	}
 
-	crossSite := connect.NewRequest(&authorizerv1.LoginRequest{Username: "bob", Password: "correct horse"})
+	server.bao.Fail("LookupSelf", &openbao.HTTPError{StatusCode: http.StatusInternalServerError})
+	_, err = server.approver.CreateSession(t.Context(), connect.NewRequest(&authorizerv1.CreateSessionRequest{OpenbaoToken: "human-token"}))
+	requireError(t, err, connect.CodeUnavailable, reasonOpenBaoUnavailable)
+	server.bao.Fail("LookupSelf", nil)
+
+	crossSite := connect.NewRequest(&authorizerv1.CreateSessionRequest{OpenbaoToken: "human-token"})
 	crossSite.Header().Set("Origin", "https://evil.example")
-	_, err = server.approver.Login(t.Context(), crossSite)
+	_, err = server.approver.CreateSession(t.Context(), crossSite)
 	requireError(t, err, connect.CodePermissionDenied, reasonCrossOrigin)
 
-	sameOrigin := connect.NewRequest(&authorizerv1.LoginRequest{Username: "bob", Password: "correct horse"})
+	sameOrigin := connect.NewRequest(&authorizerv1.CreateSessionRequest{OpenbaoToken: "human-token"})
 	sameOrigin.Header().Set("Origin", server.url)
-	if _, err := server.approver.Login(t.Context(), sameOrigin); err != nil {
-		t.Fatalf("same-origin login: %v", err)
+	if _, err := server.approver.CreateSession(t.Context(), sameOrigin); err != nil {
+		t.Fatalf("same-origin session: %v", err)
 	}
+}
+
+func TestGetLoginOptionsNeedsNoSession(t *testing.T) {
+	t.Parallel()
+
+	server := newTestServer(t, testConfig{options: func(options *Options) {
+		options.ApproverLogin = config.ApproverLogin{OpenBaoAddress: "https://bao.example", Namespace: "team", Methods: []config.LoginMethod{
+			{Type: "token", Label: "Token"},
+			{Type: "oidc", Mount: "sso", Label: "SSO", OIDCRole: "approver"},
+		}}
+	}})
+	options, err := server.approver.GetLoginOptions(t.Context(), connect.NewRequest(&authorizerv1.GetLoginOptionsRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := &authorizerv1.GetLoginOptionsResponse{OpenbaoAddress: "https://bao.example", Namespace: "team", Methods: []*authorizerv1.LoginMethod{
+		{Type: authorizerv1.LoginMethodType_LOGIN_METHOD_TYPE_TOKEN, Label: "Token"},
+		{Type: authorizerv1.LoginMethodType_LOGIN_METHOD_TYPE_OIDC, Mount: "sso", Label: "SSO", OidcRole: "approver"},
+	}}
+	if !proto.Equal(options.Msg, want) {
+		t.Fatalf("login options = %v", options.Msg)
+	}
+
+	crossSite := connect.NewRequest(&authorizerv1.GetLoginOptionsRequest{})
+	crossSite.Header().Set("Sec-Fetch-Site", "cross-site")
+	_, err = server.approver.GetLoginOptions(t.Context(), crossSite)
+	requireError(t, err, connect.CodePermissionDenied, reasonCrossOrigin)
 }
 
 func TestApproverRPCsRequireSameOrigin(t *testing.T) {
@@ -431,30 +484,30 @@ func TestApproverRPCsRequireSameOrigin(t *testing.T) {
 	}
 }
 
-func TestAgentAPIRequiresSessionToken(t *testing.T) {
+func TestGrantAPIRequiresRequesterToken(t *testing.T) {
 	t.Parallel()
 
 	server := newTestServer(t)
 	message := &authorizerv1.CreateGrantRequestRequest{Reason: "x", Items: []*authorizerv1.PermissionItemInput{readItem("kv/data/a")}}
-	_, err := server.agent.CreateGrantRequest(t.Context(), connect.NewRequest(message))
+	_, err := server.grant.CreateGrantRequest(t.Context(), connect.NewRequest(message))
 	var connectErr *connect.Error
 	if requireError(t, err, connect.CodeUnauthenticated, reasonInvalidToken); !errors.As(err, &connectErr) || connectErr.Meta().Get("WWW-Authenticate") != "Bearer" {
 		t.Fatalf("missing bearer challenge: %v", err)
 	}
 
-	_, err = server.agent.CreateGrantRequest(t.Context(), bearer("unknown-token", message))
+	_, err = server.grant.CreateGrantRequest(t.Context(), bearer("unknown-token", message))
 	requireError(t, err, connect.CodeUnauthenticated, reasonInvalidToken)
 
-	// A human approver token has an entity but not the session token role.
-	_, err = server.agent.CreateGrantRequest(t.Context(), bearer("human-token", message))
-	requireError(t, err, connect.CodePermissionDenied, reasonNotSessionIdentity)
+	// A human approver token has an entity but matches no Requester Rule.
+	_, err = server.grant.CreateGrantRequest(t.Context(), bearer("human-token", message))
+	requireError(t, err, connect.CodePermissionDenied, reasonNotRequester)
 
-	// Approver cookies never authenticate the Agent API.
+	// Approver cookies never authenticate the Grant API.
 	server.login()
-	_, err = server.agent.ListSessionGrants(t.Context(), connect.NewRequest(&authorizerv1.ListSessionGrantsRequest{}))
+	_, err = server.grant.ListMyGrants(t.Context(), connect.NewRequest(&authorizerv1.ListMyGrantsRequest{}))
 	requireError(t, err, connect.CodeUnauthenticated, reasonInvalidToken)
 
-	stream, err := server.agent.WatchGrantRequest(t.Context(), bearer("unknown-token", &authorizerv1.WatchGrantRequestRequest{Id: "x"}))
+	stream, err := server.grant.WatchGrantRequest(t.Context(), bearer("unknown-token", &authorizerv1.WatchGrantRequestRequest{Id: "x"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,10 +515,10 @@ func TestAgentAPIRequiresSessionToken(t *testing.T) {
 	requireError(t, streamEnd(stream), connect.CodeUnauthenticated, reasonInvalidToken)
 	_ = stream.Close()
 
-	_, err = server.agent.CreateGrantRequest(t.Context(), bearer("session-a", &authorizerv1.CreateGrantRequestRequest{Items: message.Items}))
+	_, err = server.grant.CreateGrantRequest(t.Context(), bearer("session-a", &authorizerv1.CreateGrantRequestRequest{Items: message.Items}))
 	requireError(t, err, connect.CodeInvalidArgument, reasonInvalidRequest)
 
-	_, err = server.agent.CreateGrantRequest(t.Context(), bearer("session-a", &authorizerv1.CreateGrantRequestRequest{Reason: strings.Repeat("x", maxBodyBytes+1), Items: message.Items}))
+	_, err = server.grant.CreateGrantRequest(t.Context(), bearer("session-a", &authorizerv1.CreateGrantRequestRequest{Reason: strings.Repeat("x", maxBodyBytes+1), Items: message.Items}))
 	if connect.CodeOf(err) != connect.CodeResourceExhausted {
 		t.Fatalf("oversized body error = %v", err)
 	}
@@ -492,7 +545,7 @@ func TestGrantRequestApprovalWorkflow(t *testing.T) {
 		t.Fatalf("created = %v", created)
 	}
 
-	if created.GetSession() != nil || created.GetItems()[2].GetReason() == "" || created.GetItems()[0].GetExpiresAt() == nil {
+	if created.GetRequester() != nil || created.GetItems()[2].GetReason() == "" || created.GetItems()[0].GetExpiresAt() == nil {
 		t.Fatalf("agent view = %v", created)
 	}
 
@@ -508,11 +561,11 @@ func TestGrantRequestApprovalWorkflow(t *testing.T) {
 	}
 
 	view := listed.Msg.GetGrantRequests()[0]
-	if session := view.GetSession(); view.GetReason() != "deploy the app" || session.GetId() != "aaa" || session.GetTitle() != "Fix CI" || session.GetDirectory() != "/src/app" || session.GetEntityId() != "entity-a" {
+	if session := view.GetRequester(); view.GetReason() != "deploy the app" || session.GetId() != "aaa" || session.GetTitle() != "Fix CI" || session.GetDirectory() != "/src/app" || session.GetEntityId() != "entity-a" {
 		t.Fatalf("approver view = %v", view)
 	}
 
-	_, err = server.agent.GetGrantRequest(t.Context(), bearer("session-b", &authorizerv1.GetGrantRequestRequest{Id: created.GetId()}))
+	_, err = server.grant.GetGrantRequest(t.Context(), bearer("session-b", &authorizerv1.GetGrantRequestRequest{Id: created.GetId()}))
 	requireError(t, err, connect.CodeNotFound, reasonNotFound)
 
 	itemA, itemB := created.GetItems()[0].GetId(), created.GetItems()[1].GetId()
@@ -560,18 +613,18 @@ func TestGrantRequestApprovalWorkflow(t *testing.T) {
 		t.Fatalf("already granted = %v", again)
 	}
 
-	agentGrants, err := server.agent.ListSessionGrants(t.Context(), bearer("session-a", &authorizerv1.ListSessionGrantsRequest{}))
-	if err != nil || len(agentGrants.Msg.GetGrants()) != 1 || agentGrants.Msg.GetGrants()[0].GetPath() != "kv/data/a" || agentGrants.Msg.GetGrants()[0].GetSession() != nil {
+	agentGrants, err := server.grant.ListMyGrants(t.Context(), bearer("session-a", &authorizerv1.ListMyGrantsRequest{}))
+	if err != nil || len(agentGrants.Msg.GetGrants()) != 1 || agentGrants.Msg.GetGrants()[0].GetPath() != "kv/data/a" || agentGrants.Msg.GetGrants()[0].GetRequester() != nil {
 		t.Fatalf("agent grants = %v, %v", agentGrants, err)
 	}
 
-	otherGrants, err := server.agent.ListSessionGrants(t.Context(), bearer("session-b", &authorizerv1.ListSessionGrantsRequest{}))
+	otherGrants, err := server.grant.ListMyGrants(t.Context(), bearer("session-b", &authorizerv1.ListMyGrantsRequest{}))
 	if err != nil || len(otherGrants.Msg.GetGrants()) != 0 {
 		t.Fatalf("other session grants = %v, %v", otherGrants, err)
 	}
 
 	allGrants, err := server.approver.ListGrants(t.Context(), connect.NewRequest(&authorizerv1.ListGrantsRequest{}))
-	if err != nil || len(allGrants.Msg.GetGrants()) != 1 || allGrants.Msg.GetGrants()[0].GetSession() == nil || allGrants.Msg.GetGrants()[0].GetApprovedBy() != "Bob" {
+	if err != nil || len(allGrants.Msg.GetGrants()) != 1 || allGrants.Msg.GetGrants()[0].GetRequester() == nil || allGrants.Msg.GetGrants()[0].GetApprovedBy() != "Bob" {
 		t.Fatalf("approver grants = %v, %v", allGrants, err)
 	}
 
@@ -597,10 +650,26 @@ func TestGrantRequestApprovalWorkflow(t *testing.T) {
 		t.Fatalf("history = %v, %v", history, err)
 	}
 
-	revokedView, err := server.agent.GetGrantRequest(t.Context(), bearer("session-a", &authorizerv1.GetGrantRequestRequest{Id: created.GetId()}))
+	revokedView, err := server.grant.GetGrantRequest(t.Context(), bearer("session-a", &authorizerv1.GetGrantRequestRequest{Id: created.GetId()}))
 	if err != nil || revokedView.Msg.GetGrantRequest().GetItems()[0].GetState() != authorizerv1.ItemState_ITEM_STATE_REVOKED {
 		t.Fatalf("revoked item = %v, %v", revokedView, err)
 	}
+}
+
+func TestApproversCannotDecideTheirOwnRequests(t *testing.T) {
+	t.Parallel()
+
+	server := newTestServer(t)
+	// An approver who also holds a Requester token shares one entity across both.
+	server.bao.SetIdentity("bob-session", openbao.Identity{EntityID: "bob-id", Role: "opencode-session", Path: "auth/token/create/opencode-session"})
+	server.bao.AddEntity(openbao.Entity{ID: "bob-id"})
+	created := server.create("bob-session", "self", readItem("kv/data/a"))
+	server.login()
+	_, err := server.approver.DecideItems(t.Context(), connect.NewRequest(&authorizerv1.DecideItemsRequest{
+		GrantRequestId: created.GetId(),
+		Decisions:      []*authorizerv1.ItemDecision{{ItemId: created.GetItems()[0].GetId(), Decision: authorizerv1.Decision_DECISION_APPROVE}},
+	}))
+	requireError(t, err, connect.CodePermissionDenied, reasonSelfApproval)
 }
 
 func TestOpenBaoFailuresAreReported(t *testing.T) {
@@ -620,9 +689,9 @@ func TestOpenBaoFailuresAreReported(t *testing.T) {
 		t.Fatalf("approver error lacks OpenBao detail: %v", err)
 	}
 
-	// Agents get no OpenBao error text.
+	// Requesters get no OpenBao error text.
 	server.bao.Fail("LookupSelf", &openbao.HTTPError{StatusCode: http.StatusInternalServerError, Errors: []string{"internal detail"}})
-	_, err = server.agent.ListSessionGrants(t.Context(), bearer("session-a", &authorizerv1.ListSessionGrantsRequest{}))
+	_, err = server.grant.ListMyGrants(t.Context(), bearer("session-a", &authorizerv1.ListMyGrantsRequest{}))
 	requireError(t, err, connect.CodeUnavailable, reasonOpenBaoUnavailable)
 	if connectErr := new(connect.Error); errors.As(err, &connectErr) && connectErr.Message() != "OpenBao request failed" {
 		t.Fatalf("agent error message = %q", connectErr.Message())
@@ -638,14 +707,14 @@ func TestWatchGrantRequestFollowsDecisionsUntilNothingIsPending(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	stream, err := server.agent.WatchGrantRequest(ctx, bearer("session-a", &authorizerv1.WatchGrantRequestRequest{Id: created.GetId()}))
+	stream, err := server.grant.WatchGrantRequest(ctx, bearer("session-a", &authorizerv1.WatchGrantRequestRequest{Id: created.GetId()}))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	defer func() { _ = stream.Close() }()
 	snapshot, _ := nextRequest(t, stream)
-	if snapshot.GetId() != created.GetId() || snapshot.GetSession() != nil || !slices.Equal(itemStatesOf(snapshot), itemStatesOf(created)) {
+	if snapshot.GetId() != created.GetId() || snapshot.GetRequester() != nil || !slices.Equal(itemStatesOf(snapshot), itemStatesOf(created)) {
 		t.Fatalf("snapshot = %v", snapshot)
 	}
 
@@ -682,7 +751,7 @@ func TestWatchGrantRequestFollowsDecisionsUntilNothingIsPending(t *testing.T) {
 	}
 
 	// A request with nothing pending sends its state once and ends.
-	done, err := server.agent.WatchGrantRequest(ctx, bearer("session-a", &authorizerv1.WatchGrantRequestRequest{Id: created.GetId()}))
+	done, err := server.grant.WatchGrantRequest(ctx, bearer("session-a", &authorizerv1.WatchGrantRequestRequest{Id: created.GetId()}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -696,7 +765,7 @@ func TestWatchGrantRequestFollowsDecisionsUntilNothingIsPending(t *testing.T) {
 	}
 
 	_ = done.Close()
-	other, err := server.agent.WatchGrantRequest(ctx, bearer("session-b", &authorizerv1.WatchGrantRequestRequest{Id: created.GetId()}))
+	other, err := server.grant.WatchGrantRequest(ctx, bearer("session-b", &authorizerv1.WatchGrantRequestRequest{Id: created.GetId()}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -713,7 +782,7 @@ func TestWatchGrantRequestEndsWhenTokenStopsAuthenticating(t *testing.T) {
 	created := server.create("session-a", "x", readItem("kv/data/a"))
 	watch := func() *connect.ServerStreamForClient[authorizerv1.WatchGrantRequestResponse] {
 		t.Helper()
-		stream, err := server.agent.WatchGrantRequest(t.Context(), bearer("session-a", &authorizerv1.WatchGrantRequestRequest{Id: created.GetId()}))
+		stream, err := server.grant.WatchGrantRequest(t.Context(), bearer("session-a", &authorizerv1.WatchGrantRequestRequest{Id: created.GetId()}))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -737,7 +806,7 @@ func TestWatchGrantRequestEndsWhenTokenStopsAuthenticating(t *testing.T) {
 	server.bao.Fail("LookupSelf", nil)
 	stream = watch()
 	server.bao.SetIdentity("session-a", openbao.Identity{})
-	requireError(t, streamEnd(stream), connect.CodePermissionDenied, reasonNotSessionIdentity)
+	requireError(t, streamEnd(stream), connect.CodePermissionDenied, reasonNotRequester)
 	_ = stream.Close()
 	server.waitForNoSubscribers()
 }
@@ -748,7 +817,7 @@ func TestStreamsDisableProxyBuffering(t *testing.T) {
 	server := newTestServer(t)
 	server.login()
 	created := server.create("session-a", "x", readItem("kv/data/a"))
-	agentStream, err := server.agent.WatchGrantRequest(t.Context(), bearer("session-a", &authorizerv1.WatchGrantRequestRequest{Id: created.GetId()}))
+	agentStream, err := server.grant.WatchGrantRequest(t.Context(), bearer("session-a", &authorizerv1.WatchGrantRequestRequest{Id: created.GetId()}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -794,7 +863,7 @@ func TestWatchEventsSendsSnapshotsUntilLogout(t *testing.T) {
 		t.Fatal("no heartbeat while waiting")
 	}
 
-	if len(withPending.GetPendingRequests()) != 1 || withPending.GetPendingRequests()[0].GetSession().GetId() != "aaa" {
+	if len(withPending.GetPendingRequests()) != 1 || withPending.GetPendingRequests()[0].GetRequester().GetId() != "aaa" {
 		t.Fatalf("pending snapshot = %v", withPending)
 	}
 
@@ -853,7 +922,7 @@ func TestStreamsOutliveServerTimeoutsAndStopOnDisconnect(t *testing.T) {
 	created := server.create("session-a", "x", readItem("kv/data/a"))
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	agentStream, err := server.agent.WatchGrantRequest(ctx, bearer("session-a", &authorizerv1.WatchGrantRequestRequest{Id: created.GetId()}))
+	agentStream, err := server.grant.WatchGrantRequest(ctx, bearer("session-a", &authorizerv1.WatchGrantRequestRequest{Id: created.GetId()}))
 	if err != nil {
 		t.Fatal(err)
 	}

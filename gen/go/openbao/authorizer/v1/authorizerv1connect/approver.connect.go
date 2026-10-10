@@ -33,8 +33,12 @@ const (
 // reflection-formatted method names, remove the leading slash and convert the remaining slash to a
 // period.
 const (
-	// ApproverServiceLoginProcedure is the fully-qualified name of the ApproverService's Login RPC.
-	ApproverServiceLoginProcedure = "/openbao.authorizer.v1.ApproverService/Login"
+	// ApproverServiceGetLoginOptionsProcedure is the fully-qualified name of the ApproverService's
+	// GetLoginOptions RPC.
+	ApproverServiceGetLoginOptionsProcedure = "/openbao.authorizer.v1.ApproverService/GetLoginOptions"
+	// ApproverServiceCreateSessionProcedure is the fully-qualified name of the ApproverService's
+	// CreateSession RPC.
+	ApproverServiceCreateSessionProcedure = "/openbao.authorizer.v1.ApproverService/CreateSession"
 	// ApproverServiceGetSessionProcedure is the fully-qualified name of the ApproverService's
 	// GetSession RPC.
 	ApproverServiceGetSessionProcedure = "/openbao.authorizer.v1.ApproverService/GetSession"
@@ -68,11 +72,13 @@ const (
 
 // ApproverServiceClient is a client for the openbao.authorizer.v1.ApproverService service.
 type ApproverServiceClient interface {
-	// Login checks OpenBao userpass credentials and the approver policy, then
-	// revokes the OpenBao token at once: the authorizer keeps only its own
-	// session. The password is discarded; the session cookie is set on the
-	// response. It is the only RPC that needs no session.
-	Login(context.Context, *connect.Request[v1.LoginRequest]) (*connect.Response[v1.LoginResponse], error)
+	// GetLoginOptions tells the PWA where OpenBao is and which login methods to
+	// offer. It needs no session.
+	GetLoginOptions(context.Context, *connect.Request[v1.GetLoginOptionsRequest]) (*connect.Response[v1.GetLoginOptionsResponse], error)
+	// CreateSession checks an OpenBao token's approver policy, revokes the
+	// token unless asked to keep it, and sets the session cookie. The authorizer never sees
+	// passwords or other login credentials.
+	CreateSession(context.Context, *connect.Request[v1.CreateSessionRequest]) (*connect.Response[v1.CreateSessionResponse], error)
 	// GetSession restores the current session after a page load.
 	GetSession(context.Context, *connect.Request[v1.GetSessionRequest]) (*connect.Response[v1.GetSessionResponse], error)
 	// Logout ends the session and clears the session cookie.
@@ -105,10 +111,16 @@ func NewApproverServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 	baseURL = strings.TrimRight(baseURL, "/")
 	approverServiceMethods := v1.File_openbao_authorizer_v1_approver_proto.Services().ByName("ApproverService").Methods()
 	return &approverServiceClient{
-		login: connect.NewClient[v1.LoginRequest, v1.LoginResponse](
+		getLoginOptions: connect.NewClient[v1.GetLoginOptionsRequest, v1.GetLoginOptionsResponse](
 			httpClient,
-			baseURL+ApproverServiceLoginProcedure,
-			connect.WithSchema(approverServiceMethods.ByName("Login")),
+			baseURL+ApproverServiceGetLoginOptionsProcedure,
+			connect.WithSchema(approverServiceMethods.ByName("GetLoginOptions")),
+			connect.WithClientOptions(opts...),
+		),
+		createSession: connect.NewClient[v1.CreateSessionRequest, v1.CreateSessionResponse](
+			httpClient,
+			baseURL+ApproverServiceCreateSessionProcedure,
+			connect.WithSchema(approverServiceMethods.ByName("CreateSession")),
 			connect.WithClientOptions(opts...),
 		),
 		getSession: connect.NewClient[v1.GetSessionRequest, v1.GetSessionResponse](
@@ -176,7 +188,8 @@ func NewApproverServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 
 // approverServiceClient implements ApproverServiceClient.
 type approverServiceClient struct {
-	login                    *connect.Client[v1.LoginRequest, v1.LoginResponse]
+	getLoginOptions          *connect.Client[v1.GetLoginOptionsRequest, v1.GetLoginOptionsResponse]
+	createSession            *connect.Client[v1.CreateSessionRequest, v1.CreateSessionResponse]
 	getSession               *connect.Client[v1.GetSessionRequest, v1.GetSessionResponse]
 	logout                   *connect.Client[v1.LogoutRequest, v1.LogoutResponse]
 	listGrantRequests        *connect.Client[v1.ListGrantRequestsRequest, v1.ListGrantRequestsResponse]
@@ -189,9 +202,14 @@ type approverServiceClient struct {
 	deletePushSubscription   *connect.Client[v1.DeletePushSubscriptionRequest, v1.DeletePushSubscriptionResponse]
 }
 
-// Login calls openbao.authorizer.v1.ApproverService.Login.
-func (c *approverServiceClient) Login(ctx context.Context, req *connect.Request[v1.LoginRequest]) (*connect.Response[v1.LoginResponse], error) {
-	return c.login.CallUnary(ctx, req)
+// GetLoginOptions calls openbao.authorizer.v1.ApproverService.GetLoginOptions.
+func (c *approverServiceClient) GetLoginOptions(ctx context.Context, req *connect.Request[v1.GetLoginOptionsRequest]) (*connect.Response[v1.GetLoginOptionsResponse], error) {
+	return c.getLoginOptions.CallUnary(ctx, req)
+}
+
+// CreateSession calls openbao.authorizer.v1.ApproverService.CreateSession.
+func (c *approverServiceClient) CreateSession(ctx context.Context, req *connect.Request[v1.CreateSessionRequest]) (*connect.Response[v1.CreateSessionResponse], error) {
+	return c.createSession.CallUnary(ctx, req)
 }
 
 // GetSession calls openbao.authorizer.v1.ApproverService.GetSession.
@@ -246,11 +264,13 @@ func (c *approverServiceClient) DeletePushSubscription(ctx context.Context, req 
 
 // ApproverServiceHandler is an implementation of the openbao.authorizer.v1.ApproverService service.
 type ApproverServiceHandler interface {
-	// Login checks OpenBao userpass credentials and the approver policy, then
-	// revokes the OpenBao token at once: the authorizer keeps only its own
-	// session. The password is discarded; the session cookie is set on the
-	// response. It is the only RPC that needs no session.
-	Login(context.Context, *connect.Request[v1.LoginRequest]) (*connect.Response[v1.LoginResponse], error)
+	// GetLoginOptions tells the PWA where OpenBao is and which login methods to
+	// offer. It needs no session.
+	GetLoginOptions(context.Context, *connect.Request[v1.GetLoginOptionsRequest]) (*connect.Response[v1.GetLoginOptionsResponse], error)
+	// CreateSession checks an OpenBao token's approver policy, revokes the
+	// token unless asked to keep it, and sets the session cookie. The authorizer never sees
+	// passwords or other login credentials.
+	CreateSession(context.Context, *connect.Request[v1.CreateSessionRequest]) (*connect.Response[v1.CreateSessionResponse], error)
 	// GetSession restores the current session after a page load.
 	GetSession(context.Context, *connect.Request[v1.GetSessionRequest]) (*connect.Response[v1.GetSessionResponse], error)
 	// Logout ends the session and clears the session cookie.
@@ -279,10 +299,16 @@ type ApproverServiceHandler interface {
 // and JSON codecs. They also support gzip compression.
 func NewApproverServiceHandler(svc ApproverServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
 	approverServiceMethods := v1.File_openbao_authorizer_v1_approver_proto.Services().ByName("ApproverService").Methods()
-	approverServiceLoginHandler := connect.NewUnaryHandler(
-		ApproverServiceLoginProcedure,
-		svc.Login,
-		connect.WithSchema(approverServiceMethods.ByName("Login")),
+	approverServiceGetLoginOptionsHandler := connect.NewUnaryHandler(
+		ApproverServiceGetLoginOptionsProcedure,
+		svc.GetLoginOptions,
+		connect.WithSchema(approverServiceMethods.ByName("GetLoginOptions")),
+		connect.WithHandlerOptions(opts...),
+	)
+	approverServiceCreateSessionHandler := connect.NewUnaryHandler(
+		ApproverServiceCreateSessionProcedure,
+		svc.CreateSession,
+		connect.WithSchema(approverServiceMethods.ByName("CreateSession")),
 		connect.WithHandlerOptions(opts...),
 	)
 	approverServiceGetSessionHandler := connect.NewUnaryHandler(
@@ -347,8 +373,10 @@ func NewApproverServiceHandler(svc ApproverServiceHandler, opts ...connect.Handl
 	)
 	return "/openbao.authorizer.v1.ApproverService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case ApproverServiceLoginProcedure:
-			approverServiceLoginHandler.ServeHTTP(w, r)
+		case ApproverServiceGetLoginOptionsProcedure:
+			approverServiceGetLoginOptionsHandler.ServeHTTP(w, r)
+		case ApproverServiceCreateSessionProcedure:
+			approverServiceCreateSessionHandler.ServeHTTP(w, r)
 		case ApproverServiceGetSessionProcedure:
 			approverServiceGetSessionHandler.ServeHTTP(w, r)
 		case ApproverServiceLogoutProcedure:
@@ -378,8 +406,12 @@ func NewApproverServiceHandler(svc ApproverServiceHandler, opts ...connect.Handl
 // UnimplementedApproverServiceHandler returns CodeUnimplemented from all methods.
 type UnimplementedApproverServiceHandler struct{}
 
-func (UnimplementedApproverServiceHandler) Login(context.Context, *connect.Request[v1.LoginRequest]) (*connect.Response[v1.LoginResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("openbao.authorizer.v1.ApproverService.Login is not implemented"))
+func (UnimplementedApproverServiceHandler) GetLoginOptions(context.Context, *connect.Request[v1.GetLoginOptionsRequest]) (*connect.Response[v1.GetLoginOptionsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("openbao.authorizer.v1.ApproverService.GetLoginOptions is not implemented"))
+}
+
+func (UnimplementedApproverServiceHandler) CreateSession(context.Context, *connect.Request[v1.CreateSessionRequest]) (*connect.Response[v1.CreateSessionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("openbao.authorizer.v1.ApproverService.CreateSession is not implemented"))
 }
 
 func (UnimplementedApproverServiceHandler) GetSession(context.Context, *connect.Request[v1.GetSessionRequest]) (*connect.Response[v1.GetSessionResponse], error) {

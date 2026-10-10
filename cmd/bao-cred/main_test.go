@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -17,8 +19,24 @@ import (
 
 const testToken = "session-token-value"
 
+// parseRead runs the read command with arguments and returns the options it
+// would read with.
+func parseRead(t *testing.T, arguments ...string) (options, error) {
+	t.Helper()
+	var parsed options
+	root := newRootCommand(func(_ context.Context, opts options, _, _ io.Writer) error {
+		parsed = opts
+		return nil
+	})
+	root.SetArgs(append([]string{"read"}, arguments...))
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	err := root.Execute()
+	return parsed, err
+}
+
 func TestParseOutputAndExecModes(t *testing.T) {
-	output, err := parseOptions([]string{"-field", "database.username", "-reason", " deploy ", "secret/path"}, &bytes.Buffer{})
+	output, err := parseRead(t, "--field", "database.username", "--reason", " deploy ", "secret/path")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,44 +45,161 @@ func TestParseOutputAndExecModes(t *testing.T) {
 		t.Fatalf("unexpected options: %#v", output)
 	}
 
-	execOptions, err := parseOptions([]string{"-map", "TOKEN=token", "secret/path", "--", "tool", "arg"}, &bytes.Buffer{})
+	execOptions, err := parseRead(t, "--map", "TOKEN=token", "secret/path", "--", "tool", "--field", "arg")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if !reflect.DeepEqual(execOptions.command, []string{"tool", "arg"}) || execOptions.mappings[0].Name != "TOKEN" {
+	if !reflect.DeepEqual(execOptions.command, []string{"tool", "--field", "arg"}) ||
+		execOptions.mappings[0].Name != "TOKEN" || execOptions.field != "" {
 		t.Fatalf("unexpected options: %#v", execOptions)
 	}
 }
 
+func TestParseAcceptsFlagsAfterPath(t *testing.T) {
+	parsed, err := parseRead(t, "secret/path", "--field", "token")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if parsed.path != "secret/path" || parsed.field != "token" || parsed.command != nil {
+		t.Fatalf("unexpected options: %#v", parsed)
+	}
+}
+
 func TestParseRejectsMixedDeliveryModes(t *testing.T) {
-	_, err := parseOptions([]string{"-field", "token", "-map", "TOKEN=token", "secret/path", "--", "tool"}, &bytes.Buffer{})
+	_, err := parseRead(t, "--field", "token", "--map", "TOKEN=token", "secret/path", "--", "tool")
 	if exitCode(err) != exitUsage {
 		t.Fatalf("error = %v, want usage error", err)
 	}
 }
 
 func TestParseRejectsDuplicateMappings(t *testing.T) {
-	_, err := parseOptions([]string{"-format", "dotenv", "-map", "TOKEN=one", "-map", "TOKEN=two", "secret/path"}, &bytes.Buffer{})
+	_, err := parseRead(t, "--format", "dotenv", "--map", "TOKEN=one", "--map", "TOKEN=two", "secret/path")
 	if exitCode(err) != exitUsage {
 		t.Fatalf("error = %v, want usage error", err)
 	}
 }
 
-func TestSessionTokenPriority(t *testing.T) {
+func TestReadUsageErrors(t *testing.T) {
+	openBao := fakeOpenBao(t, func() bool { return true })
+	setupEnvironment(t, "", openBao.URL)
+	for _, arguments := range [][]string{
+		{},
+		{"secret/app"},
+		{"unknown", "secret/app"},
+		{"read"},
+		{"read", "secret/app", "secret/other"},
+		{"read", "--map", "TOKEN=token", "secret/app", "--"},
+		{"read", "--map", "TOKEN=token", "--", "tool"},
+		{"read", "--timeout", "0s", "secret/app"},
+		{"read", "--timeout", "soon", "secret/app"},
+		{"read", "--format", "xml", "secret/app"},
+		{"read", "--map", "TOKEN", "secret/app"},
+		{"read", "-reason", "deploy", "secret/app"},
+		{"read", "--unknown", "secret/app"},
+	} {
+		var stdout, stderr bytes.Buffer
+		err := run(arguments, &stdout, &stderr)
+		if exitCode(err) != exitUsage || !strings.Contains(err.Error(), "--help' for usage") {
+			t.Fatalf("%v: error = %v (exit %d)", arguments, err, exitCode(err))
+		}
+
+		// main prints the error once; cobra itself prints nothing.
+		if stdout.Len() != 0 || stderr.Len() != 0 {
+			t.Fatalf("%v: stdout %q, stderr %q", arguments, stdout.String(), stderr.String())
+		}
+	}
+
+	if openBao.reads() != 0 {
+		t.Fatalf("usage errors reached OpenBao %d times", openBao.reads())
+	}
+}
+
+func TestSingleDashLongFlagHintsDoubleDash(t *testing.T) {
+	for _, arguments := range [][]string{
+		{"read", "-reason", "deploy", "secret/app"},
+		{"read", "-field=token", "secret/app"},
+		{"request", "-item", "kv/data/a=read"},
+	} {
+		err := run(arguments, &bytes.Buffer{}, &bytes.Buffer{})
+		flag, _, _ := strings.Cut(strings.TrimPrefix(arguments[1], "-"), "=")
+		if exitCode(err) != exitUsage || !strings.Contains(err.Error(), "long flags take two dashes: --"+flag) {
+			t.Fatalf("%v: error = %v (exit %d)", arguments, err, exitCode(err))
+		}
+	}
+}
+
+func TestRuntimeErrorPrintsNoUsage(t *testing.T) {
+	openBao := fakeOpenBao(t, func() bool { return false })
+	setupEnvironment(t, "", openBao.URL)
+
+	var stdout, stderr bytes.Buffer
+	err := run([]string{"read", "secret/app"}, &stdout, &stderr)
+	if exitCode(err) != exitFailure || strings.Contains(err.Error(), "for usage") {
+		t.Fatalf("error = %v (exit %d)", err, exitCode(err))
+	}
+
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("stdout %q, stderr %q", stdout.String(), stderr.String())
+	}
+}
+
+func TestHelpExitsCleanly(t *testing.T) {
+	for _, arguments := range [][]string{{"--help"}, {"read", "-h"}, {"request", "--help"}, {"help", "grants"}} {
+		var stdout bytes.Buffer
+		if err := run(arguments, &stdout, &bytes.Buffer{}); err != nil {
+			t.Fatalf("%v: error = %v", arguments, err)
+		}
+
+		if !strings.Contains(stdout.String(), "Usage:") {
+			t.Fatalf("%v: stdout = %q", arguments, stdout.String())
+		}
+	}
+}
+
+func TestReadPassesArgumentsAfterDashToCommand(t *testing.T) {
+	openBao := fakeOpenBao(t, func() bool { return true })
+	setupEnvironment(t, "", openBao.URL)
+
+	var stdout bytes.Buffer
+	err := run([]string{
+		"read", "--map", "SECRET=token", "secret/app", "--",
+		"sh", "-c", `printf '%s|%s|%s' "$SECRET" "$1" "${BAO_TOKEN-unset}"`, "sh", "--quiet",
+	}, &stdout, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if stdout.String() != "secret-value|--quiet|unset" {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestReadReturnsCommandExitStatus(t *testing.T) {
+	openBao := fakeOpenBao(t, func() bool { return true })
+	setupEnvironment(t, "", openBao.URL)
+
+	err := run([]string{"read", "--map", "SECRET=token", "secret/app", "--", "sh", "-c", "exit 7"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if exitCode(err) != 7 {
+		t.Fatalf("error = %v (exit %d), want 7", err, exitCode(err))
+	}
+}
+
+func TestRequesterTokenPriority(t *testing.T) {
 	t.Setenv("BAO_TOKEN", "bao-token")
 	t.Setenv("VAULT_TOKEN", "vault-token")
-	if got, err := sessionToken(); err != nil || got != "bao-token" {
+	if got, err := requesterToken(); err != nil || got != "bao-token" {
 		t.Fatalf("BAO_TOKEN: got %q, %v", got, err)
 	}
 
 	t.Setenv("BAO_TOKEN", "")
-	if got, err := sessionToken(); err != nil || got != "vault-token" {
+	if got, err := requesterToken(); err != nil || got != "vault-token" {
 		t.Fatalf("VAULT_TOKEN: got %q, %v", got, err)
 	}
 
 	t.Setenv("VAULT_TOKEN", "")
-	if _, err := sessionToken(); err == nil || !strings.Contains(err.Error(), "BAO_TOKEN") {
+	if _, err := requesterToken(); err == nil || !strings.Contains(err.Error(), "BAO_TOKEN") {
 		t.Fatalf("missing token error = %v", err)
 	}
 }
@@ -86,8 +221,8 @@ func TestReadDeniedWithoutReasonHints(t *testing.T) {
 	setupEnvironment(t, authorizer.url, openBao.URL)
 
 	var stdout bytes.Buffer
-	err := run([]string{"secret/app"}, &stdout, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "-reason") || !strings.Contains(err.Error(), "bao-cred request") {
+	err := run([]string{"read", "secret/app"}, &stdout, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "--reason") || !strings.Contains(err.Error(), "bao-cred request") {
 		t.Fatalf("error = %v, want hint", err)
 	}
 
@@ -106,7 +241,7 @@ func TestReadWithReasonRequestsAccessAndRetries(t *testing.T) {
 	setupEnvironment(t, authorizer.url, openBao.URL)
 
 	var stdout, stderr bytes.Buffer
-	err := run([]string{"-reason", "deploy the app", "-field", "token", "secret/app"}, &stdout, &stderr)
+	err := run([]string{"read", "--reason", "deploy the app", "--field", "token", "secret/app"}, &stdout, &stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +272,7 @@ func TestReadWithReasonReportsRejection(t *testing.T) {
 	setupEnvironment(t, authorizer.url, openBao.URL)
 
 	var stdout bytes.Buffer
-	err := run([]string{"-reason", "deploy", "-quiet", "secret/app"}, &stdout, &bytes.Buffer{})
+	err := run([]string{"read", "--reason", "deploy", "--quiet", "secret/app"}, &stdout, &bytes.Buffer{})
 	if exitCode(err) != exitNotGranted || !strings.Contains(err.Error(), "use the staging path") {
 		t.Fatalf("error = %v (exit %d)", err, exitCode(err))
 	}
@@ -155,7 +290,7 @@ func TestReadWithReasonWithoutAuthorizerURLFails(t *testing.T) {
 	openBao := fakeOpenBao(t, func() bool { return false })
 	setupEnvironment(t, "", openBao.URL)
 
-	err := run([]string{"-reason", "deploy", "secret/app"}, &bytes.Buffer{}, &bytes.Buffer{})
+	err := run([]string{"read", "--reason", "deploy", "secret/app"}, &bytes.Buffer{}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "OPENBAO_AUTHORIZER_URL") {
 		t.Fatalf("error = %v", err)
 	}

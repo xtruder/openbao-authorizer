@@ -1,4 +1,4 @@
-package httpapi
+package api
 
 import (
 	"time"
@@ -7,6 +7,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	authorizerv1 "github.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1"
+	"github.com/xtruder/openbao-authorizer/internal/config"
 	"github.com/xtruder/openbao-authorizer/internal/store"
 )
 
@@ -28,19 +29,38 @@ func optionalTimestamp(value time.Time) *timestamppb.Timestamp {
 	return timestamppb.New(value)
 }
 
-func agentSessionProto(entityID string, display store.SessionDisplay) *authorizerv1.AgentSession {
-	return &authorizerv1.AgentSession{Id: display.ID, Title: display.Title, Directory: display.Directory, EntityId: entityID}
+var loginMethodTypes = map[string]authorizerv1.LoginMethodType{
+	"token":    authorizerv1.LoginMethodType_LOGIN_METHOD_TYPE_TOKEN,
+	"userpass": authorizerv1.LoginMethodType_LOGIN_METHOD_TYPE_USERPASS,
+	"ldap":     authorizerv1.LoginMethodType_LOGIN_METHOD_TYPE_LDAP,
+	"github":   authorizerv1.LoginMethodType_LOGIN_METHOD_TYPE_GITHUB,
+	"oidc":     authorizerv1.LoginMethodType_LOGIN_METHOD_TYPE_OIDC,
 }
 
-// requestProto renders a request; forApprover adds session identity and
-// decision metadata that agents do not need.
+func loginOptionsProto(login config.ApproverLogin) *authorizerv1.GetLoginOptionsResponse {
+	rendered := &authorizerv1.GetLoginOptionsResponse{OpenbaoAddress: login.OpenBaoAddress, Namespace: login.Namespace}
+	for _, method := range login.Methods {
+		rendered.Methods = append(rendered.Methods, &authorizerv1.LoginMethod{
+			Type: loginMethodTypes[method.Type], Mount: method.Mount, Label: method.Label, OidcRole: method.OIDCRole,
+		})
+	}
+
+	return rendered
+}
+
+func requesterProto(entityID string, display store.RequesterDisplay) *authorizerv1.Requester {
+	return &authorizerv1.Requester{Id: display.ID, Title: display.Title, Directory: display.Directory, EntityId: entityID, Rule: display.Rule}
+}
+
+// requestProto renders a request; forApprover adds the Requester and decision
+// metadata that Requesters do not need.
 func requestProto(request store.GrantRequest, forApprover bool) *authorizerv1.GrantRequest {
 	rendered := &authorizerv1.GrantRequest{
 		Id: request.ID, Reason: request.Reason, CreatedAt: timestamppb.New(request.CreatedAt),
 		Items: make([]*authorizerv1.PermissionItem, 0, len(request.Items)),
 	}
 	if forApprover {
-		rendered.Session = agentSessionProto(request.EntityID, request.Session)
+		rendered.Requester = requesterProto(request.EntityID, request.Requester)
 	}
 
 	for _, item := range request.Items {
@@ -89,7 +109,7 @@ func grantsProto(values []store.Grant, forApprover bool) []*authorizerv1.Grant {
 		}
 		if forApprover {
 			renderedGrant.ApprovedBy = grant.ApprovedBy
-			renderedGrant.Session = agentSessionProto(grant.EntityID, grant.Session)
+			renderedGrant.Requester = requesterProto(grant.EntityID, grant.Requester)
 		}
 
 		rendered = append(rendered, renderedGrant)
