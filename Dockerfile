@@ -21,7 +21,7 @@ RUN test -n "${TARGETARCH}" && \
     CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
 	go build -trimpath -ldflags='-s -w' -o /out/bao-cred ./cmd/bao-cred
 
-FROM alpine:3.22
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates tzdata && \
     addgroup -S -g 65532 authorizer && \
     adduser -S -D -H -u 65532 -G authorizer authorizer && \
