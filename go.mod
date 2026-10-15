@@ -3,7 +3,7 @@ module github.com/xtruder/openbao-authorizer
 go 1.27.0
 
 require (
-	connectrpc.com/connect v1.21.0
+	connectrpc.com/connect v1.21.1
 	github.com/SherClockHolmes/webpush-go v1.4.0
 	github.com/hashicorp/hcl v1.0.1-vault-7
 	github.com/hashicorp/hcl/v2 v2.25.0
