@@ -1,15 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -203,4 +208,78 @@ func TestShutdownEndsOpenStreams(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("shutdown took %s", elapsed)
 	}
+}
+
+type countingRenewal struct {
+	calls atomic.Int32
+	err   error
+}
+
+func (c *countingRenewal) RenewAuthorizerToken(context.Context) (time.Duration, error) {
+	c.calls.Add(1)
+	return 720 * time.Hour, c.err
+}
+
+func TestTokenRenewerRenewsAtStartAndPeriodically(t *testing.T) {
+	t.Parallel()
+
+	renewal := &countingRenewal{}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		tokenRenewer(ctx, slog.New(slog.DiscardHandler), renewal, 10*time.Millisecond)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for renewal.calls.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	cancel()
+	<-done
+	if renewal.calls.Load() < 3 {
+		t.Fatalf("renewals = %d, want at start and on every tick", renewal.calls.Load())
+	}
+}
+
+func TestTokenRenewerLogsFailures(t *testing.T) {
+	t.Parallel()
+
+	logs := &lockedBuffer{}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	renewal := &countingRenewal{err: errors.New("lease is not renewable")}
+	go func() {
+		tokenRenewer(ctx, slog.New(slog.NewTextHandler(logs, nil)), renewal, time.Hour)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(logs.String(), "lease is not renewable") && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	cancel()
+	<-done
+	if !strings.Contains(logs.String(), "lease is not renewable") || !strings.Contains(logs.String(), "period=720h") {
+		t.Fatalf("logs = %q", logs.String())
+	}
+}
+
+type lockedBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
 }

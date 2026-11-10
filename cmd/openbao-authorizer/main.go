@@ -93,6 +93,7 @@ func run(configPath string) error {
 	defer stop()
 	go grantService.Run(rootCtx)
 	go sessionSweeper(rootCtx, logger, database)
+	go tokenRenewer(rootCtx, logger, bao, tokenRenewInterval)
 
 	apiHandler := api.New(api.Options{
 		OpenBao:              bao,
@@ -172,6 +173,45 @@ func sessionSweeper(ctx context.Context, logger *slog.Logger, storage *store.DB)
 			if err := storage.DeleteExpiredSessions(ctx, now); err != nil {
 				logger.Error("delete expired sessions", "error", err)
 			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// tokenRenewInterval is far below the authorizer token's recommended 720h
+// period, so renewals may fail for weeks before the token expires.
+const tokenRenewInterval = 72 * time.Hour
+
+type tokenRenewal interface {
+	RenewAuthorizerToken(context.Context) (time.Duration, error)
+}
+
+// tokenRenewer renews the authorizer's own token at start and every interval,
+// so a periodic token never expires while the service runs. Failures are only
+// logged: a token that isn't renewable still works until its own expiry.
+func tokenRenewer(ctx context.Context, logger *slog.Logger, bao tokenRenewal, interval time.Duration) {
+	renew := func() {
+		ttl, err := bao.RenewAuthorizerToken(ctx)
+		if err != nil {
+			if ctx.Err() == nil {
+				logger.Error("renew authorizer token; create it as a periodic token (period=720h renewable=true) "+
+					"with update on auth/token/renew-self in its policy", "error", err)
+			}
+
+			return
+		}
+
+		logger.Info("renewed authorizer token", "ttl", ttl.String())
+	}
+
+	renew()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			renew()
 		case <-ctx.Done():
 			return
 		}

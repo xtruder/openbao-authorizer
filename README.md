@@ -127,7 +127,7 @@ bao write auth/token/roles/agent-session \
   orphan=false renewable=true token_period=24h allowed_entity_aliases='*'
 
 bao token create -orphan -policy=openbao-authorizer -no-default-policy \
-  -renewable=false -ttl=720h -field=token >/run/secrets/openbao-authorizer-token
+  -period=720h -field=token >/run/secrets/openbao-authorizer-token
 ```
 
 The authorizer policy grants:
@@ -178,7 +178,7 @@ allows connections to that origin. For OIDC, the role must list
 shows "OpenBao is unreachable from this browser or does not allow this origin
 (CORS)", check the address and the CORS configuration.
 
-The authorizer does not renew its own token. Create it with a TTL that covers the deployment's restart cadence, or replace the token file and restart the server before it expires.
+The authorizer renews its own token when it starts and every 72 hours. Create it as a periodic token (`-period=720h`): each renewal extends it by a full period and it has no maximum lifetime, so it never expires while the authorizer runs, and renewals may fail for almost four weeks before it does. The authorizer policy allows `auth/token/renew-self` for this. A token that isn't renewable keeps working until its own expiry, and the authorizer logs every failed renewal.
 
 ### Grant lifecycle in OpenBao
 

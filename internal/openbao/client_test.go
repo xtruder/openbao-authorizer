@@ -206,3 +206,27 @@ func TestListUsesAuthorizerTokenAndTreatsNotFoundAsEmpty(t *testing.T) {
 		t.Fatalf("denied list error = %v", err)
 	}
 }
+
+func TestRenewAuthorizerTokenUsesOwnToken(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/auth/token/renew-self" || r.Header.Get("X-Vault-Token") != "authorizer" {
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+
+		_, _ = w.Write([]byte(`{"auth":{"lease_duration":2592000,"renewable":true}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	client, err := New(Config{Address: server.URL, Token: "authorizer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ttl, err := client.RenewAuthorizerToken(t.Context())
+	if err != nil || ttl != 720*time.Hour {
+		t.Fatalf("ttl = %v, %v", ttl, err)
+	}
+}

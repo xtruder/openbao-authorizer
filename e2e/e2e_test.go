@@ -166,7 +166,7 @@ func TestNamedIdentityGrantWorkflow(t *testing.T) {
 	mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/userpass/users/dev", map[string]any{
 		"password": developerPass, "token_policies": []string{minterPolicy},
 	}, http.StatusOK, http.StatusNoContent)
-	authorizerToken := createToken(ctx, t, bao, map[string]any{"policies": []string{authorizerPolicy}, "no_default_policy": true, "ttl": "1h"})
+	authorizerToken := createToken(ctx, t, bao, map[string]any{"policies": []string{authorizerPolicy}, "no_default_policy": true, "period": "720h"})
 	authorizerTokenFile := filepath.Join(runtimeDirectory, "authorizer-token")
 	writeSecretFile(t, authorizerTokenFile, authorizerToken)
 
@@ -269,6 +269,14 @@ grantable "e2e-kv" {
 	approver := newApproverClient(ctx, t, application, approverToken)
 	mustCall(t, ctx, bao, approverToken, http.MethodGet, "auth/token/lookup-self", nil, http.StatusForbidden)
 	t.Log("OpenBao allows the PWA origin; the approver's userpass token became an app session and was revoked")
+
+	// The authorizer renews its periodic token at start, through the
+	// renew-self stanza of the real authorizer policy.
+	if logs := readProcessLog(appLog); !strings.Contains(logs, "renewed authorizer token") || strings.Contains(logs, "renew authorizer token;") {
+		t.Fatalf("authorizer token renewal not logged:\n%s", logs)
+	}
+
+	t.Log("the authorizer renewed its own periodic token at start")
 
 	// The developer logs in as `bao login` would, writing ~/.vault-token
 	// into the isolated HOME that bao-cred auth reads.

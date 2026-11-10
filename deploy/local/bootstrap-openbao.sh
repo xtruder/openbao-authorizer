@@ -116,10 +116,9 @@ if [[ -n "${GITHUB_APP_ID:-}" || -e "${GITHUB_APP_PRIVATE_KEY_FILE}" ]]; then
   fi
 fi
 
-# The authorizer does not renew its token; the dev server reprovisions it on
-# every restart, well within this TTL.
+# A periodic token, which the authorizer renews at start and every 72h.
 authorizer_response="$("${OPENBAO_BIN}" write -format=json auth/token/create-orphan \
-  policies=openbao-authorizer no_default_policy=true ttl=720h renewable=false)"
+  policies=openbao-authorizer no_default_policy=true period=720h renewable=true)"
 authorizer_token="$(jq -er '.auth.client_token' <<<"${authorizer_response}")"
 
 config_directory="$(dirname "${APP_CONFIG_FILE}")"

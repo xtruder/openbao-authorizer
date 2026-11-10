@@ -114,6 +114,21 @@ func (c *Client) RevokeSelf(ctx context.Context, token string) error {
 	return c.call(ctx, http.MethodPost, "/v1/auth/token/revoke-self", token, map[string]string{}, nil)
 }
 
+// RenewAuthorizerToken renews the authorizer's own token and returns its new
+// TTL. A periodic token renewed within its period never expires.
+func (c *Client) RenewAuthorizerToken(ctx context.Context) (time.Duration, error) {
+	var envelope struct {
+		Auth struct {
+			LeaseDuration int64 `json:"lease_duration"`
+		} `json:"auth"`
+	}
+	if err := c.call(ctx, http.MethodPost, "/v1/auth/token/renew-self", c.token, map[string]string{}, &envelope); err != nil {
+		return 0, err
+	}
+
+	return time.Duration(envelope.Auth.LeaseDuration) * time.Second, nil
+}
+
 // ReadEntity reads an identity entity with the authorizer token.
 func (c *Client) ReadEntity(ctx context.Context, id string) (Entity, error) {
 	var envelope struct {
