@@ -153,7 +153,7 @@ func newRootCommand(read readFunc) *cobra.Command {
 	root.SetFlagErrorFunc(flagError)
 	root.PersistentFlags().String("identity", "", "Named Identity whose stored token to use (default $BAO_IDENTITY)")
 	root.AddCommand(
-		newReadCommand(read), newRequestCommand(), newGrantsCommand(), newGrantableCommand(),
+		newReadCommand(read), newRequestCommand(), newGrantsCommand(), newRevokeCommand(), newGrantableCommand(),
 		newInitCommand(), newAuthCommand(), newStatusCommand(), newEnvCommand(), newLogoutCommand(), newRunCommand(),
 	)
 	return root

@@ -363,7 +363,7 @@ func TestGrantsPrintsJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := `[{"id":"grant-1","item_id":"item-1","path":"kv/data/a","capabilities":["read"],"scope":"session",` +
+	want := `[{"id":"grant-1","item_id":"item-1","path":"kv/data/a","capabilities":["read"],"scope":"session","mine":false,` +
 		`"created_at":"2026-10-09T11:00:00Z","expires_at":"2026-10-09T12:00:00Z"}]`
 	if got := compactJSON(t, stdout.Bytes()); got != want {
 		t.Fatalf("stdout = %s\nwant     %s", got, want)
@@ -582,6 +582,7 @@ type fakeAuthorizer struct {
 
 	mu      sync.Mutex
 	filed   []*authorizerv1.CreateGrantRequestRequest
+	revoked []string
 	watched int
 	total   int
 }
@@ -664,6 +665,21 @@ func (f *fakeAuthorizer) ListMyGrants(
 	context.Context, *connect.Request[authorizerv1.ListMyGrantsRequest],
 ) (*connect.Response[authorizerv1.ListMyGrantsResponse], error) {
 	return connect.NewResponse(&authorizerv1.ListMyGrantsResponse{Grants: f.grants}), nil
+}
+
+func (f *fakeAuthorizer) RevokeMyGrant(
+	_ context.Context, request *connect.Request[authorizerv1.RevokeMyGrantRequest],
+) (*connect.Response[authorizerv1.RevokeMyGrantResponse], error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, grant := range f.grants {
+		if grant.GetId() == request.Msg.GetGrantId() && grant.GetMine() {
+			f.revoked = append(f.revoked, grant.GetId())
+			return connect.NewResponse(&authorizerv1.RevokeMyGrantResponse{}), nil
+		}
+	}
+
+	return nil, detailedError(connect.CodeNotFound, "NOT_FOUND", "not found")
 }
 
 func (f *fakeAuthorizer) ListGrantables(
@@ -780,5 +796,34 @@ func item(id, path string, state authorizerv1.ItemState) *authorizerv1.Permissio
 	return &authorizerv1.PermissionItem{
 		Id: id, Path: path, Capabilities: []string{"read"}, Ttl: durationpb.New(time.Hour), State: state,
 		ExpiresAt: timestamppb.New(testExpiry),
+	}
+}
+
+func TestRevokeOnlyRevokesMyGrants(t *testing.T) {
+	authorizer := newFakeAuthorizer(t)
+	authorizer.grants = []*authorizerv1.Grant{
+		{Id: "mine-1", Path: "kv/data/a", Mine: true, CreatedAt: timestamppb.New(testExpiry), ExpiresAt: timestamppb.New(testExpiry)},
+		{Id: "theirs", Path: "kv/data/b", CreatedAt: timestamppb.New(testExpiry), ExpiresAt: timestamppb.New(testExpiry)},
+		{Id: "mine-2", Path: "kv/data/c", Mine: true, CreatedAt: timestamppb.New(testExpiry), ExpiresAt: timestamppb.New(testExpiry)},
+	}
+	setupEnvironment(t, authorizer.url, "")
+
+	var stdout bytes.Buffer
+	if err := run([]string{"revoke", "--all"}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := compactJSON(t, stdout.Bytes()); got != `["mine-1","mine-2"]` {
+		t.Fatalf("stdout = %s", got)
+	}
+
+	if err := run([]string{"revoke", "theirs"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("revoking another Requester's Grant = %v", err)
+	}
+
+	for _, arguments := range [][]string{{"revoke"}, {"revoke", "--all", "mine-1"}} {
+		if err := run(arguments, &bytes.Buffer{}, &bytes.Buffer{}); exitCode(err) != exitUsage {
+			t.Fatalf("%v: error = %v, want usage error", arguments, err)
+		}
 	}
 }

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 
 	authorizerv1 "github.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1"
 	"github.com/xtruder/openbao-authorizer/internal/grants"
+	"github.com/xtruder/openbao-authorizer/internal/openbao"
 	"github.com/xtruder/openbao-authorizer/internal/store"
 )
 
@@ -99,12 +101,30 @@ func (a grantService) WatchGrantRequest(ctx context.Context, request *connect.Re
 }
 
 func (a grantService) ListMyGrants(ctx context.Context, _ *connect.Request[authorizerv1.ListMyGrantsRequest]) (*connect.Response[authorizerv1.ListMyGrantsResponse], error) {
-	active, err := a.grants.RequesterGrants(ctx, requesterFrom(ctx).Requester)
+	caller := requesterFrom(ctx).Requester
+	active, err := a.grants.RequesterGrants(ctx, caller)
 	if err != nil {
 		return nil, a.internalError(err)
 	}
 
-	return connect.NewResponse(&authorizerv1.ListMyGrantsResponse{Grants: grantsProto(active, false)}), nil
+	rendered := grantsProto(active, false)
+	for index, grant := range active {
+		rendered[index].Mine = grant.EntityID == caller.EntityID
+	}
+
+	return connect.NewResponse(&authorizerv1.ListMyGrantsResponse{Grants: rendered}), nil
+}
+
+func (a grantService) RevokeMyGrant(ctx context.Context, request *connect.Request[authorizerv1.RevokeMyGrantRequest]) (*connect.Response[authorizerv1.RevokeMyGrantResponse], error) {
+	if err := a.grants.RevokeOwn(ctx, requesterFrom(ctx).Requester, request.Msg.GetGrantId()); err != nil {
+		if _, ok := errors.AsType[*openbao.HTTPError](err); ok {
+			return nil, a.openBaoUnavailable("grant revocation", err)
+		}
+
+		return nil, a.grantError("grant revocation", reasonGrantNotActive, err)
+	}
+
+	return connect.NewResponse(&authorizerv1.RevokeMyGrantResponse{}), nil
 }
 
 func (a grantService) ListGrantables(ctx context.Context, _ *connect.Request[authorizerv1.ListGrantablesRequest]) (*connect.Response[authorizerv1.ListGrantablesResponse], error) {

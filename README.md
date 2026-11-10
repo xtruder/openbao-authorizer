@@ -214,8 +214,8 @@ Terminate TLS at a trusted reverse proxy. The proxy must not buffer responses un
 `bao-cred` reads OpenBao paths with a **Requester**'s existing OpenBao token,
 usually an **Agent Session**'s **Session Token** or a **Named Identity**'s
 **Named Token**, and files **Grant Requests** with the authorizer when the
-Requester needs more access. `read`, `request`, `grants`, `grantable` and
-`run` work with the Requester's token; `init`, `auth`, `env`, `status` and
+Requester needs more access. `read`, `request`, `grants`, `revoke`,
+`grantable` and `run` work with the Requester's token; `init`, `auth`, `env`, `status` and
 `logout` manage tokens. Run `bao-cred <command> --help` for details.
 
 | Setting | Source |
@@ -391,8 +391,12 @@ bao-cred request --scope project --reason "CI token for all agents here" --item 
 bao-cred request --no-wait --reason "rotate the CI token" --item github/token/project-ci=read
 bao-cred request --wait <request-id>
 
-# Active Grants for this Requester.
+# Active Grants that reach this Requester; "mine" marks those it filed.
 bao-cred grants
+
+# End access early: one Grant this Requester filed, or all of them.
+bao-cred revoke <grant-id>
+bao-cred revoke --all
 ```
 
 `--item PATH=CAP[,CAP]` is repeatable; capabilities come from `create`, `read`,
@@ -415,7 +419,10 @@ snapshot is the truth, so no decision is missed.
 approved. `grants` prints an array of the active Grants that reach the
 Requester, with its session's, its project's and global ones, each with `id`,
 `item_id`, `path`, `capabilities`, `scope`, `project` for project Grants,
-`created_at`, and `expires_at`. `grantable` prints an array of Grantable Rules, each with
+`mine` (filed by this Requester), `created_at`, and `expires_at`. `revoke`
+ends Grants this Requester filed, whatever their scope, and prints their IDs;
+Grants filed by other sessions can't be revoked this way, even when they reach
+this one. `grantable` prints an array of Grantable Rules, each with
 `name`, `path` (the pattern), `capabilities`, `max_ttl` (the effective cap),
 and, when set, `description`, `paths` (concrete paths found under the rule's
 `discover` path; other paths matching `path` are valid too) and
@@ -677,7 +684,8 @@ requests and the Grants that reach it.
 | `CreateGrantRequest` | `reason` is required, 1–64 items, each with an optional `ttl` and suggested `scope`. A scope the token can't use is `invalid_argument`. Refused and already-granted items are answered in the item state. |
 | `GetGrantRequest` | One of the caller's requests. |
 | `WatchGrantRequest` | Sends the request on connect and after every change, plus a heartbeat every 25 seconds. Ends normally after the final state once no item is pending. |
-| `ListMyGrants` | The active Grants that reach the caller: its session Grants and those of the project and global scopes its token carries. |
+| `ListMyGrants` | The active Grants that reach the caller: its session Grants and those of the project and global scopes its token carries. `mine` marks those it filed. |
+| `RevokeMyGrant` | Revokes an active Grant the caller's own identity filed, whatever its scope. Other Requesters' Grants are `not_found`. The PWA history records it as revoked by the Requester. |
 | `ListGrantables` | Every Grantable Rule with its effective `max_ttl`, `description`, and discovered `paths` or `discover_error`. The same for every Requester. |
 
 When an OpenBao call made for a Requester fails, the error has a generic message;

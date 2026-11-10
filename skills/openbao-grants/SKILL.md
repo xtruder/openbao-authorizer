@@ -63,7 +63,18 @@ bao-cred request --reason "Deploy api to staging: read DB creds and push the ima
 bao-cred grants
 ```
 
-Prints the active Grants that reach this session, with their scope and expiry, as JSON. Check it before requesting, and after an approval if something still fails.
+Prints the active Grants that reach this session, with their scope and expiry, as JSON; `"mine": true` marks those this session filed. Check it before requesting, and after an approval if something still fails.
+
+## Give access back
+
+When the task that needed a Grant is done, end it instead of letting it run out:
+
+```sh
+bao-cred revoke --all        # every Grant this session filed
+bao-cred revoke <grant-id>   # one of them
+```
+
+It ends only Grants this session filed, including project or global ones it asked for; other sessions' Grants stay.
 
 ## secretspec
 

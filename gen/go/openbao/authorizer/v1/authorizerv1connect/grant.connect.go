@@ -45,6 +45,9 @@ const (
 	// GrantServiceListMyGrantsProcedure is the fully-qualified name of the GrantService's ListMyGrants
 	// RPC.
 	GrantServiceListMyGrantsProcedure = "/openbao.authorizer.v1.GrantService/ListMyGrants"
+	// GrantServiceRevokeMyGrantProcedure is the fully-qualified name of the GrantService's
+	// RevokeMyGrant RPC.
+	GrantServiceRevokeMyGrantProcedure = "/openbao.authorizer.v1.GrantService/RevokeMyGrant"
 	// GrantServiceListGrantablesProcedure is the fully-qualified name of the GrantService's
 	// ListGrantables RPC.
 	GrantServiceListGrantablesProcedure = "/openbao.authorizer.v1.GrantService/ListGrantables"
@@ -62,8 +65,12 @@ type GrantServiceClient interface {
 	// every change, plus periodic heartbeats. The stream ends once no item is
 	// pending; clients reconnect after a drop and rely on the snapshot.
 	WatchGrantRequest(context.Context, *connect.Request[v1.WatchGrantRequestRequest]) (*connect.ServerStreamForClient[v1.WatchGrantRequestResponse], error)
-	// ListMyGrants returns the caller's active Grants.
+	// ListMyGrants returns the active Grants that reach the caller: its own and
+	// those of the project and global scopes its token carries.
 	ListMyGrants(context.Context, *connect.Request[v1.ListMyGrantsRequest]) (*connect.Response[v1.ListMyGrantsResponse], error)
+	// RevokeMyGrant revokes an active Grant filed by the caller's own identity,
+	// whatever its scope. Grants filed by other Requesters are not found.
+	RevokeMyGrant(context.Context, *connect.Request[v1.RevokeMyGrantRequest]) (*connect.Response[v1.RevokeMyGrantResponse], error)
 	// ListGrantables returns what may be requested: every Grantable Rule and,
 	// for rules with a discover path, the concrete paths found there.
 	ListGrantables(context.Context, *connect.Request[v1.ListGrantablesRequest]) (*connect.Response[v1.ListGrantablesResponse], error)
@@ -104,6 +111,12 @@ func NewGrantServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(grantServiceMethods.ByName("ListMyGrants")),
 			connect.WithClientOptions(opts...),
 		),
+		revokeMyGrant: connect.NewClient[v1.RevokeMyGrantRequest, v1.RevokeMyGrantResponse](
+			httpClient,
+			baseURL+GrantServiceRevokeMyGrantProcedure,
+			connect.WithSchema(grantServiceMethods.ByName("RevokeMyGrant")),
+			connect.WithClientOptions(opts...),
+		),
 		listGrantables: connect.NewClient[v1.ListGrantablesRequest, v1.ListGrantablesResponse](
 			httpClient,
 			baseURL+GrantServiceListGrantablesProcedure,
@@ -119,6 +132,7 @@ type grantServiceClient struct {
 	getGrantRequest    *connect.Client[v1.GetGrantRequestRequest, v1.GetGrantRequestResponse]
 	watchGrantRequest  *connect.Client[v1.WatchGrantRequestRequest, v1.WatchGrantRequestResponse]
 	listMyGrants       *connect.Client[v1.ListMyGrantsRequest, v1.ListMyGrantsResponse]
+	revokeMyGrant      *connect.Client[v1.RevokeMyGrantRequest, v1.RevokeMyGrantResponse]
 	listGrantables     *connect.Client[v1.ListGrantablesRequest, v1.ListGrantablesResponse]
 }
 
@@ -142,6 +156,11 @@ func (c *grantServiceClient) ListMyGrants(ctx context.Context, req *connect.Requ
 	return c.listMyGrants.CallUnary(ctx, req)
 }
 
+// RevokeMyGrant calls openbao.authorizer.v1.GrantService.RevokeMyGrant.
+func (c *grantServiceClient) RevokeMyGrant(ctx context.Context, req *connect.Request[v1.RevokeMyGrantRequest]) (*connect.Response[v1.RevokeMyGrantResponse], error) {
+	return c.revokeMyGrant.CallUnary(ctx, req)
+}
+
 // ListGrantables calls openbao.authorizer.v1.GrantService.ListGrantables.
 func (c *grantServiceClient) ListGrantables(ctx context.Context, req *connect.Request[v1.ListGrantablesRequest]) (*connect.Response[v1.ListGrantablesResponse], error) {
 	return c.listGrantables.CallUnary(ctx, req)
@@ -159,8 +178,12 @@ type GrantServiceHandler interface {
 	// every change, plus periodic heartbeats. The stream ends once no item is
 	// pending; clients reconnect after a drop and rely on the snapshot.
 	WatchGrantRequest(context.Context, *connect.Request[v1.WatchGrantRequestRequest], *connect.ServerStream[v1.WatchGrantRequestResponse]) error
-	// ListMyGrants returns the caller's active Grants.
+	// ListMyGrants returns the active Grants that reach the caller: its own and
+	// those of the project and global scopes its token carries.
 	ListMyGrants(context.Context, *connect.Request[v1.ListMyGrantsRequest]) (*connect.Response[v1.ListMyGrantsResponse], error)
+	// RevokeMyGrant revokes an active Grant filed by the caller's own identity,
+	// whatever its scope. Grants filed by other Requesters are not found.
+	RevokeMyGrant(context.Context, *connect.Request[v1.RevokeMyGrantRequest]) (*connect.Response[v1.RevokeMyGrantResponse], error)
 	// ListGrantables returns what may be requested: every Grantable Rule and,
 	// for rules with a discover path, the concrete paths found there.
 	ListGrantables(context.Context, *connect.Request[v1.ListGrantablesRequest]) (*connect.Response[v1.ListGrantablesResponse], error)
@@ -197,6 +220,12 @@ func NewGrantServiceHandler(svc GrantServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(grantServiceMethods.ByName("ListMyGrants")),
 		connect.WithHandlerOptions(opts...),
 	)
+	grantServiceRevokeMyGrantHandler := connect.NewUnaryHandler(
+		GrantServiceRevokeMyGrantProcedure,
+		svc.RevokeMyGrant,
+		connect.WithSchema(grantServiceMethods.ByName("RevokeMyGrant")),
+		connect.WithHandlerOptions(opts...),
+	)
 	grantServiceListGrantablesHandler := connect.NewUnaryHandler(
 		GrantServiceListGrantablesProcedure,
 		svc.ListGrantables,
@@ -213,6 +242,8 @@ func NewGrantServiceHandler(svc GrantServiceHandler, opts ...connect.HandlerOpti
 			grantServiceWatchGrantRequestHandler.ServeHTTP(w, r)
 		case GrantServiceListMyGrantsProcedure:
 			grantServiceListMyGrantsHandler.ServeHTTP(w, r)
+		case GrantServiceRevokeMyGrantProcedure:
+			grantServiceRevokeMyGrantHandler.ServeHTTP(w, r)
 		case GrantServiceListGrantablesProcedure:
 			grantServiceListGrantablesHandler.ServeHTTP(w, r)
 		default:
@@ -238,6 +269,10 @@ func (UnimplementedGrantServiceHandler) WatchGrantRequest(context.Context, *conn
 
 func (UnimplementedGrantServiceHandler) ListMyGrants(context.Context, *connect.Request[v1.ListMyGrantsRequest]) (*connect.Response[v1.ListMyGrantsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("openbao.authorizer.v1.GrantService.ListMyGrants is not implemented"))
+}
+
+func (UnimplementedGrantServiceHandler) RevokeMyGrant(context.Context, *connect.Request[v1.RevokeMyGrantRequest]) (*connect.Response[v1.RevokeMyGrantResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("openbao.authorizer.v1.GrantService.RevokeMyGrant is not implemented"))
 }
 
 func (UnimplementedGrantServiceHandler) ListGrantables(context.Context, *connect.Request[v1.ListGrantablesRequest]) (*connect.Response[v1.ListGrantablesResponse], error) {

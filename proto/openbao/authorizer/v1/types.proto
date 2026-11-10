@@ -100,6 +100,9 @@ message Grant {
   Scope scope = 9;
   // Project of a project-scope Grant.
   string project = 10;
+  // Only on the requester API: the caller's own identity filed it, so it may
+  // revoke it.
+  bool mine = 11;
 }
 
 // Heartbeat keeps idle streams alive through proxies; clients ignore it.

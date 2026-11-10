@@ -20,8 +20,12 @@ service GrantService {
   // every change, plus periodic heartbeats. The stream ends once no item is
   // pending; clients reconnect after a drop and rely on the snapshot.
   rpc WatchGrantRequest(WatchGrantRequestRequest) returns (stream WatchGrantRequestResponse);
-  // ListMyGrants returns the caller's active Grants.
+  // ListMyGrants returns the active Grants that reach the caller: its own and
+  // those of the project and global scopes its token carries.
   rpc ListMyGrants(ListMyGrantsRequest) returns (ListMyGrantsResponse);
+  // RevokeMyGrant revokes an active Grant filed by the caller's own identity,
+  // whatever its scope. Grants filed by other Requesters are not found.
+  rpc RevokeMyGrant(RevokeMyGrantRequest) returns (RevokeMyGrantResponse);
   // ListGrantables returns what may be requested: every Grantable Rule and,
   // for rules with a discover path, the concrete paths found there.
   rpc ListGrantables(ListGrantablesRequest) returns (ListGrantablesResponse);
@@ -79,3 +83,9 @@ message ListGrantablesRequest {}
 message ListGrantablesResponse {
   repeated Grantable grantables = 1;
 }
+
+message RevokeMyGrantRequest {
+  string grant_id = 1;
+}
+
+message RevokeMyGrantResponse {}

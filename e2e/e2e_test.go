@@ -598,6 +598,39 @@ grantable "e2e-kv" {
 	mustCall(t, ctx, bao, authorizerToken, http.MethodPost, "sys/policies/acl/not-a-grant", map[string]string{"policy": "path \"kv/*\" { capabilities = [\"read\"] }"}, http.StatusForbidden)
 	t.Log("the authorizer token cannot rename or disable entities or write other policies")
 
+	// A session revokes the Grants it filed, and not one another session
+	// filed, even though that Grant reaches it.
+	var mine []struct {
+		ID   string `json:"id"`
+		Path string `json:"path"`
+		Mine bool   `json:"mine"`
+	}
+	listed := cred.run(ctx, t, session1, "grants")
+	decodeResponse(t, []byte(listed.stdout), &mine)
+	ownedBy := map[string]string{}
+	for _, grant := range mine {
+		if grant.Mine {
+			ownedBy[grant.Path] = grant.ID
+		}
+	}
+
+	if _, ok := ownedBy["kv/data/e2e/iota"]; !ok || len(ownedBy) != 1 {
+		t.Fatalf("session 1 grants marked mine = %v", ownedBy)
+	}
+
+	if revoked := cred.run(ctx, t, session1, "revoke", "--all"); revoked.exitCode != 0 || !strings.Contains(revoked.stdout, ownedBy["kv/data/e2e/iota"]) {
+		t.Fatalf("bao-cred revoke --all = %+v", revoked)
+	}
+
+	assertRead(ctx, t, bao, token1, "iota", http.StatusForbidden)
+	kappaID := approver.activeGrant(ctx, t, "ses_E2E2", "kv/data/e2e/kappa")
+	if refused := cred.run(ctx, t, session1, "revoke", kappaID); refused.exitCode != 1 || !strings.Contains(refused.stderr, "not found") {
+		t.Fatalf("revoking another session's Grant = %+v", refused)
+	}
+
+	assertRead(ctx, t, bao, token1, "kappa", http.StatusOK)
+	t.Log("a session revoked its own Grant; another session's global Grant stayed")
+
 	// Logout revokes the Named Token; the next command has no token.
 	if logout := cred.run(ctx, t, identityA.env(), "logout"); logout.exitCode != 0 {
 		t.Fatalf("bao-cred logout = %+v", logout)

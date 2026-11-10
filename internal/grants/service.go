@@ -702,6 +702,33 @@ func (s *Service) Revoke(ctx context.Context, approver store.Approver, grantID s
 	return nil
 }
 
+// RevokeOwn revokes a Grant filed by requester's own identity. Other
+// Requesters' Grants are indistinguishable from missing ones, so a Requester
+// can't end another's access, even to a project or global Grant.
+func (s *Service) RevokeOwn(ctx context.Context, requester Requester, grantID string) error {
+	grant, err := s.store.Grant(ctx, grantID)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && grant.EntityID != requester.EntityID) {
+		return ErrNotFound
+	}
+
+	if err != nil {
+		return err
+	}
+
+	// Recorded like an Approver's revocation, named after the Requester.
+	revoker := store.Approver{EntityID: requester.EntityID, Name: requester.Display.ID + " (requester)"}
+	s.policyMu.Lock()
+	err = s.revoke(ctx, revoker, grant)
+	s.policyMu.Unlock()
+	if err != nil {
+		return err
+	}
+
+	s.changes.notify()
+	s.notify(func() error { return s.notifier.GrantChanged(context.WithoutCancel(ctx), grant.ID) })
+	return nil
+}
+
 // revoke must run under policyMu.
 func (s *Service) revoke(ctx context.Context, approver store.Approver, grant store.Grant) error {
 	now := s.now()

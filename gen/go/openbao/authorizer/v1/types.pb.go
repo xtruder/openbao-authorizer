@@ -483,7 +483,10 @@ type Grant struct {
 	Requester *Requester `protobuf:"bytes,8,opt,name=requester,proto3" json:"requester,omitempty"`
 	Scope     Scope      `protobuf:"varint,9,opt,name=scope,proto3,enum=openbao.authorizer.v1.Scope" json:"scope,omitempty"`
 	// Project of a project-scope Grant.
-	Project       string `protobuf:"bytes,10,opt,name=project,proto3" json:"project,omitempty"`
+	Project string `protobuf:"bytes,10,opt,name=project,proto3" json:"project,omitempty"`
+	// Only on the requester API: the caller's own identity filed it, so it may
+	// revoke it.
+	Mine          bool `protobuf:"varint,11,opt,name=mine,proto3" json:"mine,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -586,6 +589,13 @@ func (x *Grant) GetProject() string {
 		return x.Project
 	}
 	return ""
+}
+
+func (x *Grant) GetMine() bool {
+	if x != nil {
+		return x.Mine
+	}
+	return false
 }
 
 // Heartbeat keeps idle streams alive through proxies; clients ignore it.
@@ -816,7 +826,7 @@ const file_openbao_authorizer_v1_types_proto_rawDesc = "" +
 	"\n" +
 	"created_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x12>\n" +
 	"\trequester\x18\x04 \x01(\v2 .openbao.authorizer.v1.RequesterR\trequester\x12;\n" +
-	"\x05items\x18\x05 \x03(\v2%.openbao.authorizer.v1.PermissionItemR\x05items\"\x8d\x03\n" +
+	"\x05items\x18\x05 \x03(\v2%.openbao.authorizer.v1.PermissionItemR\x05items\"\xa1\x03\n" +
 	"\x05Grant\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x17\n" +
 	"\aitem_id\x18\x02 \x01(\tR\x06itemId\x12\x12\n" +
@@ -831,7 +841,8 @@ const file_openbao_authorizer_v1_types_proto_rawDesc = "" +
 	"\trequester\x18\b \x01(\v2 .openbao.authorizer.v1.RequesterR\trequester\x122\n" +
 	"\x05scope\x18\t \x01(\x0e2\x1c.openbao.authorizer.v1.ScopeR\x05scope\x12\x18\n" +
 	"\aproject\x18\n" +
-	" \x01(\tR\aproject\"\v\n" +
+	" \x01(\tR\aproject\x12\x12\n" +
+	"\x04mine\x18\v \x01(\bR\x04mine\"\v\n" +
 	"\tHeartbeat\"7\n" +
 	"\vErrorDetail\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason\x12\x10\n" +

@@ -1170,3 +1170,39 @@ func TestScopesFlowThroughTheAPI(t *testing.T) {
 	_, err = server.grant.CreateGrantRequest(t.Context(), bearer("session-a", &authorizerv1.CreateGrantRequestRequest{Reason: "x", Items: []*authorizerv1.PermissionItemInput{item}}))
 	requireError(t, err, connect.CodeInvalidArgument, reasonInvalidRequest)
 }
+
+func TestRequestersRevokeOnlyTheirOwnGrants(t *testing.T) {
+	t.Parallel()
+
+	server := newTestServer(t)
+	server.login()
+	approve := func(token, path string) string {
+		created := server.create(token, "x", readItem(path))
+		response, err := server.approver.DecideItems(t.Context(), connect.NewRequest(&authorizerv1.DecideItemsRequest{
+			GrantRequestId: created.GetId(),
+			Decisions:      []*authorizerv1.ItemDecision{{ItemId: created.GetItems()[0].GetId(), Decision: authorizerv1.Decision_DECISION_APPROVE}},
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return response.Msg.GetGrantRequest().GetItems()[0].GetGrantId()
+	}
+
+	mine := approve("session-a", "kv/data/mine")
+	theirs := approve("session-b", "kv/data/theirs")
+	listed, err := server.grant.ListMyGrants(t.Context(), bearer("session-a", &authorizerv1.ListMyGrantsRequest{}))
+	if err != nil || len(listed.Msg.GetGrants()) != 1 || !listed.Msg.GetGrants()[0].GetMine() {
+		t.Fatalf("my grants = %v, %v", listed, err)
+	}
+
+	_, err = server.grant.RevokeMyGrant(t.Context(), bearer("session-a", &authorizerv1.RevokeMyGrantRequest{GrantId: theirs}))
+	requireError(t, err, connect.CodeNotFound, reasonNotFound)
+
+	if _, err = server.grant.RevokeMyGrant(t.Context(), bearer("session-a", &authorizerv1.RevokeMyGrantRequest{GrantId: mine})); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = server.grant.RevokeMyGrant(t.Context(), bearer("session-a", &authorizerv1.RevokeMyGrantRequest{GrantId: mine}))
+	requireError(t, err, connect.CodeFailedPrecondition, reasonGrantNotActive)
+}

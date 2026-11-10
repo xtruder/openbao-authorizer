@@ -179,14 +179,16 @@ func describeItem(item grantItem) string {
 
 // grantOutput is the printed form of a Grant.
 type grantOutput struct {
-	ID           string    `json:"id"`
-	ItemID       string    `json:"item_id"`
-	Path         string    `json:"path"`
-	Capabilities []string  `json:"capabilities"`
-	Scope        string    `json:"scope"`
-	Project      string    `json:"project,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	ExpiresAt    time.Time `json:"expires_at"`
+	ID           string   `json:"id"`
+	ItemID       string   `json:"item_id"`
+	Path         string   `json:"path"`
+	Capabilities []string `json:"capabilities"`
+	Scope        string   `json:"scope"`
+	Project      string   `json:"project,omitempty"`
+	// Mine marks Grants this Requester filed, which bao-cred revoke may end.
+	Mine      bool      `json:"mine"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 // grantableOutput is the printed form of a Grantable Rule.
@@ -543,7 +545,7 @@ func (c *authorizerClient) grants(ctx context.Context) ([]grantOutput, error) {
 	for _, grant := range response.Msg.GetGrants() {
 		grants = append(grants, grantOutput{
 			ID: grant.GetId(), ItemID: grant.GetItemId(), Path: grant.GetPath(), Capabilities: grant.GetCapabilities(),
-			Scope: cmp.Or(scopeName(grant.GetScope()), "session"), Project: grant.GetProject(), CreatedAt: grant.GetCreatedAt().AsTime(), ExpiresAt: grant.GetExpiresAt().AsTime(),
+			Scope: cmp.Or(scopeName(grant.GetScope()), "session"), Project: grant.GetProject(), Mine: grant.GetMine(), CreatedAt: grant.GetCreatedAt().AsTime(), ExpiresAt: grant.GetExpiresAt().AsTime(),
 		})
 	}
 
@@ -834,6 +836,78 @@ func runGrants(ctx context.Context, authorizerURL, identity string, stdout io.Wr
 	}
 
 	return writeIndentedJSON(stdout, grants)
+}
+
+func (c *authorizerClient) revokeMyGrant(ctx context.Context, id string) error {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	if _, err := c.service.RevokeMyGrant(ctx, connect.NewRequest(&authorizerv1.RevokeMyGrantRequest{GrantId: id})); err != nil {
+		return fmt.Errorf("revoke Grant %s: %w", id, newAuthorizerError(err))
+	}
+
+	return nil
+}
+
+func newRevokeCommand() *cobra.Command {
+	var (
+		authorizerURL string
+		all           bool
+	)
+
+	command := &cobra.Command{
+		Use:   "revoke <grant-id>... | --all",
+		Short: "Revoke Grants this Requester filed",
+		Long: `Revokes active Grants filed by this Requester (this agent session, or the
+project token outside a session), whatever their scope, so access ends at once.
+--all revokes every Grant marked "mine" in bao-cred grants. Grants filed by
+other sessions can't be revoked, even when they reach this one. Prints the
+revoked Grant IDs as JSON.`,
+		Example: `  bao-cred revoke 3f9c0d2e8b7a41c6
+  bao-cred revoke --all`,
+		RunE: func(command *cobra.Command, arguments []string) error {
+			if all == (len(arguments) > 0) {
+				return usageError(errors.New("pass Grant IDs or --all"))
+			}
+
+			return runRevoke(command.Context(), authorizerURL, identityFlag(command), arguments, all, command.OutOrStdout())
+		},
+	}
+
+	command.Flags().BoolVar(&all, "all", false, "revoke every active Grant this Requester filed")
+	command.Flags().StringVar(&authorizerURL, "authorizer", "", "authorizer base URL (default $BAO_AUTHORIZER_ADDR)")
+	return command
+}
+
+func runRevoke(ctx context.Context, authorizerURL, identity string, ids []string, all bool, stdout io.Writer) error {
+	client, err := requesterAuthorizerClient(ctx, authorizerURL, identity)
+	if err != nil {
+		return err
+	}
+
+	if all {
+		grants, err := client.grants(ctx)
+		if err != nil {
+			return err
+		}
+
+		for _, grant := range grants {
+			if grant.Mine {
+				ids = append(ids, grant.ID)
+			}
+		}
+	}
+
+	revoked := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if err := client.revokeMyGrant(ctx, id); err != nil {
+			_ = writeIndentedJSON(stdout, revoked)
+			return err
+		}
+
+		revoked = append(revoked, id)
+	}
+
+	return writeIndentedJSON(stdout, revoked)
 }
 
 func newGrantableCommand() *cobra.Command {

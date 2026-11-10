@@ -818,3 +818,244 @@ func TestExpiredGrantsAreAnnounced(t *testing.T) {
 		t.Fatalf("grant notifications = %#v", f.notifier.grants)
 	}
 }
+
+// A Requester revokes the Grants its own identity filed, whatever their
+// scope, and never another Requester's, even one that reaches it.
+func TestRevokeOwnOnlyRevokesGrantsTheRequesterFiled(t *testing.T) {
+	t.Parallel()
+
+	f, requesters := scopeFixture(t)
+	own := f.approveScoped(t, requesters["session-1"], "session-1", "kv/data/own", store.ScopeProject, "")
+	other := f.approveScoped(t, requesters["session-2"], "session-2", "kv/data/other", store.ScopeProject, "")
+
+	if err := f.service.RevokeOwn(t.Context(), requesters["session-1"], other.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("revoking another session's project Grant = %v, want ErrNotFound", err)
+	}
+
+	if err := f.service.RevokeOwn(t.Context(), requesters["session-1"], own.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	revoked, err := f.store.Grant(t.Context(), own.ID)
+	if err != nil || revoked.RevokedAt.IsZero() || revoked.RevokedBy != "ses_session-1 (requester)" {
+		t.Fatalf("revoked grant = %#v, %v", revoked, err)
+	}
+
+	policy, _ := f.bao.Policy(ProjectPolicyPrefix + "app")
+	if blocks, _ := openbaotest.ParsePolicy(policy.Document); len(blocks) != 1 || blocks[0].Path != "kv/data/other" {
+		t.Fatalf("project policy after revoke = %s", policy.Document)
+	}
+
+	if err := f.service.RevokeOwn(t.Context(), requesters["session-1"], own.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second revocation = %v, want ErrConflict", err)
+	}
+}
+
+// scopeFixture adds two agent sessions of project app, a session of project
+// other and app's own Named Token.
+func scopeFixture(t *testing.T) (fixture, map[string]Requester) {
+	t.Helper()
+	f := newFixture(t)
+	f.service.config.Requesters = append(f.service.config.Requesters, RequesterRule{Name: "sessions", TokenRole: "agent-session"})
+	tokens := map[string][]string{
+		"session-1": {"default", "agent-session", ProjectPolicyPrefix + "app", GlobalPolicy},
+		"session-2": {"default", "agent-session", ProjectPolicyPrefix + "app", GlobalPolicy},
+		"other":     {"default", "agent-session", ProjectPolicyPrefix + "other", GlobalPolicy},
+	}
+	for token, policies := range tokens {
+		f.bao.AddToken(token, "entity-"+token, "agent-session", policies, map[string]string{"session": "ses_" + token})
+	}
+
+	f.bao.AddToken("project-app", "entity-project", "named-identity", []string{"default", "named-identity", ProjectPolicyPrefix + "app", GlobalPolicy},
+		map[string]string{"identity": "app"})
+	requesters := make(map[string]Requester)
+	for _, token := range []string{"session-1", "session-2", "other", "project-app"} {
+		requester, err := f.service.Authenticate(t.Context(), token)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		requesters[token] = requester
+	}
+
+	return f, requesters
+}
+
+func (f fixture) approveScoped(t *testing.T, requester Requester, token, path string, requested, decided store.Scope) store.Grant {
+	t.Helper()
+	input := read(path)
+	input.Scope = requested
+	request, err := f.service.CreateRequest(t.Context(), requester, token, "x", []ItemInput{input})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	decision := Decision{ItemID: request.Items[0].ID, Approve: true, Scope: decided}
+	decidedRequest, err := f.service.Decide(t.Context(), approver, request.ID, []Decision{decision})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	grant, err := f.store.Grant(t.Context(), decidedRequest.Items[0].GrantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return grant
+}
+
+func policyPaths(t *testing.T, f fixture, name string) []string {
+	t.Helper()
+	policy, ok := f.bao.Policy(name)
+	if !ok {
+		return nil
+	}
+
+	blocks, err := openbaotest.ParsePolicy(policy.Document)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	paths := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		paths = append(paths, block.Path)
+	}
+
+	slices.Sort(paths)
+	return paths
+}
+
+func TestAuthenticateDerivesScopesFromTokenPolicies(t *testing.T) {
+	t.Parallel()
+
+	f, requesters := scopeFixture(t)
+	session := requesters["session-1"].Display
+	if session.ID != "ses_session-1" || session.Session != "ses_session-1" || session.Project != "app" ||
+		!slices.Equal(session.Scopes, []store.Scope{store.ScopeSession, store.ScopeProject, store.ScopeGlobal}) {
+		t.Fatalf("session display = %#v", session)
+	}
+
+	project := requesters["project-app"].Display
+	if project.ID != "app" || project.Session != "" || project.Project != "app" || !slices.Equal(project.Scopes, []store.Scope{store.ScopeProject, store.ScopeGlobal}) {
+		t.Fatalf("project display = %#v", project)
+	}
+
+	// Two project policies are ambiguous, so project scope is unavailable.
+	f.bao.AddToken("two", "entity-two", "agent-session", []string{ProjectPolicyPrefix + "a", ProjectPolicyPrefix + "b"}, map[string]string{"session": "s"})
+	two, err := f.service.Authenticate(t.Context(), "two")
+	if err != nil || two.Display.Project != "" || !slices.Equal(two.Display.Scopes, sessionOnly) {
+		t.Fatalf("ambiguous token = %#v, %v", two.Display, err)
+	}
+}
+
+func TestScopedGrantsLandInTheirPolicies(t *testing.T) {
+	t.Parallel()
+
+	f, requesters := scopeFixture(t)
+	sessionGrant := f.approveScoped(t, requesters["session-1"], "session-1", "kv/data/session", "", "")
+	projectGrant := f.approveScoped(t, requesters["session-1"], "session-1", "kv/data/project", store.ScopeProject, "")
+	// The Approver widens a session request to global.
+	globalGrant := f.approveScoped(t, requesters["session-1"], "session-1", "kv/data/global", "", store.ScopeGlobal)
+	// The project's own token defaults to project scope.
+	ownGrant := f.approveScoped(t, requesters["project-app"], "project-app", "kv/data/own", "", "")
+	if sessionGrant.Scope != store.ScopeSession || projectGrant.Scope != store.ScopeProject || projectGrant.Project != "app" ||
+		globalGrant.Scope != store.ScopeGlobal || ownGrant.Scope != store.ScopeProject {
+		t.Fatalf("scopes = %s, %s/%s, %s, %s", sessionGrant.Scope, projectGrant.Scope, projectGrant.Project, globalGrant.Scope, ownGrant.Scope)
+	}
+
+	for name, want := range map[string][]string{
+		PolicyPrefix + "entity-session-1": {"kv/data/session"},
+		ProjectPolicyPrefix + "app":       {"kv/data/own", "kv/data/project"},
+		GlobalPolicy:                      {"kv/data/global"},
+	} {
+		if got := policyPaths(t, f, name); !slices.Equal(got, want) {
+			t.Fatalf("policy %s paths = %v, want %v", name, got, want)
+		}
+	}
+
+	// Only the session policy is attached to an entity; tokens carry the rest.
+	if got := f.bao.EntityPolicies("entity-session-1"); !slices.Equal(got, []string{PolicyPrefix + "entity-session-1"}) {
+		t.Fatalf("entity policies = %v", got)
+	}
+
+	if got := f.bao.EntityPolicies("entity-project"); len(got) != 0 {
+		t.Fatalf("project entity policies = %v", got)
+	}
+
+	// Each Requester sees the Grants that reach it, and already has them.
+	for token, want := range map[string][]string{
+		"session-1":   {"kv/data/global", "kv/data/own", "kv/data/project", "kv/data/session"},
+		"session-2":   {"kv/data/global", "kv/data/own", "kv/data/project"},
+		"other":       {"kv/data/global"},
+		"project-app": {"kv/data/global", "kv/data/own", "kv/data/project"},
+	} {
+		active, err := f.service.RequesterGrants(t.Context(), requesters[token])
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		paths := make([]string, 0, len(active))
+		for _, grant := range active {
+			paths = append(paths, grant.Path)
+		}
+
+		slices.Sort(paths)
+		if !slices.Equal(paths, want) {
+			t.Fatalf("%s grants = %v, want %v", token, paths, want)
+		}
+
+		request, err := f.service.CreateRequest(t.Context(), requesters[token], token, "again", []ItemInput{read(want[0])})
+		if err != nil || request.Items[0].State != store.ItemAlreadyGranted {
+			t.Fatalf("%s re-request of %s = %#v, %v", token, want[0], request.Items, err)
+		}
+	}
+
+	// Revoking a project Grant rewrites only the project policy.
+	if err := f.service.Revoke(t.Context(), approver, projectGrant.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := policyPaths(t, f, ProjectPolicyPrefix+"app"); !slices.Equal(got, []string{"kv/data/own"}) {
+		t.Fatalf("project policy after revoke = %v", got)
+	}
+}
+
+func TestUnavailableScopesAreRefused(t *testing.T) {
+	t.Parallel()
+
+	f, requesters := scopeFixture(t)
+	// A token without project or global policies may only use session scope.
+	for _, scope := range []store.Scope{store.ScopeProject, store.ScopeGlobal} {
+		input := read("kv/data/x")
+		input.Scope = scope
+		if _, err := f.service.CreateRequest(t.Context(), f.session, "token-a", "x", []ItemInput{input}); !isInvalid(err) {
+			t.Fatalf("scope %s for a session-only token = %v", scope, err)
+		}
+	}
+
+	// A project's own token has no session.
+	input := read("kv/data/x")
+	input.Scope = store.ScopeSession
+	if _, err := f.service.CreateRequest(t.Context(), requesters["project-app"], "project-app", "x", []ItemInput{input}); !isInvalid(err) {
+		t.Fatalf("session scope for a project token = %v", err)
+	}
+
+	request, err := f.service.CreateRequest(t.Context(), f.session, "token-a", "x", []ItemInput{read("kv/data/y")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	itemID := request.Items[0].ID
+	if _, err := f.service.Decide(t.Context(), approver, request.ID, []Decision{{ItemID: itemID, Approve: true, Scope: store.ScopeGlobal}}); !isInvalid(err) {
+		t.Fatalf("approving with an unavailable scope = %v", err)
+	}
+
+	if _, err := f.service.Decide(t.Context(), approver, request.ID, []Decision{{ItemID: itemID, Scope: store.ScopeSession}}); !isInvalid(err) {
+		t.Fatalf("rejecting with a scope = %v", err)
+	}
+}
+
+func isInvalid(err error) bool {
+	var invalidErr *InvalidError
+	return errors.As(err, &invalidErr)
+}
