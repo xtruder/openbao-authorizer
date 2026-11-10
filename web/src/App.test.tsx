@@ -6,13 +6,13 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import { Decision, type DecideItemsRequest, type DeletePushSubscriptionRequest, type RegisterPushSubscriptionRequest, type RevokeGrantRequest } from './gen/openbao/authorizer/v1/approver_pb'
-import { GrantRequestSchema, GrantSchema, ItemState } from './gen/openbao/authorizer/v1/types_pb'
+import { GrantRequestSchema, GrantSchema, ItemState, Scope } from './gen/openbao/authorizer/v1/types_pb'
 import { fakeApprover, rpcError } from './test/fakeApprover'
 
 const at = (value: string) => timestampFromDate(new Date(value))
 const hours = (count: number) => ({ seconds: BigInt(count * 3600) })
 
-const requester = { id: 'ses_abc123', title: 'Payments rollout', directory: '/src/payments', entityId: 'entity-2', rule: 'opencode-sessions' }
+const requester = { id: 'payments', title: 'Payments rollout', directory: '/src/payments', entityId: 'entity-2', rule: 'named' }
 
 // Fixtures stay plain init objects so tests can derive variants by spreading;
 // spreading a created message would carry its $typeName and skip nested init.
@@ -87,9 +87,9 @@ describe('OpenBao Authorizer user workflows', () => {
     expect(card).not.toBeNull()
     const scope = within(card as HTMLElement)
     expect(scope.getByText('Payments rollout')).toBeInTheDocument()
-    expect(scope.getByText('ses_abc123')).toBeInTheDocument()
+    expect(scope.getByText('payments')).toBeInTheDocument()
     expect(scope.getByText('/src/payments')).toBeInTheDocument()
-    expect(scope.getByTitle('Requester rule')).toHaveTextContent('opencode-sessions')
+    expect(scope.getByTitle('Requester rule')).toHaveTextContent('named')
     expect(scope.getByText('kv/data/payments/db')).toBeInTheDocument()
     expect(scope.getByText('paths under sys/ are on the hard denylist')).toBeInTheDocument()
     expect(scope.getByLabelText('TTL for kv/data/payments/db')).toHaveValue('8h')
@@ -287,7 +287,7 @@ describe('OpenBao Authorizer user workflows', () => {
     await user.type(ttl, '30m')
     await user.click(screen.getByRole('button', { name: 'Approve kv/data/payments/db' }))
 
-    expect(await screen.findByText('Granted kv/data/payments/db.')).toBeInTheDocument()
+    expect(await screen.findByText('Granted kv/data/payments/db (session).')).toBeInTheDocument()
     expect(decisions).toHaveLength(1)
     expect(decisions[0].grantRequestId).toBe('req-7f31')
     expect(decisions[0].decisions).toHaveLength(1)
@@ -396,6 +396,60 @@ describe('OpenBao Authorizer user workflows', () => {
     expect(screen.queryByRole('button', { name: /^Approve/ })).not.toBeInTheDocument()
   })
 
+  it('lets the approver pick the scope of a session request', async () => {
+    const user = userEvent.setup()
+    const sessionRequest = create(GrantRequestSchema, {
+      ...pendingInit,
+      requester: { ...requester, id: 'ses_42', session: 'ses_42', project: 'payments', scopes: [Scope.SESSION, Scope.PROJECT, Scope.GLOBAL] },
+      items: [{ ...pendingInit.items[0], scope: Scope.PROJECT }],
+    })
+    const decisions: DecideItemsRequest[] = []
+    const fake = signedIn({
+      initialSnapshot: { pendingRequests: [sessionRequest] },
+      handlers: { decideItems: (request) => { decisions.push(request); return { grantRequest: sessionRequest } } },
+    })
+
+    render(<App client={fake.client} />)
+
+    const scope = await screen.findByLabelText('Scope for kv/data/payments/db')
+    expect(scope).toHaveValue(String(Scope.PROJECT))
+    expect(within(scope).getByRole('option', { name: 'Project payments' })).toBeInTheDocument()
+    expect(screen.getByTitle('Project')).toHaveTextContent('project payments')
+    await user.selectOptions(scope, String(Scope.GLOBAL))
+    await user.click(screen.getByRole('button', { name: 'Approve kv/data/payments/db' }))
+
+    expect(await screen.findByText('Granted kv/data/payments/db (global).')).toBeInTheDocument()
+    expect(decisions[0].decisions[0].scope).toBe(Scope.GLOBAL)
+  })
+
+  it('sends no scope when the approver keeps the requested one', async () => {
+    const user = userEvent.setup()
+    const decisions: DecideItemsRequest[] = []
+    const fake = signedIn({
+      initialSnapshot: { pendingRequests: [pendingRequest] },
+      handlers: { decideItems: (request) => { decisions.push(request); return { grantRequest: pendingRequest } } },
+    })
+
+    render(<App client={fake.client} />)
+
+    // A Requester with one scope gets no selector.
+    await user.click(await screen.findByRole('button', { name: 'Approve kv/data/payments/db' }))
+    expect(screen.queryByLabelText('Scope for kv/data/payments/db')).not.toBeInTheDocument()
+    await waitFor(() => expect(decisions).toHaveLength(1))
+    expect(decisions[0].decisions[0].scope).toBe(Scope.UNSPECIFIED)
+  })
+
+  it('shows the scope of active grants', async () => {
+    const user = userEvent.setup()
+    const projectGrant = create(GrantSchema, { ...activeGrant, id: 'grant-2', path: 'kv/data/shared', scope: Scope.PROJECT, project: 'payments' })
+    const fake = signedIn({ initialSnapshot: { activeGrants: [projectGrant] } })
+
+    render(<App client={fake.client} />)
+
+    await user.click(await screen.findByRole('button', { name: /Active grants/ }))
+    expect(await screen.findByText('Project payments')).toHaveAttribute('title', 'Every session of the project')
+  })
+
   it('revokes an active grant', async () => {
     const user = userEvent.setup()
     const fake = signedIn({ initialSnapshot: { activeGrants: [activeGrant] } })
@@ -431,7 +485,7 @@ describe('OpenBao Authorizer user workflows', () => {
     const discovered = Array.from({ length: 7 }, (_, index) => `github/token/repo-${index + 1}`)
     const grantables = [
       { name: 'github', path: 'github/token/+', capabilities: ['read'], maxTtl: hours(1), description: 'Repository-scoped GitHub tokens', paths: discovered },
-      { name: 'local-kv', path: 'kv/data/opencode/*', capabilities: ['read', 'update'], maxTtl: hours(8), discoverError: 'permission denied' },
+      { name: 'local-kv', path: 'kv/data/agents/*', capabilities: ['read', 'update'], maxTtl: hours(8), discoverError: 'permission denied' },
     ]
 
     async function openCatalog(user: ReturnType<typeof userEvent.setup>) {

@@ -31,6 +31,18 @@ const (
 	ItemRevoked ItemState = "revoked"
 )
 
+// Scope decides which tokens a Grant reaches.
+type Scope string
+
+const (
+	// ScopeSession reaches the Requester's own identity only.
+	ScopeSession Scope = "session"
+	// ScopeProject reaches every token of the Requester's project.
+	ScopeProject Scope = "project"
+	// ScopeGlobal reaches every project and session token.
+	ScopeGlobal Scope = "global"
+)
+
 // RequesterDisplay identifies a Requester to Approvers. It is encrypted at rest.
 type RequesterDisplay struct {
 	ID        string `json:"id"`
@@ -38,6 +50,13 @@ type RequesterDisplay struct {
 	Directory string `json:"directory,omitempty"`
 	// Rule names the Requester Rule the token matched.
 	Rule string `json:"rule,omitempty"`
+	// Project is the project whose policy the token carries, if any.
+	Project string `json:"project,omitempty"`
+	// Session is the agent session ID from the token's metadata, if any.
+	Session string `json:"session,omitempty"`
+	// Scopes are the scopes a Grant for this Requester may take, the default
+	// first. Requests stored before scopes existed have none.
+	Scopes []Scope `json:"scopes,omitempty"`
 }
 
 // Item is a stored Permission Item. Items are stored as JSON on their request.
@@ -47,6 +66,9 @@ type Item struct {
 	Capabilities []string      `json:"capabilities"`
 	TTL          time.Duration `json:"ttl,omitzero"`
 	State        ItemState     `json:"state"`
+	// Scope is the requested scope, or the decided one once approved. Items
+	// stored before scopes existed have none, which means session.
+	Scope Scope `json:"scope,omitempty"`
 	// Reason explains refusals and other system-decided states.
 	Reason       string    `json:"reason,omitempty"`
 	DecidedAt    time.Time `json:"decided_at,omitzero"`
@@ -67,13 +89,16 @@ type GrantRequest struct {
 	Items        []Item
 }
 
-// Grant is an approved Permission Item, rendered as one block of its
-// session's OpenBao policy.
+// Grant is an approved Permission Item, rendered as one block of the OpenBao
+// policy of its scope.
 type Grant struct {
-	ID           string
-	RequestID    string
-	ItemID       string
-	EntityID     string
+	ID        string
+	RequestID string
+	ItemID    string
+	EntityID  string
+	Scope     Scope
+	// Project names the project policy of a project-scope Grant.
+	Project      string
 	Path         string
 	Capabilities []string
 	Requester    RequesterDisplay
@@ -241,9 +266,10 @@ func (d *DB) DecideItems(ctx context.Context, request GrantRequest, grants []Gra
 			return err
 		}
 
-		if _, err := tx.ExecContext(ctx, `INSERT INTO grants (id, request_id, item_id, entity_id, path, capabilities, session_nonce, session_ciphertext,
-created_at, expires_at, approved_by_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, grant.ID, grant.RequestID, grant.ItemID, grant.EntityID, grant.Path,
-			strings.Join(grant.Capabilities, ","), sessionNonce, sessionCiphertext, unixMilli(grant.CreatedAt), unixMilli(grant.ExpiresAt), grant.ApprovedBy); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO grants (id, request_id, item_id, entity_id, scope, project, path, capabilities, session_nonce,
+session_ciphertext, created_at, expires_at, approved_by_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, grant.ID, grant.RequestID, grant.ItemID,
+			grant.EntityID, string(grant.Scope), grant.Project, grant.Path, strings.Join(grant.Capabilities, ","), sessionNonce, sessionCiphertext,
+			unixMilli(grant.CreatedAt), unixMilli(grant.ExpiresAt), grant.ApprovedBy); err != nil {
 			return fmt.Errorf("insert grant: %w", err)
 		}
 	}
@@ -329,17 +355,13 @@ func (d *DB) Grant(ctx context.Context, id string) (Grant, error) {
 	return grants[0], nil
 }
 
-// ActiveGrants lists unrevoked, unexpired Grants, optionally for one entity.
-func (d *DB) ActiveGrants(ctx context.Context, entityID string, now time.Time) ([]Grant, error) {
-	if entityID == "" {
-		return d.queryGrants(ctx, "WHERE revoked_at = 0 AND expires_at > ?", unixMilli(now))
-	}
-
-	return d.queryGrants(ctx, "WHERE revoked_at = 0 AND expires_at > ? AND entity_id = ?", unixMilli(now), entityID)
+// ActiveGrants lists unrevoked, unexpired Grants.
+func (d *DB) ActiveGrants(ctx context.Context, now time.Time) ([]Grant, error) {
+	return d.queryGrants(ctx, "WHERE revoked_at = 0 AND expires_at > ?", unixMilli(now))
 }
 
 func (d *DB) queryGrants(ctx context.Context, clause string, args ...any) ([]Grant, error) {
-	rows, err := d.db.QueryContext(ctx, `SELECT id, request_id, item_id, entity_id, path, capabilities, session_nonce, session_ciphertext,
+	rows, err := d.db.QueryContext(ctx, `SELECT id, request_id, item_id, entity_id, scope, project, path, capabilities, session_nonce, session_ciphertext,
 created_at, expires_at, approved_by_name, revoked_at, revoked_by_name FROM grants `+clause+" ORDER BY created_at DESC", args...) // #nosec G202 -- clauses are package constants.
 	if err != nil {
 		return nil, fmt.Errorf("list grants: %w", err)
@@ -352,7 +374,9 @@ created_at, expires_at, approved_by_name, revoked_at, revoked_by_name FROM grant
 		var capabilities string
 		var sessionNonce, sessionCiphertext []byte
 		var createdAt, expiresAt, revokedAt int64
-		if err := rows.Scan(&grant.ID, &grant.RequestID, &grant.ItemID, &grant.EntityID, &grant.Path, &capabilities, &sessionNonce, &sessionCiphertext,
+		var scope string
+		if err := rows.Scan(&grant.ID, &grant.RequestID, &grant.ItemID, &grant.EntityID, &scope, &grant.Project, &grant.Path, &capabilities,
+			&sessionNonce, &sessionCiphertext,
 			&createdAt, &expiresAt, &grant.ApprovedBy, &revokedAt, &grant.RevokedBy); err != nil {
 			return nil, fmt.Errorf("scan grant: %w", err)
 		}
@@ -361,6 +385,7 @@ created_at, expires_at, approved_by_name, revoked_at, revoked_by_name FROM grant
 			return nil, err
 		}
 
+		grant.Scope = Scope(scope)
 		grant.Capabilities = strings.Split(capabilities, ",")
 		grant.CreatedAt = fromUnixMilli(createdAt)
 		grant.ExpiresAt = fromUnixMilli(expiresAt)

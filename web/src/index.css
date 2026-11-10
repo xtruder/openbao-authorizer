@@ -505,6 +505,33 @@ button:disabled {
   background: #fafafa;
 }
 
+.scope-pill {
+  display: inline-flex;
+  height: 1.25rem;
+  align-items: center;
+  gap: 0.25rem;
+  border: 1px solid currentcolor;
+  border-radius: 999px;
+  padding: 0 0.5rem;
+  font-size: 0.62rem;
+  font-weight: 650;
+  line-height: 1;
+}
+
+.scope-session {
+  color: #52525b;
+}
+
+.scope-project {
+  color: #1d4ed8;
+}
+
+/* Global Grants reach every agent on the server, so they stand out. */
+.scope-global {
+  color: #b45309;
+  background: #fffbeb;
+}
+
 .request-card {
   border-bottom: 1px solid #e4e4e7;
   background: #fff;
@@ -580,6 +607,15 @@ button:disabled {
   padding: 0 0.6rem;
   color: #18181b;
   font-family: var(--font-mono);
+  outline: none;
+}
+
+.ttl-field select {
+  height: 100%;
+  border: 0;
+  padding: 0 0.4rem;
+  color: #18181b;
+  background: #fff;
   outline: none;
 }
 

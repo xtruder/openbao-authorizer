@@ -22,6 +22,37 @@ var itemStates = map[store.ItemState]authorizerv1.ItemState{
 	store.ItemRevoked:        authorizerv1.ItemState_ITEM_STATE_REVOKED,
 }
 
+var scopes = map[store.Scope]authorizerv1.Scope{
+	store.ScopeSession: authorizerv1.Scope_SCOPE_SESSION,
+	store.ScopeProject: authorizerv1.Scope_SCOPE_PROJECT,
+	store.ScopeGlobal:  authorizerv1.Scope_SCOPE_GLOBAL,
+}
+
+// scopeProto renders a stored scope; items and Grants stored before scopes
+// existed have none and are session-scoped.
+func scopeProto(scope store.Scope) authorizerv1.Scope {
+	if rendered, ok := scopes[scope]; ok {
+		return rendered
+	}
+
+	return authorizerv1.Scope_SCOPE_SESSION
+}
+
+// scopeInput converts an optional proto scope; unspecified means "not chosen".
+func scopeInput(value authorizerv1.Scope) (store.Scope, bool) {
+	if value == authorizerv1.Scope_SCOPE_UNSPECIFIED {
+		return "", true
+	}
+
+	for scope, rendered := range scopes {
+		if rendered == value {
+			return scope, true
+		}
+	}
+
+	return "", false
+}
+
 func optionalTimestamp(value time.Time) *timestamppb.Timestamp {
 	if value.IsZero() {
 		return nil
@@ -50,7 +81,15 @@ func loginOptionsProto(login config.ApproverLogin) *authorizerv1.GetLoginOptions
 }
 
 func requesterProto(entityID string, display store.RequesterDisplay) *authorizerv1.Requester {
-	return &authorizerv1.Requester{Id: display.ID, Title: display.Title, Directory: display.Directory, EntityId: entityID, Rule: display.Rule}
+	rendered := &authorizerv1.Requester{
+		Id: display.ID, Title: display.Title, Directory: display.Directory, EntityId: entityID, Rule: display.Rule,
+		Project: display.Project, Session: display.Session,
+	}
+	for _, scope := range grants.Scopes(display) {
+		rendered.Scopes = append(rendered.Scopes, scopeProto(scope))
+	}
+
+	return rendered
 }
 
 // requestProto renders a request; forApprover adds the Requester and decision
@@ -67,6 +106,7 @@ func requestProto(request store.GrantRequest, forApprover bool) *authorizerv1.Gr
 	for _, item := range request.Items {
 		renderedItem := &authorizerv1.PermissionItem{
 			Id: item.ID, Path: item.Path, Capabilities: item.Capabilities, State: itemStates[item.State], Reason: item.Reason,
+			Scope: scopeProto(item.Scope),
 		}
 		if item.TTL > 0 {
 			renderedItem.Ttl = durationpb.New(item.TTL)
@@ -107,6 +147,7 @@ func grantsProto(values []store.Grant, forApprover bool) []*authorizerv1.Grant {
 		renderedGrant := &authorizerv1.Grant{
 			Id: grant.ID, ItemId: grant.ItemID, Path: grant.Path, Capabilities: grant.Capabilities,
 			CreatedAt: timestamppb.New(grant.CreatedAt), ExpiresAt: timestamppb.New(grant.ExpiresAt),
+			Scope: scopeProto(grant.Scope), Project: grant.Project,
 		}
 		if forApprover {
 			renderedGrant.ApprovedBy = grant.ApprovedBy

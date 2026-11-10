@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -114,8 +115,8 @@ func newFixture(t *testing.T) fixture {
 
 	t.Cleanup(func() { _ = database.Close() })
 	bao := openbaotest.New()
-	bao.AddSession("token-a", "entity-a", map[string]string{"session_id": "aaa", "title": "Fix CI", "directory": "/src/app"})
-	bao.AddSession("token-b", "entity-b", nil)
+	bao.AddNamedToken("token-a", "entity-a", map[string]string{"identity": "aaa", "title": "Fix CI", "directory": "/src/app"})
+	bao.AddNamedToken("token-b", "entity-b", nil)
 	notifier := &recordingNotifier{}
 	now := &clock{now: time.Now().UTC()}
 	faulty := &faultyStore{DB: database}
@@ -124,7 +125,7 @@ func newFixture(t *testing.T) fixture {
 			{Name: "kv", Path: "kv/data/*", Capabilities: []string{"read", "update"}, MaxTTL: 8 * time.Hour},
 		}},
 		PendingTTL: time.Hour,
-		Requesters: []RequesterRule{{Name: "opencode", TokenRole: "opencode-session"}, {Name: "ci", AuthMount: "approle"}},
+		Requesters: []RequesterRule{{Name: "named", TokenRole: "named-identity"}, {Name: "ci", AuthMount: "approle"}},
 		Now:        now.Now,
 	})
 	session, err := service.Authenticate(t.Context(), "token-a")
@@ -137,19 +138,22 @@ func newFixture(t *testing.T) fixture {
 
 func read(path string) ItemInput { return ItemInput{Path: path, Capabilities: []string{"read"}} }
 
-const sessionPolicyName = PolicyPrefix + "entity-a"
+const requesterPolicyName = PolicyPrefix + "entity-a"
 
-// policyBlocks returns the session policy's blocks as "path=capabilities@expiry".
+// sessionOnly are the scopes of a token without project or global policies.
+var sessionOnly = []store.Scope{store.ScopeSession}
+
+// policyBlocks returns the Requester policy's blocks as "path=capabilities@expiry".
 func (f fixture) policyBlocks(t *testing.T) []string {
 	t.Helper()
-	policy, ok := f.bao.Policy(sessionPolicyName)
+	policy, ok := f.bao.Policy(requesterPolicyName)
 	if !ok {
 		return nil
 	}
 
 	blocks, err := openbaotest.ParsePolicy(policy.Document)
 	if err != nil {
-		t.Fatalf("parse session policy: %v\n%s", err, policy.Document)
+		t.Fatalf("parse Requester policy: %v\n%s", err, policy.Document)
 	}
 
 	rendered := make([]string, 0, len(blocks))
@@ -194,19 +198,19 @@ func TestAuthenticateMatchesRequesterRules(t *testing.T) {
 	t.Parallel()
 
 	f := newFixture(t)
-	if f.session.EntityID != "entity-a" || f.session.Display != (store.RequesterDisplay{ID: "aaa", Title: "Fix CI", Directory: "/src/app", Rule: "opencode"}) {
+	if f.session.EntityID != "entity-a" || !reflect.DeepEqual(f.session.Display, store.RequesterDisplay{ID: "aaa", Title: "Fix CI", Directory: "/src/app", Rule: "named", Scopes: sessionOnly}) {
 		t.Fatalf("requester = %#v", f.session)
 	}
 
-	// Without meta.session_id the display name, then the entity ID, identifies the Requester.
+	// Without meta.identity the display name, then the entity ID, identifies the Requester.
 	requester, err := f.service.Authenticate(t.Context(), "token-b")
-	if err != nil || requester.Display != (store.RequesterDisplay{ID: "token", Rule: "opencode"}) {
+	if err != nil || !reflect.DeepEqual(requester.Display, store.RequesterDisplay{ID: "token", Rule: "named", Scopes: sessionOnly}) {
 		t.Fatalf("requester = %#v, %v", requester, err)
 	}
 
 	f.bao.SetIdentity("approle-token", openbao.Identity{EntityID: "ci-entity", Path: "auth/approle/login"})
 	requester, err = f.service.Authenticate(t.Context(), "approle-token")
-	if err != nil || requester.EntityID != "ci-entity" || requester.Display != (store.RequesterDisplay{ID: "ci-entity", Rule: "ci"}) {
+	if err != nil || requester.EntityID != "ci-entity" || !reflect.DeepEqual(requester.Display, store.RequesterDisplay{ID: "ci-entity", Rule: "ci", Scopes: sessionOnly}) {
 		t.Fatalf("AppRole requester = %#v, %v", requester, err)
 	}
 
@@ -215,10 +219,10 @@ func TestAuthenticateMatchesRequesterRules(t *testing.T) {
 	}
 
 	for token, identity := range map[string]openbao.Identity{
-		"human-token":    {EntityID: "human", Path: "auth/userpass/login/bob", Meta: map[string]string{"session_id": "x"}},
+		"human-token":    {EntityID: "human", Path: "auth/userpass/login/bob", Meta: map[string]string{"identity": "x"}},
 		"other-role":     {EntityID: "other", Role: "other-role", Path: "auth/token/create/other-role"},
 		"mount-prefix":   {EntityID: "other", Path: "auth/approle-other/login"},
-		"no-entity":      {Role: "opencode-session"},
+		"no-entity":      {Role: "named-identity"},
 		"approle-orphan": {Path: "auth/approle/login"},
 	} {
 		f.bao.SetIdentity(token, identity)
@@ -358,11 +362,11 @@ func TestBatchApprovalWritesSessionPolicyOnce(t *testing.T) {
 		t.Fatalf("policy blocks = %#v, want %#v", blocks, want)
 	}
 
-	if policy, _ := f.bao.Policy(sessionPolicyName); policy.Expiration.UTC().Format(time.RFC3339) != f.expiry(time.Hour) {
+	if policy, _ := f.bao.Policy(requesterPolicyName); policy.Expiration.UTC().Format(time.RFC3339) != f.expiry(time.Hour) {
 		t.Fatalf("policy expiration = %v, want the latest block's", policy.Expiration)
 	}
 
-	if !slices.Equal(f.bao.EntityPolicies("entity-a"), []string{sessionPolicyName}) {
+	if !slices.Equal(f.bao.EntityPolicies("entity-a"), []string{requesterPolicyName}) {
 		t.Fatalf("entity policies = %#v", f.bao.EntityPolicies("entity-a"))
 	}
 
@@ -407,7 +411,7 @@ func TestRevokeRewritesThenDeletesSessionPolicy(t *testing.T) {
 	}
 
 	// The name stays attached: without the policy it grants nothing.
-	if _, ok := f.bao.Policy(sessionPolicyName); ok || !slices.Equal(f.bao.EntityPolicies("entity-a"), []string{sessionPolicyName}) {
+	if _, ok := f.bao.Policy(requesterPolicyName); ok || !slices.Equal(f.bao.EntityPolicies("entity-a"), []string{requesterPolicyName}) {
 		t.Fatalf("policy not deleted or entity changed: %#v", f.bao.EntityPolicies("entity-a"))
 	}
 
@@ -507,7 +511,7 @@ func TestFailedAttachKeepsOperatorPoliciesAndRestoresPolicy(t *testing.T) {
 		t.Fatal("expected the entity update to fail")
 	}
 
-	if _, ok := f.bao.Policy(sessionPolicyName); ok {
+	if _, ok := f.bao.Policy(requesterPolicyName); ok {
 		t.Fatal("policy written for an unrecorded Grant was not removed")
 	}
 
@@ -516,7 +520,7 @@ func TestFailedAttachKeepsOperatorPoliciesAndRestoresPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if want := []string{"operator-extra", sessionPolicyName}; !slices.Equal(f.bao.EntityPolicies("entity-a"), want) {
+	if want := []string{"operator-extra", requesterPolicyName}; !slices.Equal(f.bao.EntityPolicies("entity-a"), want) {
 		t.Fatalf("entity policies = %v, want %v", f.bao.EntityPolicies("entity-a"), want)
 	}
 }
@@ -552,7 +556,7 @@ func TestFailedCommitRestoresPolicy(t *testing.T) {
 
 	// A failed revocation record restores the revoked block too.
 	f.store.fail(nil, diskFull)
-	active, err := f.service.Grants(t.Context(), "entity-a")
+	active, err := f.service.Grants(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -588,7 +592,7 @@ func TestSessionPolicyRendersDuplicateAndSpecialPaths(t *testing.T) {
 		{Path: "kv/data/a", Capabilities: []string{"read", "update"}, ExpiresAt: now.Add(time.Hour)},
 		{Path: special.String(), Capabilities: []string{"list"}, ExpiresAt: now.Add(time.Second)},
 	}
-	document, expiresAt := sessionPolicy(grants)
+	document, expiresAt := grantPolicy(grants)
 	if !expiresAt.Equal(now.Add(time.Hour)) {
 		t.Fatalf("policy expiration = %v", expiresAt)
 	}
@@ -699,7 +703,7 @@ func TestRequestRejectsHiddenRunesAndStoresRefusalsSafely(t *testing.T) {
 		t.Fatalf("valid capabilities of a refused item: %#v", unmatched)
 	}
 
-	f.bao.AddSession("token-c", "entity-c", map[string]string{"session_id": "ccc", "title": "Fix\u202e CI\x1b[2J", "directory": "/src/\u200bapp"})
+	f.bao.AddNamedToken("token-c", "entity-c", map[string]string{"identity": "ccc", "title": "Fix\u202e CI\x1b[2J", "directory": "/src/\u200bapp"})
 	session, err := f.service.Authenticate(t.Context(), "token-c")
 	if err != nil || session.Display.Title != "Fix CI[2J" || session.Display.Directory != "/src/app" {
 		t.Fatalf("session display = %#v, %v", session.Display, err)
@@ -775,7 +779,7 @@ func TestConcurrentApprovalsWriteOneGrant(t *testing.T) {
 		}
 	}
 
-	if active, _ := f.service.Grants(t.Context(), "entity-a"); succeeded != 1 || len(active) != 1 || f.bao.Calls("WritePolicy") != 1 {
+	if active, _ := f.service.Grants(t.Context()); succeeded != 1 || len(active) != 1 || f.bao.Calls("WritePolicy") != 1 {
 		t.Fatalf("succeeded = %d, grants = %d, policy writes = %d", succeeded, len(active), f.bao.Calls("WritePolicy"))
 	}
 }

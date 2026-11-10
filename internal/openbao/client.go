@@ -21,7 +21,7 @@ const maxResponseBytes = 4 << 20
 type Config struct {
 	Address string
 	// Token is the authorizer's own credential. It performs every OpenBao write;
-	// human and session tokens are only used to identify their callers.
+	// human and Requester tokens are only used to identify their callers.
 	Token      string
 	Namespace  string
 	HTTPClient *http.Client

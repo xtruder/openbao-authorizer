@@ -135,6 +135,8 @@ message ItemDecision {
   Decision decision = 2;
   // Optional shorter Grant lifetime; only valid with DECISION_APPROVE.
   google.protobuf.Duration ttl = 3;
+  // Optional scope replacing the requested one; only valid with DECISION_APPROVE.
+  Scope scope = 4;
 }
 
 message DecideItemsRequest {

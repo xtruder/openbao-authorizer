@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -60,6 +61,7 @@ type grantItem struct {
 	Capabilities []string   `json:"capabilities"`
 	TTL          string     `json:"ttl,omitempty"`
 	State        string     `json:"state"`
+	Scope        string     `json:"scope,omitempty"`
 	Reason       string     `json:"reason,omitempty"`
 	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
 }
@@ -78,7 +80,7 @@ func newGrantRequest(message *authorizerv1.GrantRequest) grantRequest {
 	for _, item := range message.GetItems() {
 		printed := grantItem{
 			ID: item.GetId(), Path: item.GetPath(), Capabilities: item.GetCapabilities(),
-			State: itemState(item.GetState()), Reason: item.GetReason(),
+			State: itemState(item.GetState()), Reason: item.GetReason(), Scope: scopeName(item.GetScope()),
 		}
 		if item.GetTtl() != nil {
 			printed.TTL = item.GetTtl().AsDuration().String()
@@ -93,6 +95,29 @@ func newGrantRequest(message *authorizerv1.GrantRequest) grantRequest {
 	}
 
 	return request
+}
+
+// scopeName prints SCOPE_PROJECT as project, and nothing for unspecified.
+func scopeName(scope authorizerv1.Scope) string {
+	if scope == authorizerv1.Scope_SCOPE_UNSPECIFIED {
+		return ""
+	}
+
+	return strings.ToLower(strings.TrimPrefix(scope.String(), "SCOPE_"))
+}
+
+// parseScope reads a --scope value; empty leaves the choice to the authorizer.
+func parseScope(value string) (authorizerv1.Scope, error) {
+	if value == "" {
+		return authorizerv1.Scope_SCOPE_UNSPECIFIED, nil
+	}
+
+	scope, ok := authorizerv1.Scope_value["SCOPE_"+strings.ToUpper(value)]
+	if !ok || scope == int32(authorizerv1.Scope_SCOPE_UNSPECIFIED) {
+		return 0, fmt.Errorf("scope must be session, project, or global: %q", value)
+	}
+
+	return authorizerv1.Scope(scope), nil
 }
 
 // itemState prints ITEM_STATE_ALREADY_GRANTED as already_granted.
@@ -158,6 +183,8 @@ type grantOutput struct {
 	ItemID       string    `json:"item_id"`
 	Path         string    `json:"path"`
 	Capabilities []string  `json:"capabilities"`
+	Scope        string    `json:"scope"`
+	Project      string    `json:"project,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	ExpiresAt    time.Time `json:"expires_at"`
 }
@@ -516,7 +543,7 @@ func (c *authorizerClient) grants(ctx context.Context) ([]grantOutput, error) {
 	for _, grant := range response.Msg.GetGrants() {
 		grants = append(grants, grantOutput{
 			ID: grant.GetId(), ItemID: grant.GetItemId(), Path: grant.GetPath(), Capabilities: grant.GetCapabilities(),
-			CreatedAt: grant.GetCreatedAt().AsTime(), ExpiresAt: grant.GetExpiresAt().AsTime(),
+			Scope: cmp.Or(scopeName(grant.GetScope()), "session"), Project: grant.GetProject(), CreatedAt: grant.GetCreatedAt().AsTime(), ExpiresAt: grant.GetExpiresAt().AsTime(),
 		})
 	}
 
@@ -617,12 +644,14 @@ func reportChanges(request grantRequest, seen map[string]string, progress progre
 type requestFlags struct {
 	reason     string
 	items      []string
+	scope      string
 	ttl        time.Duration
 	timeout    time.Duration
 	noWait     bool
 	waitID     string
 	authorizer string
 	quiet      bool
+	identity   string
 }
 
 func newRequestCommand() *cobra.Command {
@@ -638,6 +667,7 @@ request as JSON on stdout.`,
   bao-cred request --wait <request-id>`,
 		Args: noPositionalArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
+			flags.identity = identityFlag(command)
 			return runRequest(command.Context(), flags, command.OutOrStdout(), command.ErrOrStderr())
 		},
 	}
@@ -648,6 +678,7 @@ request as JSON on stdout.`,
 	set.StringArrayVar(&flags.items, "item", nil,
 		"Permission Item PATH=CAP[,CAP]; CAP is create, read, update, patch, delete, or list; repeatable")
 	set.DurationVar(&flags.ttl, "ttl", 0, "requested Grant lifetime for every item")
+	set.StringVar(&flags.scope, "scope", "", "suggested scope for every item: session, project, or global (default: session in an agent session, else project)")
 	set.DurationVar(&flags.timeout, "timeout", 15*time.Minute, "approval wait timeout")
 	set.BoolVar(&flags.noWait, "no-wait", false, "print the filed request without waiting")
 	set.StringVar(&flags.waitID, "wait", "", "resume waiting on an existing Grant Request")
@@ -672,8 +703,8 @@ func runRequest(ctx context.Context, flags requestFlags, stdout, stderr io.Write
 	input := &authorizerv1.CreateGrantRequestRequest{Reason: strings.TrimSpace(flags.reason)}
 	id := strings.TrimSpace(flags.waitID)
 	if id != "" {
-		if input.Reason != "" || len(flags.items) > 0 || flags.ttl != 0 || flags.noWait {
-			return usageError(errors.New("--wait cannot be combined with --reason, --item, --ttl, or --no-wait"))
+		if input.Reason != "" || len(flags.items) > 0 || flags.ttl != 0 || flags.scope != "" || flags.noWait {
+			return usageError(errors.New("--wait cannot be combined with --reason, --item, --ttl, --scope, or --no-wait"))
 		}
 	} else {
 		if input.Reason == "" {
@@ -684,17 +715,24 @@ func runRequest(ctx context.Context, flags requestFlags, stdout, stderr io.Write
 			return usageError(errors.New("at least one --item is required"))
 		}
 
+		scope, err := parseScope(flags.scope)
+		if err != nil {
+			return usageError(err)
+		}
+
 		for _, raw := range flags.items {
 			item, err := parseItem(raw, flags.ttl)
 			if err != nil {
 				return usageError(err)
 			}
 
+			item.Scope = scope
+
 			input.Items = append(input.Items, item)
 		}
 	}
 
-	token, err := requesterToken()
+	token, err := requesterToken(ctx, flags.identity)
 	if err != nil {
 		return err
 	}
@@ -776,7 +814,7 @@ func newGrantsCommand() *cobra.Command {
 		Short: "List the Requester's active Grants as JSON",
 		Args:  noPositionalArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			return runGrants(command.Context(), authorizerURL, command.OutOrStdout())
+			return runGrants(command.Context(), authorizerURL, identityFlag(command), command.OutOrStdout())
 		},
 	}
 
@@ -784,8 +822,8 @@ func newGrantsCommand() *cobra.Command {
 	return command
 }
 
-func runGrants(ctx context.Context, authorizerURL string, stdout io.Writer) error {
-	client, err := requesterAuthorizerClient(authorizerURL)
+func runGrants(ctx context.Context, authorizerURL, identity string, stdout io.Writer) error {
+	client, err := requesterAuthorizerClient(ctx, authorizerURL, identity)
 	if err != nil {
 		return err
 	}
@@ -811,7 +849,7 @@ discovery failed. Request a path with bao-cred read --reason or bao-cred request
   bao-cred grantable | jq -r '.[].paths[]?'`,
 		Args: noPositionalArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			return runGrantable(command.Context(), authorizerURL, command.OutOrStdout())
+			return runGrantable(command.Context(), authorizerURL, identityFlag(command), command.OutOrStdout())
 		},
 	}
 
@@ -819,8 +857,8 @@ discovery failed. Request a path with bao-cred read --reason or bao-cred request
 	return command
 }
 
-func runGrantable(ctx context.Context, authorizerURL string, stdout io.Writer) error {
-	client, err := requesterAuthorizerClient(authorizerURL)
+func runGrantable(ctx context.Context, authorizerURL, identity string, stdout io.Writer) error {
+	client, err := requesterAuthorizerClient(ctx, authorizerURL, identity)
 	if err != nil {
 		return err
 	}
@@ -833,8 +871,8 @@ func runGrantable(ctx context.Context, authorizerURL string, stdout io.Writer) e
 	return writeIndentedJSON(stdout, grantables)
 }
 
-func requesterAuthorizerClient(authorizerURL string) (*authorizerClient, error) {
-	token, err := requesterToken()
+func requesterAuthorizerClient(ctx context.Context, authorizerURL, identity string) (*authorizerClient, error) {
+	token, err := requesterToken(ctx, identity)
 	if err != nil {
 		return nil, err
 	}

@@ -135,7 +135,14 @@ func (a approverService) DecideItems(ctx context.Context, request *connect.Reque
 			return nil, invalidArgument("ttl is not a valid duration")
 		}
 
-		decisions = append(decisions, grants.Decision{ItemID: decision.GetItemId(), Approve: verdict == authorizerv1.Decision_DECISION_APPROVE, TTL: ttl})
+		scope, ok := scopeInput(decision.GetScope())
+		if !ok {
+			return nil, invalidArgument("scope is not valid")
+		}
+
+		decisions = append(decisions, grants.Decision{
+			ItemID: decision.GetItemId(), Approve: verdict == authorizerv1.Decision_DECISION_APPROVE, TTL: ttl, Scope: scope,
+		})
 	}
 
 	decided, err := a.grants.Decide(ctx, approverOf(approverFrom(ctx)), request.Msg.GetGrantRequestId(), decisions)
@@ -147,7 +154,7 @@ func (a approverService) DecideItems(ctx context.Context, request *connect.Reque
 }
 
 func (a approverService) ListGrants(ctx context.Context, _ *connect.Request[authorizerv1.ListGrantsRequest]) (*connect.Response[authorizerv1.ListGrantsResponse], error) {
-	active, err := a.grants.Grants(ctx, "")
+	active, err := a.grants.Grants(ctx)
 	if err != nil {
 		return nil, a.internalError(err)
 	}
@@ -214,7 +221,7 @@ func (a approverService) snapshot(ctx context.Context) (*authorizerv1.DashboardS
 		return nil, a.internalError(err)
 	}
 
-	active, err := a.grants.Grants(ctx, "")
+	active, err := a.grants.Grants(ctx)
 	if err != nil {
 		return nil, a.internalError(err)
 	}

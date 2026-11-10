@@ -19,7 +19,7 @@ import (
 	authorizerv1 "github.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1"
 )
 
-const testToken = "session-token-value"
+const testToken = "requester-token-value"
 
 // parseRead runs the read command with arguments and returns the options it
 // would read with.
@@ -189,14 +189,15 @@ func TestReadReturnsCommandExitStatus(t *testing.T) {
 }
 
 func TestRequesterTokenPriority(t *testing.T) {
+	t.Chdir(t.TempDir())
 	t.Setenv("BAO_TOKEN", "bao-token")
 	t.Setenv("VAULT_TOKEN", "vault-token")
-	if got, err := requesterToken(); err != nil || got != "bao-token" {
+	if got, err := requesterToken(t.Context(), ""); err != nil || got != "bao-token" {
 		t.Fatalf("BAO_TOKEN: got %q, %v", got, err)
 	}
 
 	t.Setenv("BAO_TOKEN", "")
-	if got, err := requesterToken(); err != nil || got != "vault-token" {
+	if got, err := requesterToken(t.Context(), ""); err != nil || got != "vault-token" {
 		t.Fatalf("VAULT_TOKEN: got %q, %v", got, err)
 	}
 
@@ -204,7 +205,7 @@ func TestRequesterTokenPriority(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("VAULT_TOKEN", "")
 	t.Setenv("BAO_NO_TOKEN_FILE", "")
-	if _, err := requesterToken(); err == nil || !strings.Contains(err.Error(), "bao login") {
+	if _, err := requesterToken(t.Context(), ""); err == nil || !strings.Contains(err.Error(), "bao login") {
 		t.Fatalf("missing token error = %v", err)
 	}
 
@@ -212,14 +213,14 @@ func TestRequesterTokenPriority(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got, err := requesterToken(); err != nil || got != "file-token" {
+	if got, err := requesterToken(t.Context(), ""); err != nil || got != "file-token" {
 		t.Fatalf("token file: got %q, %v", got, err)
 	}
 
-	// Inside opencode the plugin disables the file, so a command without its
-	// Session Token never falls back to the human's token.
+	// A project's .envrc disables the file, so a command without a Named
+	// Token never falls back to the human's token.
 	t.Setenv("BAO_NO_TOKEN_FILE", "1")
-	if got, err := requesterToken(); err == nil || got != "" {
+	if got, err := requesterToken(t.Context(), ""); err == nil || got != "" {
 		t.Fatalf("disabled token file: got %q, %v", got, err)
 	}
 }
@@ -350,6 +351,8 @@ func fakeOpenBao(t *testing.T, allowed func() bool) fakeOpenBaoServer {
 
 func setupEnvironment(t *testing.T, authorizerURL, openBaoURL string) {
 	t.Helper()
+	// Outside any git project, so a checkout's .bao-identity can't apply.
+	t.Chdir(t.TempDir())
 	t.Setenv("BAO_TOKEN", testToken)
 	t.Setenv("VAULT_TOKEN", "")
 	t.Setenv("BAO_ADDR", openBaoURL)

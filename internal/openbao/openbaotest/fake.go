@@ -95,12 +95,20 @@ func (f *Fake) SetIdentity(token string, identity openbao.Identity) {
 	f.identities[token] = identity
 }
 
-// AddSession registers a Session Token created through the opencode-session
+// AddNamedToken registers a Named Token created through the named-identity
 // token role, and its entity.
-func (f *Fake) AddSession(token, entityID string, meta map[string]string) {
+func (f *Fake) AddNamedToken(token, entityID string, meta map[string]string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.identities[token] = openbao.Identity{EntityID: entityID, DisplayName: "token", Policies: []string{"default", "opencode-session"}, Role: "opencode-session", Path: "auth/token/create/opencode-session", Meta: meta}
+	f.identities[token] = openbao.Identity{EntityID: entityID, DisplayName: "token", Policies: []string{"default", "named-identity"}, Role: "named-identity", Path: "auth/token/create/named-identity", Meta: meta}
+	f.entities[entityID] = &openbao.Entity{ID: entityID, Name: "entity_" + entityID}
+}
+
+// AddToken registers a token carrying policies, and its entity.
+func (f *Fake) AddToken(token, entityID, role string, policies []string, meta map[string]string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.identities[token] = openbao.Identity{EntityID: entityID, DisplayName: "token", Policies: policies, Role: role, Path: "auth/token/create/" + role, Meta: meta}
 	f.entities[entityID] = &openbao.Entity{ID: entityID, Name: "entity_" + entityID}
 }
 
@@ -298,12 +306,13 @@ func (f *Fake) CapabilitiesSelf(_ context.Context, token string, paths []string)
 		result[path] = []string{"deny"}
 	}
 
-	entity := f.entities[identity.EntityID]
-	if entity == nil {
-		return result, nil
+	// OpenBao evaluates the token's own policies and its entity's.
+	names := slices.Clone(identity.Policies)
+	if entity := f.entities[identity.EntityID]; entity != nil {
+		names = append(names, entity.Policies...)
 	}
 
-	for _, name := range entity.Policies {
+	for _, name := range names {
 		policy, ok := f.policies[name]
 		if !ok || (!policy.Expiration.IsZero() && !f.now().Before(policy.Expiration)) {
 			continue

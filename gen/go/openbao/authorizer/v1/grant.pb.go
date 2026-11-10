@@ -28,7 +28,10 @@ type PermissionItemInput struct {
 	Path         string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
 	Capabilities []string               `protobuf:"bytes,2,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
 	// Requested Grant lifetime; defaults to the rule's cap.
-	Ttl           *durationpb.Duration `protobuf:"bytes,3,opt,name=ttl,proto3" json:"ttl,omitempty"`
+	Ttl *durationpb.Duration `protobuf:"bytes,3,opt,name=ttl,proto3" json:"ttl,omitempty"`
+	// Suggested scope; the Approver may change it. Unspecified uses the
+	// Requester's default: session for agent sessions, else project.
+	Scope         Scope `protobuf:"varint,4,opt,name=scope,proto3,enum=openbao.authorizer.v1.Scope" json:"scope,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -82,6 +85,13 @@ func (x *PermissionItemInput) GetTtl() *durationpb.Duration {
 		return x.Ttl
 	}
 	return nil
+}
+
+func (x *PermissionItemInput) GetScope() Scope {
+	if x != nil {
+		return x.Scope
+	}
+	return Scope_SCOPE_UNSPECIFIED
 }
 
 type CreateGrantRequestRequest struct {
@@ -560,11 +570,12 @@ var File_openbao_authorizer_v1_grant_proto protoreflect.FileDescriptor
 
 const file_openbao_authorizer_v1_grant_proto_rawDesc = "" +
 	"\n" +
-	"!openbao/authorizer/v1/grant.proto\x12\x15openbao.authorizer.v1\x1a\x1egoogle/protobuf/duration.proto\x1a!openbao/authorizer/v1/types.proto\"z\n" +
+	"!openbao/authorizer/v1/grant.proto\x12\x15openbao.authorizer.v1\x1a\x1egoogle/protobuf/duration.proto\x1a!openbao/authorizer/v1/types.proto\"\xae\x01\n" +
 	"\x13PermissionItemInput\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\"\n" +
 	"\fcapabilities\x18\x02 \x03(\tR\fcapabilities\x12+\n" +
-	"\x03ttl\x18\x03 \x01(\v2\x19.google.protobuf.DurationR\x03ttl\"u\n" +
+	"\x03ttl\x18\x03 \x01(\v2\x19.google.protobuf.DurationR\x03ttl\x122\n" +
+	"\x05scope\x18\x04 \x01(\x0e2\x1c.openbao.authorizer.v1.ScopeR\x05scope\"u\n" +
 	"\x19CreateGrantRequestRequest\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason\x12@\n" +
 	"\x05items\x18\x02 \x03(\v2*.openbao.authorizer.v1.PermissionItemInputR\x05items\"f\n" +
@@ -623,35 +634,37 @@ var file_openbao_authorizer_v1_grant_proto_goTypes = []any{
 	(*ListGrantablesRequest)(nil),      // 9: openbao.authorizer.v1.ListGrantablesRequest
 	(*ListGrantablesResponse)(nil),     // 10: openbao.authorizer.v1.ListGrantablesResponse
 	(*durationpb.Duration)(nil),        // 11: google.protobuf.Duration
-	(*GrantRequest)(nil),               // 12: openbao.authorizer.v1.GrantRequest
-	(*Heartbeat)(nil),                  // 13: openbao.authorizer.v1.Heartbeat
-	(*Grant)(nil),                      // 14: openbao.authorizer.v1.Grant
-	(*Grantable)(nil),                  // 15: openbao.authorizer.v1.Grantable
+	(Scope)(0),                         // 12: openbao.authorizer.v1.Scope
+	(*GrantRequest)(nil),               // 13: openbao.authorizer.v1.GrantRequest
+	(*Heartbeat)(nil),                  // 14: openbao.authorizer.v1.Heartbeat
+	(*Grant)(nil),                      // 15: openbao.authorizer.v1.Grant
+	(*Grantable)(nil),                  // 16: openbao.authorizer.v1.Grantable
 }
 var file_openbao_authorizer_v1_grant_proto_depIdxs = []int32{
 	11, // 0: openbao.authorizer.v1.PermissionItemInput.ttl:type_name -> google.protobuf.Duration
-	0,  // 1: openbao.authorizer.v1.CreateGrantRequestRequest.items:type_name -> openbao.authorizer.v1.PermissionItemInput
-	12, // 2: openbao.authorizer.v1.CreateGrantRequestResponse.grant_request:type_name -> openbao.authorizer.v1.GrantRequest
-	12, // 3: openbao.authorizer.v1.GetGrantRequestResponse.grant_request:type_name -> openbao.authorizer.v1.GrantRequest
-	12, // 4: openbao.authorizer.v1.WatchGrantRequestResponse.grant_request:type_name -> openbao.authorizer.v1.GrantRequest
-	13, // 5: openbao.authorizer.v1.WatchGrantRequestResponse.heartbeat:type_name -> openbao.authorizer.v1.Heartbeat
-	14, // 6: openbao.authorizer.v1.ListMyGrantsResponse.grants:type_name -> openbao.authorizer.v1.Grant
-	15, // 7: openbao.authorizer.v1.ListGrantablesResponse.grantables:type_name -> openbao.authorizer.v1.Grantable
-	1,  // 8: openbao.authorizer.v1.GrantService.CreateGrantRequest:input_type -> openbao.authorizer.v1.CreateGrantRequestRequest
-	3,  // 9: openbao.authorizer.v1.GrantService.GetGrantRequest:input_type -> openbao.authorizer.v1.GetGrantRequestRequest
-	5,  // 10: openbao.authorizer.v1.GrantService.WatchGrantRequest:input_type -> openbao.authorizer.v1.WatchGrantRequestRequest
-	7,  // 11: openbao.authorizer.v1.GrantService.ListMyGrants:input_type -> openbao.authorizer.v1.ListMyGrantsRequest
-	9,  // 12: openbao.authorizer.v1.GrantService.ListGrantables:input_type -> openbao.authorizer.v1.ListGrantablesRequest
-	2,  // 13: openbao.authorizer.v1.GrantService.CreateGrantRequest:output_type -> openbao.authorizer.v1.CreateGrantRequestResponse
-	4,  // 14: openbao.authorizer.v1.GrantService.GetGrantRequest:output_type -> openbao.authorizer.v1.GetGrantRequestResponse
-	6,  // 15: openbao.authorizer.v1.GrantService.WatchGrantRequest:output_type -> openbao.authorizer.v1.WatchGrantRequestResponse
-	8,  // 16: openbao.authorizer.v1.GrantService.ListMyGrants:output_type -> openbao.authorizer.v1.ListMyGrantsResponse
-	10, // 17: openbao.authorizer.v1.GrantService.ListGrantables:output_type -> openbao.authorizer.v1.ListGrantablesResponse
-	13, // [13:18] is the sub-list for method output_type
-	8,  // [8:13] is the sub-list for method input_type
-	8,  // [8:8] is the sub-list for extension type_name
-	8,  // [8:8] is the sub-list for extension extendee
-	0,  // [0:8] is the sub-list for field type_name
+	12, // 1: openbao.authorizer.v1.PermissionItemInput.scope:type_name -> openbao.authorizer.v1.Scope
+	0,  // 2: openbao.authorizer.v1.CreateGrantRequestRequest.items:type_name -> openbao.authorizer.v1.PermissionItemInput
+	13, // 3: openbao.authorizer.v1.CreateGrantRequestResponse.grant_request:type_name -> openbao.authorizer.v1.GrantRequest
+	13, // 4: openbao.authorizer.v1.GetGrantRequestResponse.grant_request:type_name -> openbao.authorizer.v1.GrantRequest
+	13, // 5: openbao.authorizer.v1.WatchGrantRequestResponse.grant_request:type_name -> openbao.authorizer.v1.GrantRequest
+	14, // 6: openbao.authorizer.v1.WatchGrantRequestResponse.heartbeat:type_name -> openbao.authorizer.v1.Heartbeat
+	15, // 7: openbao.authorizer.v1.ListMyGrantsResponse.grants:type_name -> openbao.authorizer.v1.Grant
+	16, // 8: openbao.authorizer.v1.ListGrantablesResponse.grantables:type_name -> openbao.authorizer.v1.Grantable
+	1,  // 9: openbao.authorizer.v1.GrantService.CreateGrantRequest:input_type -> openbao.authorizer.v1.CreateGrantRequestRequest
+	3,  // 10: openbao.authorizer.v1.GrantService.GetGrantRequest:input_type -> openbao.authorizer.v1.GetGrantRequestRequest
+	5,  // 11: openbao.authorizer.v1.GrantService.WatchGrantRequest:input_type -> openbao.authorizer.v1.WatchGrantRequestRequest
+	7,  // 12: openbao.authorizer.v1.GrantService.ListMyGrants:input_type -> openbao.authorizer.v1.ListMyGrantsRequest
+	9,  // 13: openbao.authorizer.v1.GrantService.ListGrantables:input_type -> openbao.authorizer.v1.ListGrantablesRequest
+	2,  // 14: openbao.authorizer.v1.GrantService.CreateGrantRequest:output_type -> openbao.authorizer.v1.CreateGrantRequestResponse
+	4,  // 15: openbao.authorizer.v1.GrantService.GetGrantRequest:output_type -> openbao.authorizer.v1.GetGrantRequestResponse
+	6,  // 16: openbao.authorizer.v1.GrantService.WatchGrantRequest:output_type -> openbao.authorizer.v1.WatchGrantRequestResponse
+	8,  // 17: openbao.authorizer.v1.GrantService.ListMyGrants:output_type -> openbao.authorizer.v1.ListMyGrantsResponse
+	10, // 18: openbao.authorizer.v1.GrantService.ListGrantables:output_type -> openbao.authorizer.v1.ListGrantablesResponse
+	14, // [14:19] is the sub-list for method output_type
+	9,  // [9:14] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_openbao_authorizer_v1_grant_proto_init() }

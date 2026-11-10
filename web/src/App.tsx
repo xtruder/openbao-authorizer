@@ -4,7 +4,7 @@ import { ConnectError } from '@connectrpc/connect'
 import { createApproverClient, errorReason, getErrorMessage, isSessionLost, type ApproverClient, type Session } from './api'
 import { formatDuration, parseDuration, pushEnrollmentErrorMessage } from './utils'
 import { Decision, LoginMethodType, type DashboardSnapshot, type Identity, type LoginMethod } from './gen/openbao/authorizer/v1/approver_pb'
-import { ItemState, type Requester, type Grant, type Grantable, type GrantRequest, type PermissionItem } from './gen/openbao/authorizer/v1/types_pb'
+import { ItemState, Scope, type Requester, type Grant, type Grantable, type GrantRequest, type PermissionItem } from './gen/openbao/authorizer/v1/types_pb'
 import { completeOidcLogin, discardOidcLogin, isOidcCallback, loginWithGitHub, loginWithPassword, startOidcLogin, type OpenBaoTarget } from './openbaoLogin'
 import {
   BellIcon,
@@ -383,7 +383,7 @@ function Login({ client, onAuthenticated }: { client: ApproverClient; onAuthenti
             Sensitive changes.<br /><span className="text-brand">Human judgment.</span>
           </h1>
           <p className="mt-7 max-w-lg text-lg leading-8 text-zinc-400">
-            Review what requesters such as AI agent sessions ask for, decide each permission on its own, and revoke access at any time.
+            Review what requesters such as AI agents ask for, decide each permission on its own, and revoke access at any time.
           </p>
           <div className="mt-12 grid max-w-xl grid-cols-3 gap-3">
             {[
@@ -458,33 +458,65 @@ function requesterLabel(requester: Requester) {
   return requester.title.trim() || requester.id
 }
 
+const scopeNames: Record<Scope, string> = {
+  [Scope.UNSPECIFIED]: 'Session',
+  [Scope.SESSION]: 'Session',
+  [Scope.PROJECT]: 'Project',
+  [Scope.GLOBAL]: 'Global',
+}
+
+const scopeHints: Record<Scope, string> = {
+  [Scope.UNSPECIFIED]: 'Only this requester',
+  [Scope.SESSION]: 'Only this requester',
+  [Scope.PROJECT]: 'Every session of the project',
+  [Scope.GLOBAL]: 'Every project and session on the server',
+}
+
+function scopeLabel(scope: Scope, project: string) {
+  return scope === Scope.PROJECT && project ? `Project ${project}` : scopeNames[scope]
+}
+
+function ScopePill({ scope, project }: { scope: Scope; project: string }) {
+  const slug = scope === Scope.PROJECT ? 'project' : scope === Scope.GLOBAL ? 'global' : 'session'
+  return <span className={`scope-pill scope-${slug}`} title={scopeHints[scope]}>{scopeLabel(scope, project)}</span>
+}
+
 function RequesterDetails({ requester }: { requester: Requester | undefined }) {
   if (!requester) return null
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-zinc-500">
       <span className="inline-flex min-w-0 items-center gap-1.5 font-medium text-zinc-800"><UserIcon className="size-3.5 shrink-0" /><span className="truncate">{requesterLabel(requester)}</span></span>
       {requester.rule && <span className="rounded-full border border-zinc-200 px-1.5 text-[10px] leading-4 text-zinc-400" title="Requester rule">{requester.rule}</span>}
+      {requester.project && <span className="font-mono text-[11px]" title="Project">project {requester.project}</span>}
+      {requester.session && requester.session !== requester.id && <span className="font-mono text-[11px]" title="Agent session">{requester.session}</span>}
       {requester.title.trim() && <span className="font-mono text-[11px]" title="Requester ID">{requester.id}</span>}
       {requester.directory && <span className="min-w-0 truncate font-mono text-[11px]" title={requester.directory}>{requester.directory}</span>}
     </div>
   )
 }
 
-function ItemRow({ item, busy, disabled, onDecide }: {
+function ItemRow({ item, scopes, project, busy, disabled, onDecide }: {
   item: PermissionItem
+  // Scopes the approver may pick from, the requester's default first.
+  scopes: Scope[]
+  project: string
   busy: boolean
   disabled: boolean
-  onDecide?: (item: PermissionItem, decision: Decision, ttl?: string) => void
+  onDecide?: (item: PermissionItem, decision: Decision, ttl?: string, scope?: Scope) => void
 }) {
   const resolvedTtl = formatDuration(item.ttl)
   const [ttl, setTtl] = useState(resolvedTtl)
+  const requestedScope = item.scope === Scope.UNSPECIFIED ? Scope.SESSION : item.scope
+  const [scope, setScope] = useState<Scope>(requestedScope)
   const pending = item.state === ItemState.PENDING && onDecide
   const style = stateStyles[item.state] ?? stateStyles[ItemState.UNSPECIFIED]
+  const showScope = item.state === ItemState.PENDING || item.state === ItemState.APPROVED || item.state === ItemState.REVOKED
 
   function approve() {
     const trimmed = ttl.trim()
-    // Only send a TTL the approver actually changed; the server rejects longer ones.
-    onDecide?.(item, Decision.APPROVE, trimmed && trimmed !== resolvedTtl ? trimmed : undefined)
+    // Only send a TTL or scope the approver actually changed; the server
+    // rejects longer TTLs.
+    onDecide?.(item, Decision.APPROVE, trimmed && trimmed !== resolvedTtl ? trimmed : undefined, scope !== requestedScope ? scope : undefined)
   }
 
   return (
@@ -493,6 +525,7 @@ function ItemRow({ item, busy, disabled, onDecide }: {
         <div className="mb-1.5 flex flex-wrap items-center gap-2">
           <span className={`status-pill status-${style.slug}`}>{style.label}</span>
           {item.capabilities.map((capability) => <span key={capability} className="operation-pill">{capability}</span>)}
+          {showScope && !pending && <ScopePill scope={requestedScope} project={project} />}
         </div>
         <p className="break-all font-mono text-[13px] font-semibold text-zinc-900">{item.path}</p>
         <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500">
@@ -505,6 +538,14 @@ function ItemRow({ item, busy, disabled, onDecide }: {
       </div>
       {pending && (
         <div className="item-actions">
+          {scopes.length > 1 ? (
+            <label className="ttl-field">
+              <span>Scope</span>
+              <select value={scope} onChange={(event) => setScope(Number(event.target.value) as Scope)} aria-label={`Scope for ${item.path}`} title={scopeHints[scope]}>
+                {scopes.map((option) => <option key={option} value={option}>{scopeLabel(option, project)}</option>)}
+              </select>
+            </label>
+          ) : <ScopePill scope={scope} project={project} />}
           <label className="ttl-field">
             <span>TTL</span>
             <input
@@ -535,7 +576,7 @@ function RequestCard({ request, highlighted, busyItemId, error, onDecide }: {
   highlighted: boolean
   busyItemId: string | null
   error: string
-  onDecide?: (request: GrantRequest, item: PermissionItem, decision: Decision, ttl?: string) => void
+  onDecide?: (request: GrantRequest, item: PermissionItem, decision: Decision, ttl?: string, scope?: Scope) => void
 }) {
   const headingRef = useRef<HTMLHeadingElement>(null)
 
@@ -558,9 +599,11 @@ function RequestCard({ request, highlighted, busyItemId, error, onDecide }: {
           <ItemRow
             key={`${item.id}-${item.state}`}
             item={item}
+            scopes={request.requester?.scopes.length ? request.requester.scopes : [Scope.SESSION]}
+            project={request.requester?.project ?? ''}
             busy={busyItemId === item.id}
             disabled={busyItemId !== null}
-            onDecide={onDecide ? (target, decision, ttl) => onDecide(request, target, decision, ttl) : undefined}
+            onDecide={onDecide ? (target, decision, ttl, scope) => onDecide(request, target, decision, ttl, scope) : undefined}
           />
         ))}
       </ul>
@@ -574,6 +617,7 @@ function GrantRow({ grant, busy, disabled, onRevoke }: { grant: Grant; busy: boo
       <div className="min-w-0 flex-1">
         <div className="mb-1.5 flex flex-wrap items-center gap-2">
           {grant.capabilities.map((capability) => <span key={capability} className="operation-pill">{capability}</span>)}
+          <ScopePill scope={grant.scope} project={grant.project} />
         </div>
         <p className="break-all font-mono text-[13px] font-semibold text-zinc-900">{grant.path}</p>
         <div className="mt-2"><RequesterDetails requester={grant.requester} /></div>
@@ -847,7 +891,7 @@ function Dashboard({ client, session, onSignedOut }: { client: ApproverClient; s
   const operatorName = identityName(session.identity)
   const pendingItemCount = useMemo(() => pending.reduce((count, request) => count + request.items.filter((item) => item.state === ItemState.PENDING).length, 0), [pending])
 
-  async function decide(request: GrantRequest, item: PermissionItem, decision: Decision, ttlText?: string) {
+  async function decide(request: GrantRequest, item: PermissionItem, decision: Decision, ttlText?: string, scope?: Scope) {
     if (busyItemId) return
     const ttl = ttlText ? parseDuration(ttlText) : undefined
     if (ttlText && !ttl) {
@@ -859,11 +903,11 @@ function Dashboard({ client, session, onSignedOut }: { client: ApproverClient; s
     try {
       const { grantRequest: updated } = await client.decideItems({
         grantRequestId: request.id,
-        decisions: [{ itemId: item.id, decision, ttl }],
+        decisions: [{ itemId: item.id, decision, ttl, scope }],
       })
       // The next snapshot also covers joined items in other requests and new grants.
       if (updated) setPending((current) => current.map((candidate) => candidate.id === updated.id ? updated : candidate))
-      setNotice(decision === Decision.APPROVE ? `Granted ${item.path}.` : `Rejected ${item.path}.`)
+      setNotice(decision === Decision.APPROVE ? `Granted ${item.path} (${scopeLabel(scope ?? item.scope, request.requester?.project ?? '').toLowerCase()}).` : `Rejected ${item.path}.`)
     } catch (caught) {
       if (isSessionLost(caught)) {
         onSignedOut()
@@ -1112,7 +1156,7 @@ function Dashboard({ client, session, onSignedOut }: { client: ApproverClient; s
                   highlighted={request.id === highlightedId}
                   busyItemId={busyItemId}
                   error={cardErrors[request.id] ?? ''}
-                  onDecide={tab === 'pending' ? (target, item, decision, ttl) => void decide(target, item, decision, ttl) : undefined}
+                  onDecide={tab === 'pending' ? (target, item, decision, ttl, scope) => void decide(target, item, decision, ttl, scope) : undefined}
                 />
               ))}
             </div>

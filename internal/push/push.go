@@ -214,7 +214,7 @@ func (s *Service) NewRequest(ctx context.Context, id string) error {
 
 	payload, err := json.Marshal(map[string]string{
 		"title": "OpenBao access requested",
-		"body":  "An agent session is waiting for an access decision.",
+		"body":  "An agent is waiting for an access decision.",
 		"url":   "/?request=" + url.QueryEscape(id),
 	})
 	if err != nil {

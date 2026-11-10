@@ -26,7 +26,12 @@ func (a grantService) CreateGrantRequest(ctx context.Context, request *connect.R
 			return nil, invalidArgument("ttl is not a valid duration")
 		}
 
-		inputs = append(inputs, grants.ItemInput{Path: item.GetPath(), Capabilities: item.GetCapabilities(), TTL: ttl})
+		scope, ok := scopeInput(item.GetScope())
+		if !ok {
+			return nil, invalidArgument("scope is not valid")
+		}
+
+		inputs = append(inputs, grants.ItemInput{Path: item.GetPath(), Capabilities: item.GetCapabilities(), TTL: ttl, Scope: scope})
 	}
 
 	created, err := a.grants.CreateRequest(ctx, caller.Requester, caller.token, request.Msg.GetReason(), inputs)
@@ -94,7 +99,7 @@ func (a grantService) WatchGrantRequest(ctx context.Context, request *connect.Re
 }
 
 func (a grantService) ListMyGrants(ctx context.Context, _ *connect.Request[authorizerv1.ListMyGrantsRequest]) (*connect.Response[authorizerv1.ListMyGrantsResponse], error) {
-	active, err := a.grants.Grants(ctx, requesterFrom(ctx).EntityID)
+	active, err := a.grants.RequesterGrants(ctx, requesterFrom(ctx).Requester)
 	if err != nil {
 		return nil, a.internalError(err)
 	}

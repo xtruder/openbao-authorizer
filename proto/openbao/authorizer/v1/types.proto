@@ -24,6 +24,19 @@ enum ItemState {
   ITEM_STATE_REVOKED = 7;
 }
 
+// Scope decides which tokens a Grant reaches.
+enum Scope {
+  // Requests: the Requester's default scope. Decisions: keep the item's scope.
+  SCOPE_UNSPECIFIED = 0;
+  // The Requester's own identity: one agent session, or one non-project
+  // Requester such as a CI AppRole.
+  SCOPE_SESSION = 1;
+  // Every token of the Requester's project: its Named Token and all sessions.
+  SCOPE_PROJECT = 2;
+  // Every project and session token on the server: default Grants.
+  SCOPE_GLOBAL = 3;
+}
+
 // PermissionItem is one OpenBao path plus capabilities within a Grant Request.
 message PermissionItem {
   string id = 1;
@@ -41,17 +54,25 @@ message PermissionItem {
   google.protobuf.Timestamp decided_at = 9;
   // Only on the approver API.
   string grant_id = 10;
+  // Requested scope, or the decided one once approved.
+  Scope scope = 11;
 }
 
 // Requester describes who filed a request, for Approvers.
 message Requester {
-  // Agent Session ID from token metadata, or the entity's display name.
+  // Session ID or Named Identity from token metadata, or the token's display name.
   string id = 1;
   string title = 2;
   string directory = 3;
   string entity_id = 4;
   // Name of the Requester Rule the token matched.
   string rule = 5;
+  // Project whose project-scope policy the token carries; empty for none.
+  string project = 6;
+  // Agent session ID from token metadata; empty for project and other tokens.
+  string session = 7;
+  // Scopes a Grant for this Requester may take, the default first.
+  repeated Scope scopes = 8;
 }
 
 // GrantRequest is a batch of Permission Items one Requester asked for at once.
@@ -76,6 +97,9 @@ message Grant {
   string approved_by = 7;
   // Only on the approver API.
   Requester requester = 8;
+  Scope scope = 9;
+  // Project of a project-scope Grant.
+  string project = 10;
 }
 
 // Heartbeat keeps idle streams alive through proxies; clients ignore it.

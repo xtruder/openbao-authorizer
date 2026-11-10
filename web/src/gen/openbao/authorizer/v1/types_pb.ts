@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file openbao/authorizer/v1/types.proto.
  */
 export const file_openbao_authorizer_v1_types: GenFile = /*@__PURE__*/
-  fileDesc("CiFvcGVuYmFvL2F1dGhvcml6ZXIvdjEvdHlwZXMucHJvdG8SFW9wZW5iYW8uYXV0aG9yaXplci52MSKvAgoOUGVybWlzc2lvbkl0ZW0SCgoCaWQYASABKAkSDAoEcGF0aBgCIAEoCRIUCgxjYXBhYmlsaXRpZXMYAyADKAkSJgoDdHRsGAQgASgLMhkuZ29vZ2xlLnByb3RvYnVmLkR1cmF0aW9uEi8KBXN0YXRlGAUgASgOMiAub3BlbmJhby5hdXRob3JpemVyLnYxLkl0ZW1TdGF0ZRIOCgZyZWFzb24YBiABKAkSLgoKZXhwaXJlc19hdBgHIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASEgoKZGVjaWRlZF9ieRgIIAEoCRIuCgpkZWNpZGVkX2F0GAkgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIQCghncmFudF9pZBgKIAEoCSJaCglSZXF1ZXN0ZXISCgoCaWQYASABKAkSDQoFdGl0bGUYAiABKAkSEQoJZGlyZWN0b3J5GAMgASgJEhEKCWVudGl0eV9pZBgEIAEoCRIMCgRydWxlGAUgASgJIsUBCgxHcmFudFJlcXVlc3QSCgoCaWQYASABKAkSDgoGcmVhc29uGAIgASgJEi4KCmNyZWF0ZWRfYXQYAyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEjMKCXJlcXVlc3RlchgEIAEoCzIgLm9wZW5iYW8uYXV0aG9yaXplci52MS5SZXF1ZXN0ZXISNAoFaXRlbXMYBSADKAsyJS5vcGVuYmFvLmF1dGhvcml6ZXIudjEuUGVybWlzc2lvbkl0ZW0i8gEKBUdyYW50EgoKAmlkGAEgASgJEg8KB2l0ZW1faWQYAiABKAkSDAoEcGF0aBgDIAEoCRIUCgxjYXBhYmlsaXRpZXMYBCADKAkSLgoKY3JlYXRlZF9hdBgFIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLgoKZXhwaXJlc19hdBgGIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASEwoLYXBwcm92ZWRfYnkYByABKAkSMwoJcmVxdWVzdGVyGAggASgLMiAub3BlbmJhby5hdXRob3JpemVyLnYxLlJlcXVlc3RlciILCglIZWFydGJlYXQiKgoLRXJyb3JEZXRhaWwSDgoGcmVhc29uGAEgASgJEgsKA2lkcxgCIAMoCSKlAQoJR3JhbnRhYmxlEgwKBG5hbWUYASABKAkSDAoEcGF0aBgCIAEoCRIUCgxjYXBhYmlsaXRpZXMYAyADKAkSKgoHbWF4X3R0bBgEIAEoCzIZLmdvb2dsZS5wcm90b2J1Zi5EdXJhdGlvbhITCgtkZXNjcmlwdGlvbhgFIAEoCRINCgVwYXRocxgGIAMoCRIWCg5kaXNjb3Zlcl9lcnJvchgHIAEoCSrZAQoJSXRlbVN0YXRlEhoKFklURU1fU1RBVEVfVU5TUEVDSUZJRUQQABIWChJJVEVNX1NUQVRFX1BFTkRJTkcQARIeChpJVEVNX1NUQVRFX0FMUkVBRFlfR1JBTlRFRBACEhcKE0lURU1fU1RBVEVfQVBQUk9WRUQQAxIXChNJVEVNX1NUQVRFX1JFSkVDVEVEEAQSFgoSSVRFTV9TVEFURV9SRUZVU0VEEAUSFgoSSVRFTV9TVEFURV9FWFBJUkVEEAYSFgoSSVRFTV9TVEFURV9SRVZPS0VEEAdC7gEKGWNvbS5vcGVuYmFvLmF1dGhvcml6ZXIudjFCClR5cGVzUHJvdG9QAVpPZ2l0aHViLmNvbS94dHJ1ZGVyL29wZW5iYW8tYXV0aG9yaXplci9nZW4vZ28vb3BlbmJhby9hdXRob3JpemVyL3YxO2F1dGhvcml6ZXJ2MaICA09BWKoCFU9wZW5iYW8uQXV0aG9yaXplci5WMcoCFU9wZW5iYW9cQXV0aG9yaXplclxWMeICIU9wZW5iYW9cQXV0aG9yaXplclxWMVxHUEJNZXRhZGF0YeoCF09wZW5iYW86OkF1dGhvcml6ZXI6OlYxYgZwcm90bzM", [file_google_protobuf_duration, file_google_protobuf_timestamp]);
+  fileDesc("CiFvcGVuYmFvL2F1dGhvcml6ZXIvdjEvdHlwZXMucHJvdG8SFW9wZW5iYW8uYXV0aG9yaXplci52MSLcAgoOUGVybWlzc2lvbkl0ZW0SCgoCaWQYASABKAkSDAoEcGF0aBgCIAEoCRIUCgxjYXBhYmlsaXRpZXMYAyADKAkSJgoDdHRsGAQgASgLMhkuZ29vZ2xlLnByb3RvYnVmLkR1cmF0aW9uEi8KBXN0YXRlGAUgASgOMiAub3BlbmJhby5hdXRob3JpemVyLnYxLkl0ZW1TdGF0ZRIOCgZyZWFzb24YBiABKAkSLgoKZXhwaXJlc19hdBgHIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASEgoKZGVjaWRlZF9ieRgIIAEoCRIuCgpkZWNpZGVkX2F0GAkgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIQCghncmFudF9pZBgKIAEoCRIrCgVzY29wZRgLIAEoDjIcLm9wZW5iYW8uYXV0aG9yaXplci52MS5TY29wZSKqAQoJUmVxdWVzdGVyEgoKAmlkGAEgASgJEg0KBXRpdGxlGAIgASgJEhEKCWRpcmVjdG9yeRgDIAEoCRIRCgllbnRpdHlfaWQYBCABKAkSDAoEcnVsZRgFIAEoCRIPCgdwcm9qZWN0GAYgASgJEg8KB3Nlc3Npb24YByABKAkSLAoGc2NvcGVzGAggAygOMhwub3BlbmJhby5hdXRob3JpemVyLnYxLlNjb3BlIsUBCgxHcmFudFJlcXVlc3QSCgoCaWQYASABKAkSDgoGcmVhc29uGAIgASgJEi4KCmNyZWF0ZWRfYXQYAyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEjMKCXJlcXVlc3RlchgEIAEoCzIgLm9wZW5iYW8uYXV0aG9yaXplci52MS5SZXF1ZXN0ZXISNAoFaXRlbXMYBSADKAsyJS5vcGVuYmFvLmF1dGhvcml6ZXIudjEuUGVybWlzc2lvbkl0ZW0isAIKBUdyYW50EgoKAmlkGAEgASgJEg8KB2l0ZW1faWQYAiABKAkSDAoEcGF0aBgDIAEoCRIUCgxjYXBhYmlsaXRpZXMYBCADKAkSLgoKY3JlYXRlZF9hdBgFIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLgoKZXhwaXJlc19hdBgGIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASEwoLYXBwcm92ZWRfYnkYByABKAkSMwoJcmVxdWVzdGVyGAggASgLMiAub3BlbmJhby5hdXRob3JpemVyLnYxLlJlcXVlc3RlchIrCgVzY29wZRgJIAEoDjIcLm9wZW5iYW8uYXV0aG9yaXplci52MS5TY29wZRIPCgdwcm9qZWN0GAogASgJIgsKCUhlYXJ0YmVhdCIqCgtFcnJvckRldGFpbBIOCgZyZWFzb24YASABKAkSCwoDaWRzGAIgAygJIqUBCglHcmFudGFibGUSDAoEbmFtZRgBIAEoCRIMCgRwYXRoGAIgASgJEhQKDGNhcGFiaWxpdGllcxgDIAMoCRIqCgdtYXhfdHRsGAQgASgLMhkuZ29vZ2xlLnByb3RvYnVmLkR1cmF0aW9uEhMKC2Rlc2NyaXB0aW9uGAUgASgJEg0KBXBhdGhzGAYgAygJEhYKDmRpc2NvdmVyX2Vycm9yGAcgASgJKtkBCglJdGVtU3RhdGUSGgoWSVRFTV9TVEFURV9VTlNQRUNJRklFRBAAEhYKEklURU1fU1RBVEVfUEVORElORxABEh4KGklURU1fU1RBVEVfQUxSRUFEWV9HUkFOVEVEEAISFwoTSVRFTV9TVEFURV9BUFBST1ZFRBADEhcKE0lURU1fU1RBVEVfUkVKRUNURUQQBBIWChJJVEVNX1NUQVRFX1JFRlVTRUQQBRIWChJJVEVNX1NUQVRFX0VYUElSRUQQBhIWChJJVEVNX1NUQVRFX1JFVk9LRUQQBypWCgVTY29wZRIVChFTQ09QRV9VTlNQRUNJRklFRBAAEhEKDVNDT1BFX1NFU1NJT04QARIRCg1TQ09QRV9QUk9KRUNUEAISEAoMU0NPUEVfR0xPQkFMEANC7gEKGWNvbS5vcGVuYmFvLmF1dGhvcml6ZXIudjFCClR5cGVzUHJvdG9QAVpPZ2l0aHViLmNvbS94dHJ1ZGVyL29wZW5iYW8tYXV0aG9yaXplci9nZW4vZ28vb3BlbmJhby9hdXRob3JpemVyL3YxO2F1dGhvcml6ZXJ2MaICA09BWKoCFU9wZW5iYW8uQXV0aG9yaXplci5WMcoCFU9wZW5iYW9cQXV0aG9yaXplclxWMeICIU9wZW5iYW9cQXV0aG9yaXplclxWMVxHUEJNZXRhZGF0YeoCF09wZW5iYW86OkF1dGhvcml6ZXI6OlYxYgZwcm90bzM", [file_google_protobuf_duration, file_google_protobuf_timestamp]);
 
 /**
  * PermissionItem is one OpenBao path plus capabilities within a Grant Request.
@@ -79,6 +79,13 @@ export type PermissionItem = Message<"openbao.authorizer.v1.PermissionItem"> & {
    * @generated from field: string grant_id = 10;
    */
   grantId: string;
+
+  /**
+   * Requested scope, or the decided one once approved.
+   *
+   * @generated from field: openbao.authorizer.v1.Scope scope = 11;
+   */
+  scope: Scope;
 };
 
 /**
@@ -95,7 +102,7 @@ export const PermissionItemSchema: GenMessage<PermissionItem> = /*@__PURE__*/
  */
 export type Requester = Message<"openbao.authorizer.v1.Requester"> & {
   /**
-   * Agent Session ID from token metadata, or the entity's display name.
+   * Session ID or Named Identity from token metadata, or the token's display name.
    *
    * @generated from field: string id = 1;
    */
@@ -122,6 +129,27 @@ export type Requester = Message<"openbao.authorizer.v1.Requester"> & {
    * @generated from field: string rule = 5;
    */
   rule: string;
+
+  /**
+   * Project whose project-scope policy the token carries; empty for none.
+   *
+   * @generated from field: string project = 6;
+   */
+  project: string;
+
+  /**
+   * Agent session ID from token metadata; empty for project and other tokens.
+   *
+   * @generated from field: string session = 7;
+   */
+  session: string;
+
+  /**
+   * Scopes a Grant for this Requester may take, the default first.
+   *
+   * @generated from field: repeated openbao.authorizer.v1.Scope scopes = 8;
+   */
+  scopes: Scope[];
 };
 
 /**
@@ -221,6 +249,18 @@ export type Grant = Message<"openbao.authorizer.v1.Grant"> & {
    * @generated from field: openbao.authorizer.v1.Requester requester = 8;
    */
   requester?: Requester | undefined;
+
+  /**
+   * @generated from field: openbao.authorizer.v1.Scope scope = 9;
+   */
+  scope: Scope;
+
+  /**
+   * Project of a project-scope Grant.
+   *
+   * @generated from field: string project = 10;
+   */
+  project: string;
 };
 
 /**
@@ -400,4 +440,46 @@ export enum ItemState {
  */
 export const ItemStateSchema: GenEnum<ItemState> = /*@__PURE__*/
   enumDesc(file_openbao_authorizer_v1_types, 0);
+
+/**
+ * Scope decides which tokens a Grant reaches.
+ *
+ * @generated from enum openbao.authorizer.v1.Scope
+ */
+export enum Scope {
+  /**
+   * Requests: the Requester's default scope. Decisions: keep the item's scope.
+   *
+   * @generated from enum value: SCOPE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * The Requester's own identity: one agent session, or one non-project
+   * Requester such as a CI AppRole.
+   *
+   * @generated from enum value: SCOPE_SESSION = 1;
+   */
+  SESSION = 1,
+
+  /**
+   * Every token of the Requester's project: its Named Token and all sessions.
+   *
+   * @generated from enum value: SCOPE_PROJECT = 2;
+   */
+  PROJECT = 2,
+
+  /**
+   * Every project and session token on the server: default Grants.
+   *
+   * @generated from enum value: SCOPE_GLOBAL = 3;
+   */
+  GLOBAL = 3,
+}
+
+/**
+ * Describes the enum openbao.authorizer.v1.Scope.
+ */
+export const ScopeSchema: GenEnum<Scope> = /*@__PURE__*/
+  enumDesc(file_openbao_authorizer_v1_types, 1);
 

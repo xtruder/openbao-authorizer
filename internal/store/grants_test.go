@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -43,7 +44,8 @@ func TestGrantRequestRoundTripEncryptsReasonAndRequester(t *testing.T) {
 		Item{ID: "item-2", Path: "sys/policies", Capabilities: []string{"read"}, State: ItemRefused, Reason: "hard denylist"},
 	)
 	request.Reason = "rotate the payroll credentials"
-	request.Requester = RequesterDisplay{ID: "session-abc", Title: "Payroll migration", Directory: "/srv/secret-project"}
+	request.Requester = RequesterDisplay{ID: "session-abc", Title: "Payroll migration", Directory: "/srv/secret-project", Project: "payroll",
+		Session: "session-abc", Scopes: []Scope{ScopeSession, ScopeProject}}
 	if err := db.CreateGrantRequest(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +55,7 @@ func TestGrantRequestRoundTripEncryptsReasonAndRequester(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got.Reason != request.Reason || got.Requester != request.Requester || !got.CreatedAt.Equal(now) || !got.PendingUntil.Equal(now.Add(time.Hour)) || len(got.Items) != 2 {
+	if got.Reason != request.Reason || !reflect.DeepEqual(got.Requester, request.Requester) || !got.CreatedAt.Equal(now) || !got.PendingUntil.Equal(now.Add(time.Hour)) || len(got.Items) != 2 {
 		t.Fatalf("request = %#v", got)
 	}
 
@@ -109,7 +111,8 @@ func TestDecisionsGrantsAndRevocation(t *testing.T) {
 	request.Items[0].State, request.Items[0].DecidedBy, request.Items[0].GrantID = ItemApproved, approver, "grant-1"
 	request.Items[1].State, request.Items[1].DecidedBy = ItemRejected, approver
 	grant := Grant{
-		ID: "grant-1", RequestID: "request-1", ItemID: "item-1", EntityID: "entity-1", Path: "kv/data/a", Capabilities: []string{"read", "update"},
+		ID: "grant-1", RequestID: "request-1", ItemID: "item-1", EntityID: "entity-1", Scope: ScopeProject, Project: "app",
+		Path: "kv/data/a", Capabilities: []string{"read", "update"},
 		Requester: request.Requester, CreatedAt: now, ExpiresAt: now.Add(time.Hour), ApprovedBy: "Bob",
 	}
 	if err := db.DecideItems(t.Context(), request, []Grant{grant}); err != nil {
@@ -133,18 +136,14 @@ func TestDecisionsGrantsAndRevocation(t *testing.T) {
 		t.Fatalf("items = %#v", items)
 	}
 
-	active, err := db.ActiveGrants(t.Context(), "entity-1", now)
+	active, err := db.ActiveGrants(t.Context(), now)
 	if err != nil || len(active) != 1 || active[0].Path != "kv/data/a" || len(active[0].Capabilities) != 2 || active[0].ApprovedBy != "Bob" ||
-		active[0].Requester.Title != "Deploy" || active[0].RequestID != "request-1" {
+		active[0].Requester.Title != "Deploy" || active[0].RequestID != "request-1" || active[0].Scope != ScopeProject || active[0].Project != "app" {
 		t.Fatalf("active = %#v, %v", active, err)
 	}
 
-	if expired, _ := db.ActiveGrants(t.Context(), "", now.Add(2*time.Hour)); len(expired) != 0 {
+	if expired, _ := db.ActiveGrants(t.Context(), now.Add(2*time.Hour)); len(expired) != 0 {
 		t.Fatalf("expired grants listed as active: %#v", expired)
-	}
-
-	if other, _ := db.ActiveGrants(t.Context(), "entity-2", now); len(other) != 0 {
-		t.Fatalf("grants leaked across sessions: %#v", other)
 	}
 
 	if revokeErr := db.RevokeGrant(t.Context(), "grant-1", approver, now); revokeErr != nil {
@@ -285,5 +284,44 @@ func TestOpenDropsControlGroupRequests(t *testing.T) {
 	var count int
 	if err := reopened.db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM sqlite_master WHERE name = 'requests'").Scan(&count); err != nil || count != 0 {
 		t.Fatalf("legacy table count = %d, %v", count, err)
+	}
+}
+
+// A database from before scopes gains the columns, and its Grants read as
+// session Grants.
+func TestMigrationAddsGrantScope(t *testing.T) {
+	db, path := openTestDB(t)
+	now := time.Now().UTC()
+	request := pendingRequest("request-1", "entity-1", now, pendingItem("item-1", "kv/data/a"))
+	if err := db.CreateGrantRequest(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+
+	request.Items[0].State = ItemApproved
+	grant := Grant{ID: "grant-1", RequestID: "request-1", ItemID: "item-1", EntityID: "entity-1", Scope: ScopeSession, Path: "kv/data/a",
+		Capabilities: []string{"read"}, CreatedAt: now, ExpiresAt: now.Add(time.Hour), ApprovedBy: "Bob"}
+	if err := db.DecideItems(t.Context(), request, []Grant{grant}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, column := range []string{"scope", "project"} {
+		if _, err := db.db.ExecContext(t.Context(), "ALTER TABLE grants DROP COLUMN "+column); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path, bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() { _ = reopened.Close() }()
+	active, err := reopened.ActiveGrants(t.Context(), now)
+	if err != nil || len(active) != 1 || active[0].Scope != ScopeSession || active[0].Project != "" {
+		t.Fatalf("migrated grants = %#v, %v", active, err)
 	}
 }

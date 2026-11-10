@@ -46,7 +46,7 @@ approver_login {
     role  = "approver"
   }
 }
-requester "opencode" {
+requester "named" {
   token_role = "agent-session"
 }
 requester "ci" {
@@ -90,7 +90,7 @@ grantable "kv" {
 		t.Fatalf("SessionTTL = %s", configuration.SessionTTL)
 	}
 
-	wantRequesters := []grants.RequesterRule{{Name: "opencode", TokenRole: "agent-session"}, {Name: "ci", AuthMount: "approle"}}
+	wantRequesters := []grants.RequesterRule{{Name: "named", TokenRole: "agent-session"}, {Name: "ci", AuthMount: "approle"}}
 	if !slices.Equal(configuration.Requesters, wantRequesters) {
 		t.Fatalf("Requesters = %#v", configuration.Requesters)
 	}
@@ -177,13 +177,13 @@ func TestLoadRejectsInvalidGrantableRules(t *testing.T) {
 
 func TestLoadRejectsInvalidLoginAndRequesters(t *testing.T) {
 	cases := map[string]struct{ replace, with, message string }{
-		"no requesters":   {"requester \"opencode\" {\n  token_role = \"opencode-session\"\n}", "", "at least one requester"},
-		"two matchers":    {`token_role = "opencode-session"`, `token_role = "a"` + "\n" + `auth_mount = "b"`, "exactly one of token_role or auth_mount"},
-		"no matcher":      {`token_role = "opencode-session"`, ``, "exactly one of token_role or auth_mount"},
+		"no requesters":   {"requester \"named\" {\n  token_role = \"named-identity\"\n}", "", "at least one requester"},
+		"two matchers":    {`token_role = "named-identity"`, `token_role = "a"` + "\n" + `auth_mount = "b"`, "exactly one of token_role or auth_mount"},
+		"no matcher":      {`token_role = "named-identity"`, ``, "exactly one of token_role or auth_mount"},
 		"bad address":     {`openbao_address = "http://127.0.0.1:8200"`, `openbao_address = "127.0.0.1:8200"`, "approver_login.openbao_address"},
 		"unknown method":  {`method "token" {}`, `method "kerberos" {}`, "not one of"},
 		"role not oidc":   {`method "token" {}`, `method "userpass" { role = "x" }`, "does not take a role"},
-		"duplicate rules": {`requester "opencode" {`, `requester "opencode" { token_role = "x" }` + "\n" + `requester "opencode" {`, "more than once"},
+		"duplicate rules": {`requester "named" {`, `requester "named" { token_role = "x" }` + "\n" + `requester "named" {`, "more than once"},
 	}
 	for name, testCase := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -223,7 +223,7 @@ func TestExampleConfigurationLoads(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(configuration.GrantPolicy.Rules) != 2 || len(configuration.Requesters) != 2 || len(configuration.ApproverLogin.Methods) != 3 {
+	if len(configuration.GrantPolicy.Rules) != 2 || len(configuration.Requesters) != 3 || len(configuration.ApproverLogin.Methods) != 3 {
 		t.Fatalf("configuration = %#v", configuration)
 	}
 }
@@ -251,8 +251,8 @@ openbao {
 approver_login {
   openbao_address = "http://127.0.0.1:8200"
 }
-requester "opencode" {
-  token_role = "opencode-session"
+requester "named" {
+  token_role = "named-identity"
 }
 `)
 	_, err := Load(configPath)
@@ -285,8 +285,8 @@ approver_login {
   openbao_address = "http://127.0.0.1:8200"
   method "token" {}
 }
-requester "opencode" {
-  token_role = "opencode-session"
+requester "named" {
+  token_role = "named-identity"
 }
 `+extra+"\n")
 }

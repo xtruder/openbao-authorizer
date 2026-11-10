@@ -95,6 +95,64 @@ func (ItemState) EnumDescriptor() ([]byte, []int) {
 	return file_openbao_authorizer_v1_types_proto_rawDescGZIP(), []int{0}
 }
 
+// Scope decides which tokens a Grant reaches.
+type Scope int32
+
+const (
+	// Requests: the Requester's default scope. Decisions: keep the item's scope.
+	Scope_SCOPE_UNSPECIFIED Scope = 0
+	// The Requester's own identity: one agent session, or one non-project
+	// Requester such as a CI AppRole.
+	Scope_SCOPE_SESSION Scope = 1
+	// Every token of the Requester's project: its Named Token and all sessions.
+	Scope_SCOPE_PROJECT Scope = 2
+	// Every project and session token on the server: default Grants.
+	Scope_SCOPE_GLOBAL Scope = 3
+)
+
+// Enum value maps for Scope.
+var (
+	Scope_name = map[int32]string{
+		0: "SCOPE_UNSPECIFIED",
+		1: "SCOPE_SESSION",
+		2: "SCOPE_PROJECT",
+		3: "SCOPE_GLOBAL",
+	}
+	Scope_value = map[string]int32{
+		"SCOPE_UNSPECIFIED": 0,
+		"SCOPE_SESSION":     1,
+		"SCOPE_PROJECT":     2,
+		"SCOPE_GLOBAL":      3,
+	}
+)
+
+func (x Scope) Enum() *Scope {
+	p := new(Scope)
+	*p = x
+	return p
+}
+
+func (x Scope) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Scope) Descriptor() protoreflect.EnumDescriptor {
+	return file_openbao_authorizer_v1_types_proto_enumTypes[1].Descriptor()
+}
+
+func (Scope) Type() protoreflect.EnumType {
+	return &file_openbao_authorizer_v1_types_proto_enumTypes[1]
+}
+
+func (x Scope) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Scope.Descriptor instead.
+func (Scope) EnumDescriptor() ([]byte, []int) {
+	return file_openbao_authorizer_v1_types_proto_rawDescGZIP(), []int{1}
+}
+
 // PermissionItem is one OpenBao path plus capabilities within a Grant Request.
 type PermissionItem struct {
 	state        protoimpl.MessageState `protogen:"open.v1"`
@@ -112,7 +170,9 @@ type PermissionItem struct {
 	DecidedBy string                 `protobuf:"bytes,8,opt,name=decided_by,json=decidedBy,proto3" json:"decided_by,omitempty"`
 	DecidedAt *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=decided_at,json=decidedAt,proto3" json:"decided_at,omitempty"`
 	// Only on the approver API.
-	GrantId       string `protobuf:"bytes,10,opt,name=grant_id,json=grantId,proto3" json:"grant_id,omitempty"`
+	GrantId string `protobuf:"bytes,10,opt,name=grant_id,json=grantId,proto3" json:"grant_id,omitempty"`
+	// Requested scope, or the decided one once approved.
+	Scope         Scope `protobuf:"varint,11,opt,name=scope,proto3,enum=openbao.authorizer.v1.Scope" json:"scope,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -217,16 +277,29 @@ func (x *PermissionItem) GetGrantId() string {
 	return ""
 }
 
+func (x *PermissionItem) GetScope() Scope {
+	if x != nil {
+		return x.Scope
+	}
+	return Scope_SCOPE_UNSPECIFIED
+}
+
 // Requester describes who filed a request, for Approvers.
 type Requester struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Agent Session ID from token metadata, or the entity's display name.
+	// Session ID or Named Identity from token metadata, or the token's display name.
 	Id        string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	Title     string `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
 	Directory string `protobuf:"bytes,3,opt,name=directory,proto3" json:"directory,omitempty"`
 	EntityId  string `protobuf:"bytes,4,opt,name=entity_id,json=entityId,proto3" json:"entity_id,omitempty"`
 	// Name of the Requester Rule the token matched.
-	Rule          string `protobuf:"bytes,5,opt,name=rule,proto3" json:"rule,omitempty"`
+	Rule string `protobuf:"bytes,5,opt,name=rule,proto3" json:"rule,omitempty"`
+	// Project whose project-scope policy the token carries; empty for none.
+	Project string `protobuf:"bytes,6,opt,name=project,proto3" json:"project,omitempty"`
+	// Agent session ID from token metadata; empty for project and other tokens.
+	Session string `protobuf:"bytes,7,opt,name=session,proto3" json:"session,omitempty"`
+	// Scopes a Grant for this Requester may take, the default first.
+	Scopes        []Scope `protobuf:"varint,8,rep,packed,name=scopes,proto3,enum=openbao.authorizer.v1.Scope" json:"scopes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -294,6 +367,27 @@ func (x *Requester) GetRule() string {
 		return x.Rule
 	}
 	return ""
+}
+
+func (x *Requester) GetProject() string {
+	if x != nil {
+		return x.Project
+	}
+	return ""
+}
+
+func (x *Requester) GetSession() string {
+	if x != nil {
+		return x.Session
+	}
+	return ""
+}
+
+func (x *Requester) GetScopes() []Scope {
+	if x != nil {
+		return x.Scopes
+	}
+	return nil
 }
 
 // GrantRequest is a batch of Permission Items one Requester asked for at once.
@@ -386,7 +480,10 @@ type Grant struct {
 	// Only on the approver API.
 	ApprovedBy string `protobuf:"bytes,7,opt,name=approved_by,json=approvedBy,proto3" json:"approved_by,omitempty"`
 	// Only on the approver API.
-	Requester     *Requester `protobuf:"bytes,8,opt,name=requester,proto3" json:"requester,omitempty"`
+	Requester *Requester `protobuf:"bytes,8,opt,name=requester,proto3" json:"requester,omitempty"`
+	Scope     Scope      `protobuf:"varint,9,opt,name=scope,proto3,enum=openbao.authorizer.v1.Scope" json:"scope,omitempty"`
+	// Project of a project-scope Grant.
+	Project       string `protobuf:"bytes,10,opt,name=project,proto3" json:"project,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -475,6 +572,20 @@ func (x *Grant) GetRequester() *Requester {
 		return x.Requester
 	}
 	return nil
+}
+
+func (x *Grant) GetScope() Scope {
+	if x != nil {
+		return x.Scope
+	}
+	return Scope_SCOPE_UNSPECIFIED
+}
+
+func (x *Grant) GetProject() string {
+	if x != nil {
+		return x.Project
+	}
+	return ""
 }
 
 // Heartbeat keeps idle streams alive through proxies; clients ignore it.
@@ -673,7 +784,7 @@ var File_openbao_authorizer_v1_types_proto protoreflect.FileDescriptor
 
 const file_openbao_authorizer_v1_types_proto_rawDesc = "" +
 	"\n" +
-	"!openbao/authorizer/v1/types.proto\x12\x15openbao.authorizer.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x85\x03\n" +
+	"!openbao/authorizer/v1/types.proto\x12\x15openbao.authorizer.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xb9\x03\n" +
 	"\x0ePermissionItem\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04path\x18\x02 \x01(\tR\x04path\x12\"\n" +
@@ -688,20 +799,24 @@ const file_openbao_authorizer_v1_types_proto_rawDesc = "" +
 	"\n" +
 	"decided_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\tdecidedAt\x12\x19\n" +
 	"\bgrant_id\x18\n" +
-	" \x01(\tR\agrantId\"\x80\x01\n" +
+	" \x01(\tR\agrantId\x122\n" +
+	"\x05scope\x18\v \x01(\x0e2\x1c.openbao.authorizer.v1.ScopeR\x05scope\"\xea\x01\n" +
 	"\tRequester\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05title\x18\x02 \x01(\tR\x05title\x12\x1c\n" +
 	"\tdirectory\x18\x03 \x01(\tR\tdirectory\x12\x1b\n" +
 	"\tentity_id\x18\x04 \x01(\tR\bentityId\x12\x12\n" +
-	"\x04rule\x18\x05 \x01(\tR\x04rule\"\xee\x01\n" +
+	"\x04rule\x18\x05 \x01(\tR\x04rule\x12\x18\n" +
+	"\aproject\x18\x06 \x01(\tR\aproject\x12\x18\n" +
+	"\asession\x18\a \x01(\tR\asession\x124\n" +
+	"\x06scopes\x18\b \x03(\x0e2\x1c.openbao.authorizer.v1.ScopeR\x06scopes\"\xee\x01\n" +
 	"\fGrantRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\x129\n" +
 	"\n" +
 	"created_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x12>\n" +
 	"\trequester\x18\x04 \x01(\v2 .openbao.authorizer.v1.RequesterR\trequester\x12;\n" +
-	"\x05items\x18\x05 \x03(\v2%.openbao.authorizer.v1.PermissionItemR\x05items\"\xbf\x02\n" +
+	"\x05items\x18\x05 \x03(\v2%.openbao.authorizer.v1.PermissionItemR\x05items\"\x8d\x03\n" +
 	"\x05Grant\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x17\n" +
 	"\aitem_id\x18\x02 \x01(\tR\x06itemId\x12\x12\n" +
@@ -713,7 +828,10 @@ const file_openbao_authorizer_v1_types_proto_rawDesc = "" +
 	"expires_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12\x1f\n" +
 	"\vapproved_by\x18\a \x01(\tR\n" +
 	"approvedBy\x12>\n" +
-	"\trequester\x18\b \x01(\v2 .openbao.authorizer.v1.RequesterR\trequester\"\v\n" +
+	"\trequester\x18\b \x01(\v2 .openbao.authorizer.v1.RequesterR\trequester\x122\n" +
+	"\x05scope\x18\t \x01(\x0e2\x1c.openbao.authorizer.v1.ScopeR\x05scope\x12\x18\n" +
+	"\aproject\x18\n" +
+	" \x01(\tR\aproject\"\v\n" +
 	"\tHeartbeat\"7\n" +
 	"\vErrorDetail\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason\x12\x10\n" +
@@ -734,7 +852,12 @@ const file_openbao_authorizer_v1_types_proto_rawDesc = "" +
 	"\x13ITEM_STATE_REJECTED\x10\x04\x12\x16\n" +
 	"\x12ITEM_STATE_REFUSED\x10\x05\x12\x16\n" +
 	"\x12ITEM_STATE_EXPIRED\x10\x06\x12\x16\n" +
-	"\x12ITEM_STATE_REVOKED\x10\aB\xee\x01\n" +
+	"\x12ITEM_STATE_REVOKED\x10\a*V\n" +
+	"\x05Scope\x12\x15\n" +
+	"\x11SCOPE_UNSPECIFIED\x10\x00\x12\x11\n" +
+	"\rSCOPE_SESSION\x10\x01\x12\x11\n" +
+	"\rSCOPE_PROJECT\x10\x02\x12\x10\n" +
+	"\fSCOPE_GLOBAL\x10\x03B\xee\x01\n" +
 	"\x19com.openbao.authorizer.v1B\n" +
 	"TypesProtoP\x01ZOgithub.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1;authorizerv1\xa2\x02\x03OAX\xaa\x02\x15Openbao.Authorizer.V1\xca\x02\x15Openbao\\Authorizer\\V1\xe2\x02!Openbao\\Authorizer\\V1\\GPBMetadata\xea\x02\x17Openbao::Authorizer::V1b\x06proto3"
 
@@ -750,37 +873,41 @@ func file_openbao_authorizer_v1_types_proto_rawDescGZIP() []byte {
 	return file_openbao_authorizer_v1_types_proto_rawDescData
 }
 
-var file_openbao_authorizer_v1_types_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_openbao_authorizer_v1_types_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
 var file_openbao_authorizer_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_openbao_authorizer_v1_types_proto_goTypes = []any{
 	(ItemState)(0),                // 0: openbao.authorizer.v1.ItemState
-	(*PermissionItem)(nil),        // 1: openbao.authorizer.v1.PermissionItem
-	(*Requester)(nil),             // 2: openbao.authorizer.v1.Requester
-	(*GrantRequest)(nil),          // 3: openbao.authorizer.v1.GrantRequest
-	(*Grant)(nil),                 // 4: openbao.authorizer.v1.Grant
-	(*Heartbeat)(nil),             // 5: openbao.authorizer.v1.Heartbeat
-	(*ErrorDetail)(nil),           // 6: openbao.authorizer.v1.ErrorDetail
-	(*Grantable)(nil),             // 7: openbao.authorizer.v1.Grantable
-	(*durationpb.Duration)(nil),   // 8: google.protobuf.Duration
-	(*timestamppb.Timestamp)(nil), // 9: google.protobuf.Timestamp
+	(Scope)(0),                    // 1: openbao.authorizer.v1.Scope
+	(*PermissionItem)(nil),        // 2: openbao.authorizer.v1.PermissionItem
+	(*Requester)(nil),             // 3: openbao.authorizer.v1.Requester
+	(*GrantRequest)(nil),          // 4: openbao.authorizer.v1.GrantRequest
+	(*Grant)(nil),                 // 5: openbao.authorizer.v1.Grant
+	(*Heartbeat)(nil),             // 6: openbao.authorizer.v1.Heartbeat
+	(*ErrorDetail)(nil),           // 7: openbao.authorizer.v1.ErrorDetail
+	(*Grantable)(nil),             // 8: openbao.authorizer.v1.Grantable
+	(*durationpb.Duration)(nil),   // 9: google.protobuf.Duration
+	(*timestamppb.Timestamp)(nil), // 10: google.protobuf.Timestamp
 }
 var file_openbao_authorizer_v1_types_proto_depIdxs = []int32{
-	8,  // 0: openbao.authorizer.v1.PermissionItem.ttl:type_name -> google.protobuf.Duration
+	9,  // 0: openbao.authorizer.v1.PermissionItem.ttl:type_name -> google.protobuf.Duration
 	0,  // 1: openbao.authorizer.v1.PermissionItem.state:type_name -> openbao.authorizer.v1.ItemState
-	9,  // 2: openbao.authorizer.v1.PermissionItem.expires_at:type_name -> google.protobuf.Timestamp
-	9,  // 3: openbao.authorizer.v1.PermissionItem.decided_at:type_name -> google.protobuf.Timestamp
-	9,  // 4: openbao.authorizer.v1.GrantRequest.created_at:type_name -> google.protobuf.Timestamp
-	2,  // 5: openbao.authorizer.v1.GrantRequest.requester:type_name -> openbao.authorizer.v1.Requester
-	1,  // 6: openbao.authorizer.v1.GrantRequest.items:type_name -> openbao.authorizer.v1.PermissionItem
-	9,  // 7: openbao.authorizer.v1.Grant.created_at:type_name -> google.protobuf.Timestamp
-	9,  // 8: openbao.authorizer.v1.Grant.expires_at:type_name -> google.protobuf.Timestamp
-	2,  // 9: openbao.authorizer.v1.Grant.requester:type_name -> openbao.authorizer.v1.Requester
-	8,  // 10: openbao.authorizer.v1.Grantable.max_ttl:type_name -> google.protobuf.Duration
-	11, // [11:11] is the sub-list for method output_type
-	11, // [11:11] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	10, // 2: openbao.authorizer.v1.PermissionItem.expires_at:type_name -> google.protobuf.Timestamp
+	10, // 3: openbao.authorizer.v1.PermissionItem.decided_at:type_name -> google.protobuf.Timestamp
+	1,  // 4: openbao.authorizer.v1.PermissionItem.scope:type_name -> openbao.authorizer.v1.Scope
+	1,  // 5: openbao.authorizer.v1.Requester.scopes:type_name -> openbao.authorizer.v1.Scope
+	10, // 6: openbao.authorizer.v1.GrantRequest.created_at:type_name -> google.protobuf.Timestamp
+	3,  // 7: openbao.authorizer.v1.GrantRequest.requester:type_name -> openbao.authorizer.v1.Requester
+	2,  // 8: openbao.authorizer.v1.GrantRequest.items:type_name -> openbao.authorizer.v1.PermissionItem
+	10, // 9: openbao.authorizer.v1.Grant.created_at:type_name -> google.protobuf.Timestamp
+	10, // 10: openbao.authorizer.v1.Grant.expires_at:type_name -> google.protobuf.Timestamp
+	3,  // 11: openbao.authorizer.v1.Grant.requester:type_name -> openbao.authorizer.v1.Requester
+	1,  // 12: openbao.authorizer.v1.Grant.scope:type_name -> openbao.authorizer.v1.Scope
+	9,  // 13: openbao.authorizer.v1.Grantable.max_ttl:type_name -> google.protobuf.Duration
+	14, // [14:14] is the sub-list for method output_type
+	14, // [14:14] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_openbao_authorizer_v1_types_proto_init() }
@@ -793,7 +920,7 @@ func file_openbao_authorizer_v1_types_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_openbao_authorizer_v1_types_proto_rawDesc), len(file_openbao_authorizer_v1_types_proto_rawDesc)),
-			NumEnums:      1,
+			NumEnums:      2,
 			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   0,

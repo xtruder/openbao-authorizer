@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	// modernc.org/sqlite registers the database/sql driver.
@@ -152,6 +153,22 @@ CREATE TABLE IF NOT EXISTS approver_sessions (
 );`
 	if _, err := d.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
+	}
+
+	// Grants stored before scopes existed are session Grants. SQLite has no
+	// ADD COLUMN IF NOT EXISTS, so existing columns are looked up first.
+	for _, column := range []string{"scope TEXT NOT NULL DEFAULT 'session'", "project TEXT NOT NULL DEFAULT ''"} {
+		name, _, _ := strings.Cut(column, " ")
+		var exists bool
+		if err := d.db.QueryRowContext(ctx, "SELECT COUNT(*) > 0 FROM pragma_table_info('grants') WHERE name = ?", name).Scan(&exists); err != nil {
+			return fmt.Errorf("inspect grants table: %w", err)
+		}
+
+		if !exists {
+			if _, err := d.db.ExecContext(ctx, "ALTER TABLE grants ADD COLUMN "+column); err != nil { // #nosec G202 -- constant column definitions.
+				return fmt.Errorf("migrate grants table: %w", err)
+			}
+		}
 	}
 
 	return nil

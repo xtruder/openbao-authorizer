@@ -752,7 +752,9 @@ type ItemDecision struct {
 	ItemId   string                 `protobuf:"bytes,1,opt,name=item_id,json=itemId,proto3" json:"item_id,omitempty"`
 	Decision Decision               `protobuf:"varint,2,opt,name=decision,proto3,enum=openbao.authorizer.v1.Decision" json:"decision,omitempty"`
 	// Optional shorter Grant lifetime; only valid with DECISION_APPROVE.
-	Ttl           *durationpb.Duration `protobuf:"bytes,3,opt,name=ttl,proto3" json:"ttl,omitempty"`
+	Ttl *durationpb.Duration `protobuf:"bytes,3,opt,name=ttl,proto3" json:"ttl,omitempty"`
+	// Optional scope replacing the requested one; only valid with DECISION_APPROVE.
+	Scope         Scope `protobuf:"varint,4,opt,name=scope,proto3,enum=openbao.authorizer.v1.Scope" json:"scope,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -806,6 +808,13 @@ func (x *ItemDecision) GetTtl() *durationpb.Duration {
 		return x.Ttl
 	}
 	return nil
+}
+
+func (x *ItemDecision) GetScope() Scope {
+	if x != nil {
+		return x.Scope
+	}
+	return Scope_SCOPE_UNSPECIFIED
 }
 
 type DecideItemsRequest struct {
@@ -1613,11 +1622,12 @@ const file_openbao_authorizer_v1_approver_proto_rawDesc = "" +
 	"\x18ListGrantRequestsRequest\x12A\n" +
 	"\x06filter\x18\x01 \x01(\x0e2).openbao.authorizer.v1.GrantRequestFilterR\x06filter\"g\n" +
 	"\x19ListGrantRequestsResponse\x12J\n" +
-	"\x0egrant_requests\x18\x01 \x03(\v2#.openbao.authorizer.v1.GrantRequestR\rgrantRequests\"\x91\x01\n" +
+	"\x0egrant_requests\x18\x01 \x03(\v2#.openbao.authorizer.v1.GrantRequestR\rgrantRequests\"\xc5\x01\n" +
 	"\fItemDecision\x12\x17\n" +
 	"\aitem_id\x18\x01 \x01(\tR\x06itemId\x12;\n" +
 	"\bdecision\x18\x02 \x01(\x0e2\x1f.openbao.authorizer.v1.DecisionR\bdecision\x12+\n" +
-	"\x03ttl\x18\x03 \x01(\v2\x19.google.protobuf.DurationR\x03ttl\"\x81\x01\n" +
+	"\x03ttl\x18\x03 \x01(\v2\x19.google.protobuf.DurationR\x03ttl\x122\n" +
+	"\x05scope\x18\x04 \x01(\x0e2\x1c.openbao.authorizer.v1.ScopeR\x05scope\"\x81\x01\n" +
 	"\x12DecideItemsRequest\x12(\n" +
 	"\x10grant_request_id\x18\x01 \x01(\tR\x0egrantRequestId\x12A\n" +
 	"\tdecisions\x18\x02 \x03(\v2#.openbao.authorizer.v1.ItemDecisionR\tdecisions\"_\n" +
@@ -1738,9 +1748,10 @@ var file_openbao_authorizer_v1_approver_proto_goTypes = []any{
 	(*ListGrantableRulesResponse)(nil),       // 32: openbao.authorizer.v1.ListGrantableRulesResponse
 	(*GrantRequest)(nil),                     // 33: openbao.authorizer.v1.GrantRequest
 	(*durationpb.Duration)(nil),              // 34: google.protobuf.Duration
-	(*Grant)(nil),                            // 35: openbao.authorizer.v1.Grant
-	(*Heartbeat)(nil),                        // 36: openbao.authorizer.v1.Heartbeat
-	(*Grantable)(nil),                        // 37: openbao.authorizer.v1.Grantable
+	(Scope)(0),                               // 35: openbao.authorizer.v1.Scope
+	(*Grant)(nil),                            // 36: openbao.authorizer.v1.Grant
+	(*Heartbeat)(nil),                        // 37: openbao.authorizer.v1.Heartbeat
+	(*Grantable)(nil),                        // 38: openbao.authorizer.v1.Grantable
 }
 var file_openbao_authorizer_v1_approver_proto_depIdxs = []int32{
 	0,  // 0: openbao.authorizer.v1.LoginMethod.type:type_name -> openbao.authorizer.v1.LoginMethodType
@@ -1751,46 +1762,47 @@ var file_openbao_authorizer_v1_approver_proto_depIdxs = []int32{
 	33, // 5: openbao.authorizer.v1.ListGrantRequestsResponse.grant_requests:type_name -> openbao.authorizer.v1.GrantRequest
 	2,  // 6: openbao.authorizer.v1.ItemDecision.decision:type_name -> openbao.authorizer.v1.Decision
 	34, // 7: openbao.authorizer.v1.ItemDecision.ttl:type_name -> google.protobuf.Duration
-	15, // 8: openbao.authorizer.v1.DecideItemsRequest.decisions:type_name -> openbao.authorizer.v1.ItemDecision
-	33, // 9: openbao.authorizer.v1.DecideItemsResponse.grant_request:type_name -> openbao.authorizer.v1.GrantRequest
-	35, // 10: openbao.authorizer.v1.ListGrantsResponse.grants:type_name -> openbao.authorizer.v1.Grant
-	33, // 11: openbao.authorizer.v1.DashboardSnapshot.pending_requests:type_name -> openbao.authorizer.v1.GrantRequest
-	33, // 12: openbao.authorizer.v1.DashboardSnapshot.decided_requests:type_name -> openbao.authorizer.v1.GrantRequest
-	35, // 13: openbao.authorizer.v1.DashboardSnapshot.active_grants:type_name -> openbao.authorizer.v1.Grant
-	23, // 14: openbao.authorizer.v1.WatchEventsResponse.snapshot:type_name -> openbao.authorizer.v1.DashboardSnapshot
-	36, // 15: openbao.authorizer.v1.WatchEventsResponse.heartbeat:type_name -> openbao.authorizer.v1.Heartbeat
-	37, // 16: openbao.authorizer.v1.ListGrantableRulesResponse.grantables:type_name -> openbao.authorizer.v1.Grantable
-	5,  // 17: openbao.authorizer.v1.ApproverService.GetLoginOptions:input_type -> openbao.authorizer.v1.GetLoginOptionsRequest
-	7,  // 18: openbao.authorizer.v1.ApproverService.CreateSession:input_type -> openbao.authorizer.v1.CreateSessionRequest
-	9,  // 19: openbao.authorizer.v1.ApproverService.GetSession:input_type -> openbao.authorizer.v1.GetSessionRequest
-	11, // 20: openbao.authorizer.v1.ApproverService.Logout:input_type -> openbao.authorizer.v1.LogoutRequest
-	13, // 21: openbao.authorizer.v1.ApproverService.ListGrantRequests:input_type -> openbao.authorizer.v1.ListGrantRequestsRequest
-	16, // 22: openbao.authorizer.v1.ApproverService.DecideItems:input_type -> openbao.authorizer.v1.DecideItemsRequest
-	18, // 23: openbao.authorizer.v1.ApproverService.ListGrants:input_type -> openbao.authorizer.v1.ListGrantsRequest
-	20, // 24: openbao.authorizer.v1.ApproverService.RevokeGrant:input_type -> openbao.authorizer.v1.RevokeGrantRequest
-	31, // 25: openbao.authorizer.v1.ApproverService.ListGrantableRules:input_type -> openbao.authorizer.v1.ListGrantableRulesRequest
-	22, // 26: openbao.authorizer.v1.ApproverService.WatchEvents:input_type -> openbao.authorizer.v1.WatchEventsRequest
-	25, // 27: openbao.authorizer.v1.ApproverService.GetPushPublicKey:input_type -> openbao.authorizer.v1.GetPushPublicKeyRequest
-	27, // 28: openbao.authorizer.v1.ApproverService.RegisterPushSubscription:input_type -> openbao.authorizer.v1.RegisterPushSubscriptionRequest
-	29, // 29: openbao.authorizer.v1.ApproverService.DeletePushSubscription:input_type -> openbao.authorizer.v1.DeletePushSubscriptionRequest
-	6,  // 30: openbao.authorizer.v1.ApproverService.GetLoginOptions:output_type -> openbao.authorizer.v1.GetLoginOptionsResponse
-	8,  // 31: openbao.authorizer.v1.ApproverService.CreateSession:output_type -> openbao.authorizer.v1.CreateSessionResponse
-	10, // 32: openbao.authorizer.v1.ApproverService.GetSession:output_type -> openbao.authorizer.v1.GetSessionResponse
-	12, // 33: openbao.authorizer.v1.ApproverService.Logout:output_type -> openbao.authorizer.v1.LogoutResponse
-	14, // 34: openbao.authorizer.v1.ApproverService.ListGrantRequests:output_type -> openbao.authorizer.v1.ListGrantRequestsResponse
-	17, // 35: openbao.authorizer.v1.ApproverService.DecideItems:output_type -> openbao.authorizer.v1.DecideItemsResponse
-	19, // 36: openbao.authorizer.v1.ApproverService.ListGrants:output_type -> openbao.authorizer.v1.ListGrantsResponse
-	21, // 37: openbao.authorizer.v1.ApproverService.RevokeGrant:output_type -> openbao.authorizer.v1.RevokeGrantResponse
-	32, // 38: openbao.authorizer.v1.ApproverService.ListGrantableRules:output_type -> openbao.authorizer.v1.ListGrantableRulesResponse
-	24, // 39: openbao.authorizer.v1.ApproverService.WatchEvents:output_type -> openbao.authorizer.v1.WatchEventsResponse
-	26, // 40: openbao.authorizer.v1.ApproverService.GetPushPublicKey:output_type -> openbao.authorizer.v1.GetPushPublicKeyResponse
-	28, // 41: openbao.authorizer.v1.ApproverService.RegisterPushSubscription:output_type -> openbao.authorizer.v1.RegisterPushSubscriptionResponse
-	30, // 42: openbao.authorizer.v1.ApproverService.DeletePushSubscription:output_type -> openbao.authorizer.v1.DeletePushSubscriptionResponse
-	30, // [30:43] is the sub-list for method output_type
-	17, // [17:30] is the sub-list for method input_type
-	17, // [17:17] is the sub-list for extension type_name
-	17, // [17:17] is the sub-list for extension extendee
-	0,  // [0:17] is the sub-list for field type_name
+	35, // 8: openbao.authorizer.v1.ItemDecision.scope:type_name -> openbao.authorizer.v1.Scope
+	15, // 9: openbao.authorizer.v1.DecideItemsRequest.decisions:type_name -> openbao.authorizer.v1.ItemDecision
+	33, // 10: openbao.authorizer.v1.DecideItemsResponse.grant_request:type_name -> openbao.authorizer.v1.GrantRequest
+	36, // 11: openbao.authorizer.v1.ListGrantsResponse.grants:type_name -> openbao.authorizer.v1.Grant
+	33, // 12: openbao.authorizer.v1.DashboardSnapshot.pending_requests:type_name -> openbao.authorizer.v1.GrantRequest
+	33, // 13: openbao.authorizer.v1.DashboardSnapshot.decided_requests:type_name -> openbao.authorizer.v1.GrantRequest
+	36, // 14: openbao.authorizer.v1.DashboardSnapshot.active_grants:type_name -> openbao.authorizer.v1.Grant
+	23, // 15: openbao.authorizer.v1.WatchEventsResponse.snapshot:type_name -> openbao.authorizer.v1.DashboardSnapshot
+	37, // 16: openbao.authorizer.v1.WatchEventsResponse.heartbeat:type_name -> openbao.authorizer.v1.Heartbeat
+	38, // 17: openbao.authorizer.v1.ListGrantableRulesResponse.grantables:type_name -> openbao.authorizer.v1.Grantable
+	5,  // 18: openbao.authorizer.v1.ApproverService.GetLoginOptions:input_type -> openbao.authorizer.v1.GetLoginOptionsRequest
+	7,  // 19: openbao.authorizer.v1.ApproverService.CreateSession:input_type -> openbao.authorizer.v1.CreateSessionRequest
+	9,  // 20: openbao.authorizer.v1.ApproverService.GetSession:input_type -> openbao.authorizer.v1.GetSessionRequest
+	11, // 21: openbao.authorizer.v1.ApproverService.Logout:input_type -> openbao.authorizer.v1.LogoutRequest
+	13, // 22: openbao.authorizer.v1.ApproverService.ListGrantRequests:input_type -> openbao.authorizer.v1.ListGrantRequestsRequest
+	16, // 23: openbao.authorizer.v1.ApproverService.DecideItems:input_type -> openbao.authorizer.v1.DecideItemsRequest
+	18, // 24: openbao.authorizer.v1.ApproverService.ListGrants:input_type -> openbao.authorizer.v1.ListGrantsRequest
+	20, // 25: openbao.authorizer.v1.ApproverService.RevokeGrant:input_type -> openbao.authorizer.v1.RevokeGrantRequest
+	31, // 26: openbao.authorizer.v1.ApproverService.ListGrantableRules:input_type -> openbao.authorizer.v1.ListGrantableRulesRequest
+	22, // 27: openbao.authorizer.v1.ApproverService.WatchEvents:input_type -> openbao.authorizer.v1.WatchEventsRequest
+	25, // 28: openbao.authorizer.v1.ApproverService.GetPushPublicKey:input_type -> openbao.authorizer.v1.GetPushPublicKeyRequest
+	27, // 29: openbao.authorizer.v1.ApproverService.RegisterPushSubscription:input_type -> openbao.authorizer.v1.RegisterPushSubscriptionRequest
+	29, // 30: openbao.authorizer.v1.ApproverService.DeletePushSubscription:input_type -> openbao.authorizer.v1.DeletePushSubscriptionRequest
+	6,  // 31: openbao.authorizer.v1.ApproverService.GetLoginOptions:output_type -> openbao.authorizer.v1.GetLoginOptionsResponse
+	8,  // 32: openbao.authorizer.v1.ApproverService.CreateSession:output_type -> openbao.authorizer.v1.CreateSessionResponse
+	10, // 33: openbao.authorizer.v1.ApproverService.GetSession:output_type -> openbao.authorizer.v1.GetSessionResponse
+	12, // 34: openbao.authorizer.v1.ApproverService.Logout:output_type -> openbao.authorizer.v1.LogoutResponse
+	14, // 35: openbao.authorizer.v1.ApproverService.ListGrantRequests:output_type -> openbao.authorizer.v1.ListGrantRequestsResponse
+	17, // 36: openbao.authorizer.v1.ApproverService.DecideItems:output_type -> openbao.authorizer.v1.DecideItemsResponse
+	19, // 37: openbao.authorizer.v1.ApproverService.ListGrants:output_type -> openbao.authorizer.v1.ListGrantsResponse
+	21, // 38: openbao.authorizer.v1.ApproverService.RevokeGrant:output_type -> openbao.authorizer.v1.RevokeGrantResponse
+	32, // 39: openbao.authorizer.v1.ApproverService.ListGrantableRules:output_type -> openbao.authorizer.v1.ListGrantableRulesResponse
+	24, // 40: openbao.authorizer.v1.ApproverService.WatchEvents:output_type -> openbao.authorizer.v1.WatchEventsResponse
+	26, // 41: openbao.authorizer.v1.ApproverService.GetPushPublicKey:output_type -> openbao.authorizer.v1.GetPushPublicKeyResponse
+	28, // 42: openbao.authorizer.v1.ApproverService.RegisterPushSubscription:output_type -> openbao.authorizer.v1.RegisterPushSubscriptionResponse
+	30, // 43: openbao.authorizer.v1.ApproverService.DeletePushSubscription:output_type -> openbao.authorizer.v1.DeletePushSubscriptionResponse
+	31, // [31:44] is the sub-list for method output_type
+	18, // [18:31] is the sub-list for method input_type
+	18, // [18:18] is the sub-list for extension type_name
+	18, // [18:18] is the sub-list for extension extendee
+	0,  // [0:18] is the sub-list for field type_name
 }
 
 func init() { file_openbao_authorizer_v1_approver_proto_init() }

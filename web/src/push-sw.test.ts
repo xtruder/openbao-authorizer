@@ -54,7 +54,7 @@ describe('push service worker', () => {
       data: {
         json: () => ({
           title: 'OpenBao access requested',
-          body: 'An agent session is waiting for an access decision.',
+          body: 'An agent is waiting for an access decision.',
           url: '/requests?status=pending',
           path: 'secret/data/payroll',
           entity: 'Alice',
@@ -64,7 +64,7 @@ describe('push service worker', () => {
     })
 
     expect(showNotification).toHaveBeenCalledWith('OpenBao access requested', expect.objectContaining({
-      body: 'An agent session is waiting for an access decision.',
+      body: 'An agent is waiting for an access decision.',
       data: { url: '/requests?status=pending' },
     }))
     const renderedNotification = JSON.stringify(showNotification.mock.calls[0])
@@ -79,7 +79,7 @@ describe('push service worker', () => {
       data: { json: () => { throw new SyntaxError('invalid JSON') } },
     })
     expect(malformedWorker.showNotification).toHaveBeenCalledWith('OpenBao access requested', expect.objectContaining({
-      body: 'An agent session is waiting for an access decision.',
+      body: 'An agent is waiting for an access decision.',
       data: { url: '/' },
     }))
 
@@ -88,7 +88,7 @@ describe('push service worker', () => {
       data: {
         json: () => ({
           title: 'OpenBao access requested',
-          body: 'An agent session is waiting for an access decision.',
+          body: 'An agent is waiting for an access decision.',
           url: 'https://attacker.example/approval',
         }),
       },

@@ -5,7 +5,7 @@ package openbao.authorizer.v1;
 import "google/protobuf/duration.proto";
 import "openbao/authorizer/v1/types.proto";
 
-// GrantService is called by Requesters (e.g. bao-cred in an Agent Session)
+// GrantService is called by Requesters (e.g. bao-cred with a Named Token)
 // with `Authorization: Bearer <OpenBao token>`. Only tokens matching a
 // configured Requester Rule may call it; a Requester sees only its own
 // requests and Grants.
@@ -33,6 +33,9 @@ message PermissionItemInput {
   repeated string capabilities = 2;
   // Requested Grant lifetime; defaults to the rule's cap.
   google.protobuf.Duration ttl = 3;
+  // Suggested scope; the Approver may change it. Unspecified uses the
+  // Requester's default: session for agent sessions, else project.
+  Scope scope = 4;
 }
 
 message CreateGrantRequestRequest {

@@ -21,7 +21,7 @@ func TestLookupSelfAndCapabilitiesSelfUseCallerToken(t *testing.T) {
 
 		switch r.URL.Path {
 		case "/v1/auth/token/lookup-self":
-			_, _ = w.Write([]byte(`{"data":{"entity_id":"entity-1","display_name":"token","policies":["default","opencode-session"],"role":"opencode-session","meta":{"session_id":"abc","title":"Fix CI","directory":"/src/app"}}}`))
+			_, _ = w.Write([]byte(`{"data":{"entity_id":"entity-1","display_name":"token","policies":["default","named-identity"],"role":"named-identity","meta":{"identity":"abc","title":"Fix CI","directory":"/src/app"}}}`))
 		case "/v1/sys/capabilities-self":
 			var payload struct {
 				Paths []string `json:"paths"`
@@ -52,7 +52,7 @@ func TestLookupSelfAndCapabilitiesSelfUseCallerToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if identity.EntityID != "entity-1" || identity.Role != "opencode-session" || identity.Meta["title"] != "Fix CI" || identity.Meta["directory"] != "/src/app" {
+	if identity.EntityID != "entity-1" || identity.Role != "named-identity" || identity.Meta["title"] != "Fix CI" || identity.Meta["directory"] != "/src/app" {
 		t.Fatalf("identity = %#v", identity)
 	}
 

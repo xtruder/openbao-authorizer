@@ -1,6 +1,7 @@
 package grants
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,10 +17,17 @@ import (
 	"github.com/xtruder/openbao-authorizer/internal/store"
 )
 
-// PolicyPrefix plus the entity ID names each Agent Session's policy. The
-// authorizer policy can scope policy writes to it, but OpenBao cannot restrict
-// which names go on an entity.
-const PolicyPrefix = "agent-grant-"
+// PolicyPrefix starts every Grant policy name, so the authorizer policy can
+// scope policy writes to it; OpenBao cannot restrict which names go on an
+// entity. Session Grants live in PolicyPrefix plus the entity ID, attached to
+// the entity; project and global Grants live in ProjectPolicyPrefix plus the
+// project and in GlobalPolicy, which tokens carry from the moment they are
+// minted, so those policies need no attaching.
+const (
+	PolicyPrefix        = "agent-grant-"
+	ProjectPolicyPrefix = PolicyPrefix + "project-"
+	GlobalPolicy        = PolicyPrefix + "global"
+)
 
 const (
 	maxItemsPerRequest = 64
@@ -86,7 +94,7 @@ type Store interface {
 	ExpirePendingItems(context.Context, time.Time) ([]string, error)
 	ExpiredGrants(context.Context, time.Time, time.Time) ([]string, error)
 	Grant(context.Context, string) (store.Grant, error)
-	ActiveGrants(context.Context, string, time.Time) ([]store.Grant, error)
+	ActiveGrants(context.Context, time.Time) ([]store.Grant, error)
 	RevokeGrant(context.Context, string, store.Approver, time.Time) error
 }
 
@@ -132,11 +140,91 @@ type Requester struct {
 	Display  store.RequesterDisplay
 }
 
-// Decision is an Approver's verdict on one item.
+// Decision is an Approver's verdict on one item. An empty Scope keeps the
+// item's scope.
 type Decision struct {
 	ItemID  string
 	Approve bool
 	TTL     string
+	Scope   store.Scope
+}
+
+// Scopes lists the scopes a Grant for display's Requester may take, the
+// default first. Project and global Grants reach only tokens carrying their
+// policy, so a token without it can't use that scope; a project's own Named
+// Token has no session of its own, so it uses project scope.
+func Scopes(display store.RequesterDisplay) []store.Scope {
+	scopes := display.Scopes
+	if scopes == nil {
+		// Requests stored before scopes existed.
+		scopes = []store.Scope{store.ScopeSession}
+	}
+
+	return scopes
+}
+
+func requesterScopes(project, session string, global bool) []store.Scope {
+	var scopes []store.Scope
+	if session != "" || project == "" {
+		scopes = append(scopes, store.ScopeSession)
+	}
+
+	if project != "" {
+		scopes = append(scopes, store.ScopeProject)
+	}
+
+	if global {
+		scopes = append(scopes, store.ScopeGlobal)
+	}
+
+	return scopes
+}
+
+// tokenProject returns the project whose policy the token carries, or "" for
+// none or more than one.
+func tokenProject(policies []string) string {
+	project := ""
+	for _, policy := range policies {
+		name, ok := strings.CutPrefix(policy, ProjectPolicyPrefix)
+		if !ok {
+			continue
+		}
+
+		if project != "" || !validProjectName(name) {
+			return ""
+		}
+
+		project = name
+	}
+
+	return project
+}
+
+func validProjectName(name string) bool {
+	if name == "" || len(name) > 63 || name[0] == '-' {
+		return false
+	}
+
+	for _, character := range name {
+		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
+			return false
+		}
+	}
+
+	return true
+}
+
+// policyName names the policy that holds grant's block.
+func policyName(grant store.Grant) string {
+	switch grant.Scope {
+	case store.ScopeProject:
+		return ProjectPolicyPrefix + grant.Project
+	case store.ScopeGlobal:
+		return GlobalPolicy
+	case store.ScopeSession:
+	}
+
+	return PolicyPrefix + grant.EntityID
 }
 
 // Service implements Grant Requests, decisions and Grants.
@@ -151,16 +239,13 @@ type Service struct {
 
 	discoveries discoveryCache
 
-	sessionLocksMu sync.Mutex
-	sessionLocks   map[string]*sessionLock
+	// policyMu serializes Grant policy writes and decisions. Project and
+	// global policies are shared by many Requesters, and decisions are rare,
+	// so one in-process lock suffices; one authorizer instance owns a database.
+	policyMu sync.Mutex
 
 	grantSweepMu sync.Mutex
 	grantSweepAt time.Time
-}
-
-type sessionLock struct {
-	mu   sync.Mutex
-	refs int
 }
 
 // New constructs a Service.
@@ -177,8 +262,7 @@ func New(bao OpenBao, storage Store, notifier Notifier, config Config) *Service 
 
 	return &Service{
 		bao: bao, store: storage, notifier: notifier, config: config, logger: logger, now: now,
-		changes:      changeSignal{ch: make(chan struct{})},
-		sessionLocks: make(map[string]*sessionLock),
+		changes: changeSignal{ch: make(chan struct{})},
 	}
 }
 
@@ -201,7 +285,12 @@ func (s *Service) Authenticate(ctx context.Context, token string) (Requester, er
 		return Requester{}, ErrNotRequester
 	}
 
-	id := sanitizeText(identity.Meta["session_id"], maxMetaLength)
+	session := sanitizeText(identity.Meta["session"], maxMetaLength)
+	id := session
+	if id == "" {
+		id = sanitizeText(identity.Meta["identity"], maxMetaLength)
+	}
+
 	if id == "" {
 		id = sanitizeText(identity.DisplayName, maxMetaLength)
 	}
@@ -210,11 +299,17 @@ func (s *Service) Authenticate(ctx context.Context, token string) (Requester, er
 		id = identity.EntityID
 	}
 
+	// The token's own policies, not its metadata, decide which project and
+	// global Grants it can use.
+	project := tokenProject(identity.Policies)
 	return Requester{EntityID: identity.EntityID, Display: store.RequesterDisplay{
 		ID:        id,
 		Title:     sanitizeText(identity.Meta["title"], maxMetaLength),
 		Directory: sanitizeText(identity.Meta["directory"], maxMetaLength),
 		Rule:      s.config.Requesters[index].Name,
+		Project:   project,
+		Session:   session,
+		Scopes:    requesterScopes(project, session, slices.Contains(identity.Policies, GlobalPolicy)),
 	}}, nil
 }
 
@@ -238,6 +333,13 @@ func (s *Service) CreateRequest(ctx context.Context, requester Requester, token,
 		return store.GrantRequest{}, invalid("between 1 and %d items are required", maxItemsPerRequest)
 	}
 
+	scopes := Scopes(requester.Display)
+	for _, input := range inputs {
+		if input.Scope != "" && !slices.Contains(scopes, input.Scope) {
+			return store.GrantRequest{}, invalid("scope %s is not available to this Requester; available: %s", input.Scope, joinScopes(scopes))
+		}
+	}
+
 	requestID, err := store.NewID()
 	if err != nil {
 		return store.GrantRequest{}, err
@@ -254,7 +356,7 @@ func (s *Service) CreateRequest(ctx context.Context, requester Requester, token,
 			return store.GrantRequest{}, itemErr
 		}
 
-		item := store.Item{ID: itemID}
+		item := store.Item{ID: itemID, Scope: cmp.Or(input.Scope, scopes[0])}
 		result, refusal := s.config.Policy.Resolve(input)
 		if refusal == "" {
 			key := result.Path + "\x00" + strings.Join(result.Capabilities, ",")
@@ -299,7 +401,7 @@ func (s *Service) CreateRequest(ctx context.Context, requester Requester, token,
 		for index := range items {
 			if items[index].State == store.ItemPending && Covers(capabilities[resolved[index].Path], items[index].Capabilities) {
 				items[index].State = store.ItemAlreadyGranted
-				items[index].Reason = "the session already has these capabilities"
+				items[index].Reason = "the Requester already has these capabilities"
 			}
 		}
 	}
@@ -353,7 +455,7 @@ func (s *Service) Request(ctx context.Context, entityID, requestID string, wait 
 func (s *Service) ownedRequest(ctx context.Context, entityID, requestID string) (store.GrantRequest, error) {
 	request, err := s.store.GrantRequest(ctx, requestID)
 	if errors.Is(err, store.ErrNotFound) || (err == nil && request.EntityID != entityID) {
-		// Other sessions' requests are indistinguishable from missing ones.
+		// Other Requesters' requests are indistinguishable from missing ones.
 		return store.GrantRequest{}, ErrNotFound
 	}
 
@@ -378,14 +480,45 @@ func (s *Service) Requests(ctx context.Context, filter store.RequestFilter) ([]s
 	return s.store.GrantRequests(ctx, filter)
 }
 
-// Grants lists active Grants, for one session or, with an empty entityID, all.
-func (s *Service) Grants(ctx context.Context, entityID string) ([]store.Grant, error) {
-	return s.store.ActiveGrants(ctx, entityID, s.now())
+// Grants lists every active Grant, for Approvers.
+func (s *Service) Grants(ctx context.Context) ([]store.Grant, error) {
+	return s.store.ActiveGrants(ctx, s.now())
+}
+
+// RequesterGrants lists the active Grants that reach requester: its session
+// Grants and those of the project and global scopes it may use.
+func (s *Service) RequesterGrants(ctx context.Context, requester Requester) ([]store.Grant, error) {
+	active, err := s.store.ActiveGrants(ctx, s.now())
+	if err != nil {
+		return nil, err
+	}
+
+	scopes := Scopes(requester.Display)
+	return slices.DeleteFunc(active, func(grant store.Grant) bool {
+		switch grant.Scope {
+		case store.ScopeProject:
+			return !slices.Contains(scopes, store.ScopeProject) || grant.Project != requester.Display.Project
+		case store.ScopeGlobal:
+			return !slices.Contains(scopes, store.ScopeGlobal)
+		case store.ScopeSession:
+		}
+
+		return grant.EntityID != requester.EntityID
+	}), nil
+}
+
+func joinScopes(scopes []store.Scope) string {
+	names := make([]string, len(scopes))
+	for index, scope := range scopes {
+		names[index] = string(scope)
+	}
+
+	return strings.Join(names, ", ")
 }
 
 // Decide applies an Approver's decisions to items of one request, all or
-// nothing: approvals become blocks of the session policy, written once, and
-// every decision is stored in one transaction. An Approver never decides a
+// nothing: approvals become blocks of the policies of their scopes, each
+// written once, and every decision is stored in one transaction. An Approver never decides a
 // request filed by their own entity, since that would let them grant
 // themselves access.
 func (s *Service) Decide(ctx context.Context, approver store.Approver, requestID string, decisions []Decision) (store.GrantRequest, error) {
@@ -406,9 +539,9 @@ func (s *Service) Decide(ctx context.Context, approver store.Approver, requestID
 		return store.GrantRequest{}, ErrSelfApproval
 	}
 
-	unlock := s.lockSession(request.EntityID)
+	s.policyMu.Lock()
 	request, grants, err := s.decide(ctx, approver, requestID, decisions)
-	unlock()
+	s.policyMu.Unlock()
 	if err != nil {
 		return store.GrantRequest{}, err
 	}
@@ -422,7 +555,7 @@ func (s *Service) Decide(ctx context.Context, approver store.Approver, requestID
 	return request, nil
 }
 
-// decide must run under the session lock. It re-reads the request so a
+// decide must run under policyMu. It re-reads the request so a
 // concurrent decision on the same item cannot add a second Grant.
 func (s *Service) decide(ctx context.Context, approver store.Approver, requestID string, decisions []Decision) (store.GrantRequest, []store.Grant, error) {
 	request, err := s.store.GrantRequest(ctx, requestID)
@@ -449,8 +582,13 @@ func (s *Service) decide(ctx context.Context, approver store.Approver, requestID
 			return store.GrantRequest{}, nil, conflict(item.ID, "item", item.Path)
 		}
 
-		if decision.TTL != "" && !decision.Approve {
-			return store.GrantRequest{}, nil, invalid("ttl applies only to approvals")
+		if (decision.TTL != "" || decision.Scope != "") && !decision.Approve {
+			return store.GrantRequest{}, nil, invalid("ttl and scope apply only to approvals")
+		}
+
+		scope := cmp.Or(decision.Scope, item.Scope, store.ScopeSession)
+		if scopes := Scopes(request.Requester); !slices.Contains(scopes, scope) {
+			return store.GrantRequest{}, nil, invalid("scope %s is not available to this Requester; available: %s", scope, joinScopes(scopes))
 		}
 
 		item.DecidedAt = now
@@ -460,9 +598,9 @@ func (s *Service) decide(ctx context.Context, approver store.Approver, requestID
 			continue
 		}
 
-		ttl, refusal, err := s.approvalTTL(*item, decision.TTL)
-		if err != nil {
-			return store.GrantRequest{}, nil, err
+		ttl, refusal, ttlErr := s.approvalTTL(*item, decision.TTL)
+		if ttlErr != nil {
+			return store.GrantRequest{}, nil, ttlErr
 		}
 
 		if refusal != "" {
@@ -472,40 +610,32 @@ func (s *Service) decide(ctx context.Context, approver store.Approver, requestID
 			continue
 		}
 
-		grantID, err := store.NewID()
-		if err != nil {
-			return store.GrantRequest{}, nil, err
+		grantID, idErr := store.NewID()
+		if idErr != nil {
+			return store.GrantRequest{}, nil, idErr
 		}
 
 		// Whole seconds, because policy expirations are RFC 3339 seconds.
 		expiresAt := now.Add(ttl).Truncate(time.Second)
-		item.State, item.DecidedBy, item.GrantID, item.GrantExpires = store.ItemApproved, approver, grantID, expiresAt
-		grants = append(grants, store.Grant{
-			ID: grantID, RequestID: request.ID, ItemID: item.ID, EntityID: request.EntityID, Path: item.Path, Capabilities: item.Capabilities,
-			Requester: request.Requester, CreatedAt: now, ExpiresAt: expiresAt, ApprovedBy: approver.Name,
-		})
+		item.State, item.DecidedBy, item.GrantID, item.GrantExpires, item.Scope = store.ItemApproved, approver, grantID, expiresAt, scope
+		grant := store.Grant{
+			ID: grantID, RequestID: request.ID, ItemID: item.ID, EntityID: request.EntityID, Scope: scope, Path: item.Path,
+			Capabilities: item.Capabilities, Requester: request.Requester, CreatedAt: now, ExpiresAt: expiresAt, ApprovedBy: approver.Name,
+		}
+		if scope == store.ScopeProject {
+			grant.Project = request.Requester.Project
+		}
+
+		grants = append(grants, grant)
 	}
 
-	if len(grants) > 0 {
-		active, err := s.store.ActiveGrants(ctx, request.EntityID, now)
-		if err != nil {
-			return store.GrantRequest{}, nil, err
-		}
-
-		if err := s.writePolicy(ctx, request.EntityID, append(active, grants...)); err != nil {
-			return store.GrantRequest{}, nil, err
-		}
-
-		if err := s.attachPolicy(ctx, request.EntityID); err != nil {
-			s.restorePolicy(ctx, request.EntityID)
-			return store.GrantRequest{}, nil, err
-		}
+	written, err := s.writeGrantPolicies(ctx, request.EntityID, grants, now)
+	if err != nil {
+		return store.GrantRequest{}, nil, err
 	}
 
 	if err := s.store.DecideItems(ctx, request, grants); err != nil {
-		if len(grants) > 0 {
-			s.restorePolicy(ctx, request.EntityID)
-		}
+		s.restorePolicies(ctx, written)
 
 		if errors.Is(err, store.ErrStatusChanged) {
 			ids := make([]string, 0, len(decisions))
@@ -548,7 +678,7 @@ func (s *Service) approvalTTL(item store.Item, requestedTTL string) (time.Durati
 	return parsed.Truncate(time.Second), "", nil
 }
 
-// Revoke removes a Grant's block from the session policy, which ends access
+// Revoke removes a Grant's block from its policy, which ends access
 // immediately, and then records the revocation.
 func (s *Service) Revoke(ctx context.Context, approver store.Approver, grantID string) error {
 	grant, err := s.store.Grant(ctx, grantID)
@@ -560,9 +690,9 @@ func (s *Service) Revoke(ctx context.Context, approver store.Approver, grantID s
 		return err
 	}
 
-	unlock := s.lockSession(grant.EntityID)
+	s.policyMu.Lock()
 	err = s.revoke(ctx, approver, grant)
-	unlock()
+	s.policyMu.Unlock()
 	if err != nil {
 		return err
 	}
@@ -572,10 +702,11 @@ func (s *Service) Revoke(ctx context.Context, approver store.Approver, grantID s
 	return nil
 }
 
-// revoke must run under the session lock.
+// revoke must run under policyMu.
 func (s *Service) revoke(ctx context.Context, approver store.Approver, grant store.Grant) error {
 	now := s.now()
-	active, err := s.store.ActiveGrants(ctx, grant.EntityID, now)
+	name := policyName(grant)
+	active, err := s.policyGrants(ctx, name, now)
 	if err != nil {
 		return err
 	}
@@ -585,12 +716,12 @@ func (s *Service) revoke(ctx context.Context, approver store.Approver, grant sto
 		return conflict(grant.ID, "grant", grant.Path)
 	}
 
-	if err := s.writePolicy(ctx, grant.EntityID, remaining); err != nil {
+	if err := s.writePolicy(ctx, name, remaining); err != nil {
 		return err
 	}
 
 	if err := s.store.RevokeGrant(ctx, grant.ID, approver, now); err != nil {
-		s.restorePolicy(ctx, grant.EntityID)
+		s.restorePolicies(ctx, []string{name})
 		if errors.Is(err, store.ErrStatusChanged) {
 			return conflict(grant.ID, "grant", grant.Path)
 		}
@@ -601,46 +732,95 @@ func (s *Service) revoke(ctx context.Context, approver store.Approver, grant sto
 	return nil
 }
 
-// writePolicy replaces the session policy with one block per Grant, or
-// deletes it when no Grant is left. It must run under the session lock.
-func (s *Service) writePolicy(ctx context.Context, entityID string, grants []store.Grant) error {
+// policyGrants lists the stored active Grants held by the policy name.
+func (s *Service) policyGrants(ctx context.Context, name string, now time.Time) ([]store.Grant, error) {
+	active, err := s.store.ActiveGrants(ctx, now)
+	if err != nil {
+		return nil, err
+	}
+
+	return slices.DeleteFunc(active, func(grant store.Grant) bool { return policyName(grant) != name }), nil
+}
+
+// writeGrantPolicies adds new Grants to the policies of their scopes and
+// attaches a session policy to the entity. It returns the names written; on
+// failure it restores those from the store first. It must run under policyMu.
+func (s *Service) writeGrantPolicies(ctx context.Context, entityID string, grants []store.Grant, now time.Time) ([]string, error) {
+	byPolicy := make(map[string][]store.Grant)
+	var names []string
+	for _, grant := range grants {
+		name := policyName(grant)
+		if byPolicy[name] == nil {
+			names = append(names, name)
+		}
+
+		byPolicy[name] = append(byPolicy[name], grant)
+	}
+
+	slices.Sort(names)
+	for index, name := range names {
+		active, err := s.policyGrants(ctx, name, now)
+		if err == nil {
+			err = s.writePolicy(ctx, name, append(active, byPolicy[name]...))
+		}
+
+		if err == nil && name == PolicyPrefix+entityID {
+			err = s.attachPolicy(ctx, entityID)
+		}
+
+		if err != nil {
+			// Restoring the failed policy too is harmless when it was never
+			// written.
+			s.restorePolicies(ctx, names[:index+1])
+			return nil, err
+		}
+	}
+
+	return names, nil
+}
+
+// writePolicy replaces the policy name with one block per Grant, or deletes
+// it when no Grant is left. It must run under policyMu.
+func (s *Service) writePolicy(ctx context.Context, name string, grants []store.Grant) error {
 	if len(grants) == 0 {
-		if err := s.bao.DeletePolicy(ctx, PolicyPrefix+entityID); err != nil {
-			return fmt.Errorf("delete session policy: %w", err)
+		if err := s.bao.DeletePolicy(ctx, name); err != nil {
+			return fmt.Errorf("delete Grant policy: %w", err)
 		}
 
 		return nil
 	}
 
-	document, expiresAt := sessionPolicy(grants)
-	if err := s.bao.WritePolicy(ctx, PolicyPrefix+entityID, document, expiresAt); err != nil {
-		return fmt.Errorf("write session policy: %w", err)
+	document, expiresAt := grantPolicy(grants)
+	if err := s.bao.WritePolicy(ctx, name, document, expiresAt); err != nil {
+		return fmt.Errorf("write Grant policy: %w", err)
 	}
 
 	return nil
 }
 
-// restorePolicy rewrites the session policy from the stored active Grants
+// restorePolicies rewrites the named policies from the stored active Grants
 // after OpenBao and the store diverged.
-func (s *Service) restorePolicy(ctx context.Context, entityID string) {
+func (s *Service) restorePolicies(ctx context.Context, names []string) {
 	ctx = context.WithoutCancel(ctx)
-	active, err := s.store.ActiveGrants(ctx, entityID, s.now())
-	if err == nil {
-		err = s.writePolicy(ctx, entityID, active)
-	}
+	for _, name := range names {
+		active, err := s.policyGrants(ctx, name, s.now())
+		if err == nil {
+			err = s.writePolicy(ctx, name, active)
+		}
 
-	if err != nil {
-		s.logger.Error("restore session policy from stored grants", "entity", entityID, "error", err)
+		if err != nil {
+			s.logger.Error("restore Grant policy from stored grants", "policy", name, "error", err)
+		}
 	}
 }
 
-// attachPolicy adds the session policy to the Session Identity, keeping
+// attachPolicy adds the Requester policy to the Requester's entity, keeping
 // policies an operator attached. The name is never detached: once the policy
 // is deleted or expired it grants nothing, and leaving it saves entity writes.
 func (s *Service) attachPolicy(ctx context.Context, entityID string) error {
 	entity, err := s.bao.ReadEntity(ctx, entityID)
 	if err != nil {
-		return fmt.Errorf("read session entity: %w", err)
+		return fmt.Errorf("read requester entity: %w", err)
 	}
 
 	if slices.Contains(entity.Policies, PolicyPrefix+entityID) {
@@ -648,18 +828,18 @@ func (s *Service) attachPolicy(ctx context.Context, entityID string) error {
 	}
 
 	if err := s.bao.SetEntityPolicies(ctx, entityID, append(entity.Policies, PolicyPrefix+entityID)); err != nil {
-		return fmt.Errorf("update session entity policies: %w", err)
+		return fmt.Errorf("update requester entity policies: %w", err)
 	}
 
 	return nil
 }
 
-// sessionPolicy renders one path block per Grant, each with its own
-// expiration, so a session needs one policy however many Grants it holds.
+// grantPolicy renders one path block per Grant, each with its own
+// expiration, so each scope needs one policy however many Grants it holds.
 // JSON policies cannot repeat a path key, so it is HCL; json.Marshal quotes
 // strings in a form HCL parses, and paths exclude the characters HCL would
 // interpret. The policy expires with its last block.
-func sessionPolicy(grants []store.Grant) (string, time.Time) {
+func grantPolicy(grants []store.Grant) (string, time.Time) {
 	var document strings.Builder
 	var expiresAt time.Time
 	for _, grant := range grants {
@@ -746,31 +926,6 @@ func (s *Service) notify(send func() error) {
 
 	if err := send(); err != nil {
 		s.logger.Warn("notify approvers", "error", err)
-	}
-}
-
-// lockSession serializes session policy writes and decisions for one Agent
-// Session. It is in-process, so one authorizer instance owns a database.
-func (s *Service) lockSession(entityID string) func() {
-	s.sessionLocksMu.Lock()
-	lock := s.sessionLocks[entityID]
-	if lock == nil {
-		lock = &sessionLock{}
-		s.sessionLocks[entityID] = lock
-	}
-
-	lock.refs++
-	s.sessionLocksMu.Unlock()
-	lock.mu.Lock()
-	return func() {
-		lock.mu.Unlock()
-		s.sessionLocksMu.Lock()
-		lock.refs--
-		if lock.refs == 0 {
-			delete(s.sessionLocks, entityID)
-		}
-
-		s.sessionLocksMu.Unlock()
 	}
 }
 

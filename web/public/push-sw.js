@@ -2,7 +2,7 @@
 
 const DEFAULT_NOTIFICATION = Object.freeze({
   title: 'OpenBao access requested',
-  body: 'An agent session is waiting for an access decision.',
+  body: 'An agent is waiting for an access decision.',
   url: '/',
 })
 

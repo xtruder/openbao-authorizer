@@ -22,10 +22,15 @@ import (
 )
 
 const rootLong = `Reads credentials from OpenBao with the Requester's token from BAO_TOKEN,
-VAULT_TOKEN, or else the token file ~/.vault-token written by bao login (skipped
-when BAO_NO_TOKEN_FILE is set). When the token lacks access, bao-cred can file
-a Grant Request with the authorizer at BAO_AUTHORIZER_ADDR and wait for an
-Approver to decide it; bao-cred grantable lists the paths that may be requested.
+VAULT_TOKEN, the stored Named Token of --identity, BAO_IDENTITY or the
+project's .bao-identity file at its git root, or else the token file
+~/.vault-token written by bao login (skipped when BAO_NO_TOKEN_FILE is set). When the token lacks access, bao-cred can file a Grant Request with
+the authorizer at BAO_AUTHORIZER_ADDR and wait for an Approver to decide it;
+bao-cred grantable lists the paths that may be requested.
+
+bao-cred init selects a Named Identity for a git project and mints its Named
+Token with your bao login token; bao-cred auth mints one for any name. Tokens
+are stored in the OS keyring or a file; bao-cred env exports one for .envrc.
 
 Request outcomes are printed as JSON on stdout; progress goes to stderr.
 
@@ -37,7 +42,8 @@ Exit status:
   4  a Permission Item is still pending (timeout or --no-wait)
   In command mode, the command's own exit status is returned.`
 
-const rootExample = `  bao-cred grantable
+const rootExample = `  bao-cred init
+  bao-cred grantable
   bao-cred read --field token github/token/project-example
   bao-cred read --reason "open a PR in org/repo" --field token github/token/project-example
   bao-cred request --reason "migrate app schema" --item database/creds/app=read --item kv/data/app=read,update
@@ -52,12 +58,14 @@ const (
 )
 
 type options struct {
+	identity   string
 	path       string
 	format     string
 	field      string
 	template   string
 	output     string
 	reason     string
+	scope      string
 	authorizer string
 	timeout    time.Duration
 	quiet      bool
@@ -143,7 +151,11 @@ func newRootCommand(read readFunc) *cobra.Command {
 	}
 	root.CompletionOptions.DisableDefaultCmd = true
 	root.SetFlagErrorFunc(flagError)
-	root.AddCommand(newReadCommand(read), newRequestCommand(), newGrantsCommand(), newGrantableCommand())
+	root.PersistentFlags().String("identity", "", "Named Identity whose stored token to use (default $BAO_IDENTITY)")
+	root.AddCommand(
+		newReadCommand(read), newRequestCommand(), newGrantsCommand(), newGrantableCommand(),
+		newInitCommand(), newAuthCommand(), newStatusCommand(), newEnvCommand(), newLogoutCommand(), newRunCommand(),
+	)
 	return root
 }
 
@@ -185,6 +197,8 @@ hint.`,
 				return err
 			}
 
+			parsed.identity = identityFlag(command)
+
 			return read(command.Context(), parsed, command.OutOrStdout(), command.ErrOrStderr())
 		},
 	}
@@ -198,6 +212,7 @@ hint.`,
 	flags.StringVar(&opts.output, "output", "", "atomically overwrite this file with mode 0600 instead of stdout")
 	flags.StringVar(&opts.reason, "reason", "",
 		"on permission denied, request read access with this reason and retry once")
+	flags.StringVar(&opts.scope, "scope", "", "with --reason, the suggested scope: session, project, or global")
 	flags.StringVar(&opts.authorizer, "authorizer", "", "authorizer base URL (default $BAO_AUTHORIZER_ADDR)")
 	flags.DurationVar(&opts.timeout, "timeout", 15*time.Minute, "approval wait timeout")
 	flags.BoolVar(&opts.quiet, "quiet", false, "suppress progress messages")
@@ -205,7 +220,7 @@ hint.`,
 }
 
 func runRead(ctx context.Context, opts options, stdout, stderr io.Writer) error {
-	token, err := requesterToken()
+	token, err := requesterToken(ctx, opts.identity)
 	if err != nil {
 		return err
 	}
@@ -261,9 +276,14 @@ func requestReadAccess(ctx context.Context, opts options, token string, progress
 		return fmt.Errorf("request read access: %w", err)
 	}
 
+	scope, err := parseScope(opts.scope)
+	if err != nil {
+		return usageError(err)
+	}
+
 	request, err := authorizer.createGrantRequest(ctx, &authorizerv1.CreateGrantRequestRequest{
 		Reason: opts.reason,
-		Items:  []*authorizerv1.PermissionItemInput{{Path: opts.path, Capabilities: []string{"read"}}},
+		Items:  []*authorizerv1.PermissionItemInput{{Path: opts.path, Capabilities: []string{"read"}, Scope: scope}},
 	})
 	if err != nil {
 		return fmt.Errorf("request read access: %w", err)
@@ -318,6 +338,16 @@ func parseOptions(opts options, rawMappings, arguments []string, dash int) (opti
 }
 
 func validateOptions(options options) error {
+	if options.scope != "" {
+		if options.reason == "" {
+			return errors.New("--scope requires --reason")
+		}
+
+		if _, err := parseScope(options.scope); err != nil {
+			return err
+		}
+	}
+
 	seenMappings := make(map[string]struct{}, len(options.mappings))
 	for _, mapping := range options.mappings {
 		if _, duplicate := seenMappings[mapping.Name]; duplicate {
@@ -447,18 +477,71 @@ func mergeEnvironment(environment, mapped []string) []string {
 	return append(result, mapped...)
 }
 
-func requesterToken() (string, error) {
+func environmentToken() string {
 	for _, name := range []string{"BAO_TOKEN", "VAULT_TOKEN"} {
 		if token := strings.TrimSpace(os.Getenv(name)); token != "" {
-			return token, nil
+			return token
 		}
 	}
 
-	// The opencode plugin sets BAO_NO_TOKEN_FILE so that an agent command
-	// without its Session Token fails closed instead of using the human's
-	// `bao login` token.
+	return ""
+}
+
+// identityToken returns the token commands use for the Named Identity name:
+// the session token inside an agent session, else the Named Token, plus the
+// session ID, if any.
+func identityToken(ctx context.Context, name string, progress progressFunc) (string, string, error) {
+	session, err := agentSession()
+	if err != nil {
+		return "", "", err
+	}
+
+	if session != "" {
+		token, sessionErr := sessionToken(ctx, name, session, progress)
+		return token, session, sessionErr
+	}
+
+	token, _, err := tokens().loadNamed(name)
+	return token, "", err
+}
+
+// identityFlag returns the selected Named Identity: --identity, else
+// BAO_IDENTITY.
+func identityFlag(command *cobra.Command) string {
+	flag, _ := command.Flags().GetString("identity")
+	return selectedIdentity(flag)
+}
+
+// requesterToken finds the Requester's token. identity is the explicit
+// selection; without one, the project's .bao-identity selects it. Inside an
+// agent session the selected identity's session token is used. A selected
+// identity without a stored token is an error rather than a fall back to the
+// human's token.
+func requesterToken(ctx context.Context, identity string) (string, error) {
+	if token := environmentToken(); token != "" {
+		return token, nil
+	}
+
+	if identity == "" {
+		var err error
+		if identity, err = projectIdentity(); err != nil {
+			return "", err
+		}
+	}
+
+	if identity != "" {
+		if err := validateIdentityName(identity); err != nil {
+			return "", err
+		}
+
+		token, _, err := identityToken(ctx, identity, func(string) {})
+		return token, err
+	}
+
+	// BAO_NO_TOKEN_FILE keeps commands outside a project with an identity
+	// from silently using the human's `bao login` token.
 	if os.Getenv("BAO_NO_TOKEN_FILE") != "" {
-		return "", errors.New("no token: set BAO_TOKEN (or VAULT_TOKEN); the bao login token file is disabled by BAO_NO_TOKEN_FILE")
+		return "", errors.New("no token: run bao-cred init in the project, or set BAO_IDENTITY or BAO_TOKEN (or VAULT_TOKEN); the bao login token file is disabled by BAO_NO_TOKEN_FILE")
 	}
 
 	home, err := os.UserHomeDir()
@@ -470,7 +553,7 @@ func requesterToken() (string, error) {
 		}
 	}
 
-	return "", errors.New("no token: set BAO_TOKEN (or VAULT_TOKEN), or run bao login")
+	return "", errors.New("no token: run bao-cred init in the project, set BAO_IDENTITY or BAO_TOKEN (or VAULT_TOKEN), or run bao login")
 }
 
 func newOpenBaoClient(token string) (*openbao.Client, error) {

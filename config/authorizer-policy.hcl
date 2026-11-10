@@ -13,7 +13,9 @@ path "identity/entity/id/*" {
   }
 }
 
-# Write and delete one policy per Requester, one path block per Grant.
+# Write and delete the Grant policies, one path block per Grant: one per
+# session-scope Requester, one per project (agent-grant-project-<name>) and
+# agent-grant-global.
 path "sys/policies/acl/agent-grant-*" {
   capabilities = ["create", "read", "update", "delete"]
 }

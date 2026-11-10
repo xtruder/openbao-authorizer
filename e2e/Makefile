@@ -19,12 +19,10 @@ OPENBAO_RELEASE_URL := https://github.com/openbao/openbao/releases/download/$(OP
 OPENBAO_BINARY := $(OPENBAO_CACHE)/bin/$(OPENBAO_TAG)/linux_$(OPENBAO_ARCH)/bao
 APP_BINARY := $(ROOT)/bin/openbao-authorizer
 BAO_CRED_BINARY := $(ROOT)/bin/bao-cred
-BUN_BINARY := $(shell command -v bun)
 
 e2e: app openbao
-	@if [[ -z "$(BUN_BINARY)" ]]; then echo "bun is required to run the opencode plugin's mint CLI" >&2; exit 1; fi
 	OPENBAO_E2E_APP_BINARY="$(APP_BINARY)" OPENBAO_E2E_BAO_BINARY="$(OPENBAO_BINARY)" \
-		OPENBAO_E2E_BAO_CRED_BINARY="$(BAO_CRED_BINARY)" OPENBAO_E2E_BUN_BINARY="$(BUN_BINARY)" \
+		OPENBAO_E2E_BAO_CRED_BINARY="$(BAO_CRED_BINARY)" \
 		go test -tags=e2e -count=1 -v .
 
 app:

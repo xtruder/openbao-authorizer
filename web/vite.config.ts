@@ -20,7 +20,7 @@ export default defineConfig({
       manifest: {
         name: 'OpenBao Authorizer',
         short_name: 'Authorizer',
-        description: 'Review and approve OpenBao access requests from AI agent sessions.',
+        description: 'Review and approve OpenBao access requests from AI agents.',
         theme_color: '#151515',
         background_color: '#151515',
         display: 'standalone',

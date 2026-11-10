@@ -61,15 +61,17 @@ func newTestServer(t *testing.T, configs ...testConfig) *testServer {
 	})
 	bao := openbaotest.New()
 	bao.SetIdentity("human-token", approverIdentity)
-	bao.AddSession("session-a", "entity-a", map[string]string{"session_id": "aaa", "title": "Fix CI", "directory": "/src/app"})
-	bao.AddSession("session-b", "entity-b", map[string]string{"session_id": "bbb"})
+	bao.AddNamedToken("session-a", "entity-a", map[string]string{"identity": "aaa", "title": "Fix CI", "directory": "/src/app"})
+	bao.AddNamedToken("session-b", "entity-b", map[string]string{"identity": "bbb"})
+	bao.AddToken("scoped-session", "entity-scoped", "agent-session",
+		[]string{"default", "agent-session", grants.ProjectPolicyPrefix + "app", grants.GlobalPolicy}, map[string]string{"session": "ses_scoped"})
 	events := NewEventBus()
 	service := grants.New(bao, database, &Notifier{Events: events}, grants.Config{
 		Policy: grants.Policy{DefaultTTL: 72 * time.Hour, Rules: []grants.Rule{
 			{Name: "kv", Path: "kv/data/*", Capabilities: []string{"read"}, MaxTTL: 8 * time.Hour, Description: "App secrets", Discover: "kv/metadata"},
 		}},
 		PendingTTL: time.Hour,
-		Requesters: []grants.RequesterRule{{Name: "opencode", TokenRole: "opencode-session"}},
+		Requesters: []grants.RequesterRule{{Name: "named", TokenRole: "named-identity"}, {Name: "sessions", TokenRole: "agent-session"}},
 	})
 	options := Options{
 		OpenBao: bao, Store: database, Grants: service, Events: events,
@@ -696,7 +698,7 @@ func TestApproversCannotDecideTheirOwnRequests(t *testing.T) {
 
 	server := newTestServer(t)
 	// An approver who also holds a Requester token shares one entity across both.
-	server.bao.SetIdentity("bob-session", openbao.Identity{EntityID: "bob-id", Role: "opencode-session", Path: "auth/token/create/opencode-session"})
+	server.bao.SetIdentity("bob-session", openbao.Identity{EntityID: "bob-id", Role: "named-identity", Path: "auth/token/create/named-identity"})
 	server.bao.AddEntity(openbao.Entity{ID: "bob-id"})
 	created := server.create("bob-session", "self", readItem("kv/data/a"))
 	server.login()
@@ -1117,4 +1119,54 @@ func TestNotifierPushesWithoutBlockingTheCaller(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("push was not sent")
 	}
+}
+
+func TestScopesFlowThroughTheAPI(t *testing.T) {
+	t.Parallel()
+
+	server := newTestServer(t)
+	server.login()
+	item := readItem("kv/data/scoped")
+	item.Scope = authorizerv1.Scope_SCOPE_PROJECT
+	created := server.create("scoped-session", "x", item)
+	if created.GetItems()[0].GetScope() != authorizerv1.Scope_SCOPE_PROJECT {
+		t.Fatalf("requested scope = %s", created.GetItems()[0].GetScope())
+	}
+
+	pending, err := server.approver.ListGrantRequests(t.Context(), connect.NewRequest(&authorizerv1.ListGrantRequestsRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var requester *authorizerv1.Requester
+	for _, request := range pending.Msg.GetGrantRequests() {
+		if request.GetId() == created.GetId() {
+			requester = request.GetRequester()
+		}
+	}
+
+	want := []authorizerv1.Scope{authorizerv1.Scope_SCOPE_SESSION, authorizerv1.Scope_SCOPE_PROJECT, authorizerv1.Scope_SCOPE_GLOBAL}
+	if requester.GetProject() != "app" || requester.GetSession() != "ses_scoped" || !slices.Equal(requester.GetScopes(), want) {
+		t.Fatalf("requester = %v", requester)
+	}
+
+	// The Approver narrows it to session scope.
+	_, err = server.approver.DecideItems(t.Context(), connect.NewRequest(&authorizerv1.DecideItemsRequest{
+		GrantRequestId: created.GetId(),
+		Decisions: []*authorizerv1.ItemDecision{{
+			ItemId: created.GetItems()[0].GetId(), Decision: authorizerv1.Decision_DECISION_APPROVE, Scope: authorizerv1.Scope_SCOPE_SESSION,
+		}},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mine, err := server.grant.ListMyGrants(t.Context(), bearer("scoped-session", &authorizerv1.ListMyGrantsRequest{}))
+	if err != nil || len(mine.Msg.GetGrants()) != 1 || mine.Msg.GetGrants()[0].GetScope() != authorizerv1.Scope_SCOPE_SESSION {
+		t.Fatalf("my grants = %v, %v", mine, err)
+	}
+
+	// Named Tokens without project policies may not ask for project scope.
+	_, err = server.grant.CreateGrantRequest(t.Context(), bearer("session-a", &authorizerv1.CreateGrantRequestRequest{Reason: "x", Items: []*authorizerv1.PermissionItemInput{item}}))
+	requireError(t, err, connect.CodeInvalidArgument, reasonInvalidRequest)
 }

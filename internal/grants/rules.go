@@ -1,5 +1,5 @@
 // Package grants validates Permission Items and turns approved ones into
-// session-scoped OpenBao Grants.
+// OpenBao Grants of session, project or global scope.
 package grants
 
 import (
@@ -10,6 +10,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/xtruder/openbao-authorizer/internal/store"
 )
 
 // GrantableCapabilities are the only capabilities a Permission Item may request.
@@ -45,6 +47,8 @@ type ItemInput struct {
 	Path         string
 	Capabilities []string
 	TTL          string
+	// Scope is the suggested scope; empty uses the Requester's default.
+	Scope store.Scope
 }
 
 // Resolved is a Permission Item that passed static validation.

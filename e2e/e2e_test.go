@@ -34,10 +34,11 @@ const (
 	approverPassword = "approver-e2e-password"
 	approverPolicy   = "openbao-authorizer-approver"
 	authorizerPolicy = "openbao-authorizer"
-	sessionPolicy    = "opencode-session"
-	minterPolicy     = "opencode-minter"
-	tokenRole        = "opencode-session"
-	aliasPrefix      = "opencode-session-"
+	identityPolicy   = "named-identity"
+	minterPolicy     = "named-identity-minter"
+	tokenRole        = "named-identity"
+	sessionRole      = "agent-session"
+	developerPass    = "developer-e2e-password"
 	ciRole           = "ci"
 	selfRole         = "self-approver"
 )
@@ -48,7 +49,7 @@ const (
 	exitPending = 4
 )
 
-func TestSessionGrantWorkflow(t *testing.T) {
+func TestNamedIdentityGrantWorkflow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("real-process OpenBao E2E is disabled by -short")
 	}
@@ -87,7 +88,6 @@ func TestSessionGrantWorkflow(t *testing.T) {
 	baoBinary := requiredExecutable(t, "OPENBAO_E2E_BAO_BINARY")
 	appBinary := requiredExecutable(t, "OPENBAO_E2E_APP_BINARY")
 	baoCredBinary := requiredExecutable(t, "OPENBAO_E2E_BAO_CRED_BINARY")
-	bunBinary := requiredExecutable(t, "OPENBAO_E2E_BUN_BINARY")
 	processPaths := isolatedProcessPaths{home: isolatedHome, temporary: temporaryDirectory}
 
 	baoLog := filepath.Join(runtimeDirectory, "openbao.log")
@@ -123,11 +123,11 @@ func TestSessionGrantWorkflow(t *testing.T) {
 	baoAddress := strings.TrimSuffix(bao.baseURL, "/v1")
 	mustCall(t, ctx, bao, "", http.MethodGet, "sys/health", nil, http.StatusOK)
 
-	// Secrets that sessions ask for, plus the OpenBao objects the plan's setup defines.
+	// Secrets that Named Identities ask for, plus the OpenBao objects the plan's setup defines.
 	mustCall(t, ctx, bao, rootToken, http.MethodPost, "sys/mounts/kv", map[string]any{
 		"type": "kv", "options": map[string]string{"version": "2"},
 	}, http.StatusOK, http.StatusNoContent)
-	for _, name := range []string{"alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "folder/nested"} {
+	for _, name := range []string{"alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa", "folder/nested"} {
 		mustCall(t, ctx, bao, rootToken, http.MethodPost, "kv/data/e2e/"+name, map[string]any{
 			"data": map[string]string{"value": "secret-" + name},
 		}, http.StatusOK)
@@ -137,30 +137,34 @@ func TestSessionGrantWorkflow(t *testing.T) {
 	writePolicy(ctx, t, bao, authorizerPolicy, readRepositoryFile(t, repositoryRoot, "config/authorizer-policy.hcl")+
 		"path \"kv/metadata/e2e\" {\n  capabilities = [\"list\"]\n}\n")
 	writePolicy(ctx, t, bao, approverPolicy, readRepositoryFile(t, repositoryRoot, "config/approver-policy.hcl"))
-	writePolicy(ctx, t, bao, sessionPolicy, "# Baseline Session Token policy: no access beyond default.\n")
-	writePolicy(ctx, t, bao, minterPolicy, fmt.Sprintf("path \"auth/token/create/%s\" {\n  capabilities = [\"update\"]\n}\n", tokenRole))
+	writePolicy(ctx, t, bao, identityPolicy, readRepositoryFile(t, repositoryRoot, "deploy/local/named-identity-policy.hcl"))
+	writePolicy(ctx, t, bao, minterPolicy, readRepositoryFile(t, repositoryRoot, "deploy/local/named-identity-minter-policy.hcl"))
+	writePolicy(ctx, t, bao, sessionRole, readRepositoryFile(t, repositoryRoot, "deploy/local/agent-session-policy.hcl"))
+	// The same role settings as deploy/local/bootstrap-openbao.sh. Tokens may
+	// carry the project and global Grant policies before those exist.
 	mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/token/roles/"+tokenRole, map[string]any{
-		"allowed_policies": []string{sessionPolicy}, "orphan": true, "renewable": true, "token_period": "24h",
-		"allowed_entity_aliases": []string{aliasPrefix + "*"},
+		"allowed_policies": []string{identityPolicy, "agent-grant-global"}, "allowed_policies_glob": []string{"agent-grant-project-*"},
+		"orphan": true, "renewable": true, "token_period": "768h", "allowed_entity_aliases": []string{"*"},
+	}, http.StatusOK, http.StatusNoContent)
+	mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/token/roles/"+sessionRole, map[string]any{
+		"allowed_policies": []string{sessionRole, "agent-grant-global"}, "allowed_policies_glob": []string{"agent-grant-project-*"},
+		"orphan": false, "renewable": true, "token_period": "24h", "allowed_entity_aliases": []string{"*"},
 	}, http.StatusOK, http.StatusNoContent)
 	mustCall(t, ctx, bao, rootToken, http.MethodPost, "sys/auth/approle", map[string]string{"type": "approle"}, http.StatusOK, http.StatusNoContent)
-	mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/approle/role/opencode-minter", map[string]any{
-		"token_policies": []string{minterPolicy}, "token_ttl": "15m",
-	}, http.StatusOK, http.StatusNoContent)
 	// AppRole logins match the "ci" Requester Rule: one role is a plain CI
 	// identity, the other also holds the approver policy.
 	mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/approle/role/"+ciRole, map[string]any{"token_ttl": "15m"}, http.StatusOK, http.StatusNoContent)
 	mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/approle/role/"+selfRole, map[string]any{
 		"token_policies": []string{approverPolicy}, "token_ttl": "15m",
 	}, http.StatusOK, http.StatusNoContent)
-	roleIDFile := filepath.Join(runtimeDirectory, "minter-role-id")
-	secretIDFile := filepath.Join(runtimeDirectory, "minter-secret-id")
-	writeSecretFile(t, roleIDFile, responseString(t, mustCall(t, ctx, bao, rootToken, http.MethodGet, "auth/approle/role/opencode-minter/role-id", nil, http.StatusOK), "role_id"))
-	writeSecretFile(t, secretIDFile, responseString(t, mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/approle/role/opencode-minter/secret-id", map[string]any{}, http.StatusOK), "secret_id"))
 
 	mustCall(t, ctx, bao, rootToken, http.MethodPost, "sys/auth/userpass", map[string]string{"type": "userpass"}, http.StatusOK, http.StatusNoContent)
 	mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/userpass/users/approver", map[string]any{
 		"password": approverPassword, "token_policies": []string{approverPolicy},
+	}, http.StatusOK, http.StatusNoContent)
+	// The developer mints Named Tokens with their own login token.
+	mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/userpass/users/developer", map[string]any{
+		"password": developerPass, "token_policies": []string{minterPolicy},
 	}, http.StatusOK, http.StatusNoContent)
 	authorizerToken := createToken(ctx, t, bao, map[string]any{"policies": []string{authorizerPolicy}, "no_default_policy": true, "ttl": "1h"})
 	authorizerTokenFile := filepath.Join(runtimeDirectory, "authorizer-token")
@@ -200,7 +204,10 @@ approver_login {
   method "token" {}
   method "userpass" {}
 }
-requester "opencode" {
+requester "named" {
+  token_role = %q
+}
+requester "sessions" {
   token_role = %q
 }
 requester "ci" {
@@ -217,7 +224,7 @@ grantable "e2e-kv" {
   description  = "E2E secrets"
   discover     = "kv/metadata/e2e"
 }
-`, staticDirectory, filepath.Join(runtimeDirectory, "app.db"), encryptionKeyFile, baoAddress, authorizerTokenFile, approverPolicy, baoAddress, tokenRole)
+`, staticDirectory, filepath.Join(runtimeDirectory, "app.db"), encryptionKeyFile, baoAddress, authorizerTokenFile, approverPolicy, baoAddress, tokenRole, sessionRole)
 	writeSecretFile(t, appConfig, configuration)
 
 	appLog := filepath.Join(runtimeDirectory, "app.log")
@@ -263,28 +270,22 @@ grantable "e2e-kv" {
 	mustCall(t, ctx, bao, approverToken, http.MethodGet, "auth/token/lookup-self", nil, http.StatusForbidden)
 	t.Log("OpenBao allows the PWA origin; the approver's userpass token became an app session and was revoked")
 
-	mint := sessionMinter{
-		bun:     bunBinary,
-		cli:     filepath.Join(repositoryRoot, "integrations", "opencode", "src", "mint-cli.ts"),
-		root:    repositoryRoot,
-		paths:   processPaths,
-		address: baoAddress,
-		roleID:  roleIDFile,
-		secret:  secretIDFile,
-	}
-	sessionA := mint.mint(ctx, t, "e2e-session-a", "E2E session A")
+	// The developer logs in as `bao login` would, writing ~/.vault-token
+	// into the isolated HOME that bao-cred auth reads.
+	developerToken := responseAuthToken(t, mustCall(t, ctx, bao, "", http.MethodPost, "auth/userpass/login/developer", map[string]string{"password": developerPass}, http.StatusOK))
+	writeSecretFile(t, filepath.Join(isolatedHome, ".vault-token"), developerToken)
 	cred := baoCred{binary: baoCredBinary, paths: processPaths, address: baoAddress, authorizer: application.baseURL}
-
-	if sessionA.EntityAlias != aliasPrefix+"e2e-session-a" || sessionA.EntityID == "" {
-		t.Fatalf("minted session A = %+v", sessionA)
+	identityA := cred.auth(ctx, t, "e2e-project-a")
+	if identityA.EntityID == "" || identityA.Store != "file" || identityA.TTL < 700*time.Hour {
+		t.Fatalf("Named Identity A = %+v", identityA)
 	}
 
-	assertRead(ctx, t, bao, sessionA.Token, "alpha", http.StatusForbidden)
-	t.Log("session A minted through the plugin's mint CLI; its baseline token cannot read kv/data/e2e/alpha")
+	assertRead(ctx, t, bao, identityA.Token, "alpha", http.StatusForbidden)
+	t.Log("bao-cred auth minted a 32-day Named Token for e2e-project-a into the file store; it cannot read kv/data/e2e/alpha")
 
 	// A batch where the approver approves one item and rejects another, and the
 	// authorizer refuses two before anyone sees them.
-	batch := cred.start(ctx, sessionA.Token,
+	batch := cred.start(ctx, identityA.env(),
 		"request", "--reason", "e2e: deploy needs alpha and beta",
 		"--item", "kv/data/e2e/alpha=read",
 		"--item", "kv/data/e2e/beta=read",
@@ -293,7 +294,7 @@ grantable "e2e-kv" {
 		"--timeout", "2m",
 	)
 	pending := approver.waitForPending(ctx, t, "kv/data/e2e/alpha", "kv/data/e2e/beta")
-	if requester := pending.GetRequester(); pending.GetReason() != "e2e: deploy needs alpha and beta" || requester.GetId() != "e2e-session-a" || requester.GetTitle() != "E2E session A" || requester.GetRule() != "opencode" {
+	if requester := pending.GetRequester(); pending.GetReason() != "e2e: deploy needs alpha and beta" || requester.GetId() != "e2e-project-a" || requester.GetRule() != "named" {
 		t.Fatalf("approver view of the request = %+v", pending)
 	}
 
@@ -316,28 +317,25 @@ grantable "e2e-kv" {
 		}
 	}
 
-	assertRead(ctx, t, bao, sessionA.Token, "alpha", http.StatusOK)
-	assertRead(ctx, t, bao, sessionA.Token, "beta", http.StatusForbidden)
-	read := cred.run(ctx, t, sessionA.Token, "read", "--field", "data.value", "kv/data/e2e/alpha")
+	assertRead(ctx, t, bao, identityA.Token, "alpha", http.StatusOK)
+	assertRead(ctx, t, bao, identityA.Token, "beta", http.StatusForbidden)
+	read := cred.run(ctx, t, identityA.env(), "read", "--field", "data.value", "kv/data/e2e/alpha")
 	if read.exitCode != 0 || read.stdout != "secret-alpha" {
 		t.Fatalf("bao-cred read = %+v", read)
 	}
 
-	var entity struct {
-		Data struct {
-			Policies []string `json:"policies"`
-		} `json:"data"`
-	}
-	decodeResponse(t, mustCall(t, ctx, bao, rootToken, http.MethodGet, "identity/entity/id/"+sessionA.EntityID, nil, http.StatusOK), &entity)
-	grantPolicies := slices.DeleteFunc(entity.Data.Policies, func(name string) bool { return !strings.HasPrefix(name, "agent-grant-") })
-	if len(grantPolicies) != 1 {
-		t.Fatalf("session A entity policies = %v, want exactly one agent-grant- policy", entity.Data.Policies)
+	// A project token's requests default to project scope: the Grant lives in
+	// the project policy the token carries, and nothing is attached to its
+	// entity.
+	mustCall(t, ctx, bao, rootToken, http.MethodGet, "sys/policies/acl/agent-grant-project-e2e-project-a", nil, http.StatusOK)
+	if policies := entityGrantPolicies(ctx, t, bao, identityA.EntityID); len(policies) != 0 {
+		t.Fatalf("identity A entity grant policies = %v, want none", policies)
 	}
 
-	t.Log("approved item works for session A's existing token through its one session policy; rejected and refused items do not")
+	t.Log("approved item works for identity A's existing token through its project policy; rejected and refused items do not")
 
 	// Asking again for something OpenBao already allows needs no approver.
-	repeat := cred.run(ctx, t, sessionA.Token, "request", "--reason", "e2e: again", "--item", "kv/data/e2e/alpha=read", "--timeout", "30s")
+	repeat := cred.run(ctx, t, identityA.env(), "request", "--reason", "e2e: again", "--item", "kv/data/e2e/alpha=read", "--timeout", "30s")
 	if repeat.exitCode != 0 || itemStates(t, repeat.stdout)["kv/data/e2e/alpha"] != "already_granted" {
 		t.Fatalf("repeated request = %+v", repeat)
 	}
@@ -347,74 +345,169 @@ grantable "e2e-kv" {
 	}
 
 	// A request filed without waiting can be resumed by its ID.
-	filed := cred.run(ctx, t, sessionA.Token, "request", "--reason", "e2e: gamma", "--item", "kv/data/e2e/gamma=read", "--no-wait")
+	filed := cred.run(ctx, t, identityA.env(), "request", "--reason", "e2e: gamma", "--item", "kv/data/e2e/gamma=read", "--no-wait")
 	if filed.exitCode != exitPending {
 		t.Fatalf("no-wait request = %+v", filed)
 	}
 
 	gamma := approver.waitForPending(ctx, t, "kv/data/e2e/gamma")
 	approver.decide(ctx, t, gamma, map[string]authorizerv1.Decision{"kv/data/e2e/gamma": authorizerv1.Decision_DECISION_APPROVE}, nil)
-	resumed := cred.run(ctx, t, sessionA.Token, "request", "--wait", requestID(t, filed.stdout), "--timeout", "30s")
+	resumed := cred.run(ctx, t, identityA.env(), "request", "--wait", requestID(t, filed.stdout), "--timeout", "30s")
 	if resumed.exitCode != 0 || itemStates(t, resumed.stdout)["kv/data/e2e/gamma"] != "approved" {
 		t.Fatalf("resumed wait = %+v", resumed)
 	}
 
-	assertRead(ctx, t, bao, sessionA.Token, "gamma", http.StatusOK)
+	assertRead(ctx, t, bao, identityA.Token, "gamma", http.StatusOK)
 	t.Log("already-granted items skip approval; a request filed with --no-wait resumes with --wait")
 
-	// Grants belong to the session, not to other sessions; subagents share their root's grants.
-	sessionB := mint.mint(ctx, t, "e2e-session-b", "E2E session B")
-	if sessionB.EntityID == sessionA.EntityID {
-		t.Fatal("sessions A and B share an entity")
+	// Grants belong to the Named Identity, not to other identities, and
+	// survive a re-mint, which revokes the previous token.
+	identityB := cred.auth(ctx, t, "e2e-project-b")
+	if identityB.EntityID == identityA.EntityID {
+		t.Fatal("identities A and B share an entity")
 	}
 
-	assertRead(ctx, t, bao, sessionB.Token, "alpha", http.StatusForbidden)
-	child := mint.mint(ctx, t, "e2e-subagent", "", "e2e-session-a")
-	if child.RootSessionID != "e2e-session-a" || child.EntityID != sessionA.EntityID || child.Token == sessionA.Token {
-		t.Fatalf("subagent token = %+v", child)
+	assertRead(ctx, t, bao, identityB.Token, "alpha", http.StatusForbidden)
+	previousA := identityA
+	identityA = cred.auth(ctx, t, "e2e-project-a")
+	if identityA.EntityID != previousA.EntityID || identityA.Token == previousA.Token {
+		t.Fatalf("re-minted identity A = %+v, previous %+v", identityA, previousA)
 	}
 
-	assertRead(ctx, t, bao, child.Token, "alpha", http.StatusOK)
-	t.Log("session B cannot use A's grant; a subagent of A can")
+	mustCall(t, ctx, bao, previousA.Token, http.MethodGet, "auth/token/lookup-self", nil, http.StatusForbidden)
+	assertRead(ctx, t, bao, identityA.Token, "alpha", http.StatusOK)
+	t.Log("identity B cannot use A's grant; re-minting A revoked its old token and kept its Grants")
+
+	// bao-cred env exports the Named Token for .envrc and status reports it.
+	exported := cred.run(ctx, t, identityA.env(), "env")
+	if exported.exitCode != 0 || !strings.Contains(exported.stdout, "export BAO_TOKEN='"+identityA.Token+"'") || !strings.Contains(exported.stdout, "export BAO_NO_TOKEN_FILE='1'") {
+		t.Fatalf("bao-cred env = %+v", exported)
+	}
+
+	if status := cred.run(ctx, t, identityA.env(), "status"); status.exitCode != 0 || !strings.Contains(status.stdout, `"identity": "e2e-project-a"`) {
+		t.Fatalf("bao-cred status = %+v", status)
+	}
+
+	missing := cred.run(ctx, t, []string{"BAO_IDENTITY=e2e-unknown"}, "read", "kv/data/e2e/alpha")
+	if missing.exitCode != 1 || !strings.Contains(missing.stderr, "bao-cred auth e2e-unknown") {
+		t.Fatalf("read with an identity that has no token = %+v", missing)
+	}
+
+	t.Log("bao-cred env exported the Named Token; an identity without a token fails closed instead of using ~/.vault-token")
+
+	// Agent sessions: commands with OPENCODE_SESSION_ID get a session token
+	// minted from the project token, carrying the project and global Grant
+	// policies, with an entity of their own.
+	session1 := append(identityA.env(), "OPENCODE_SESSION_ID=ses_E2E1")
+	session2 := append(identityA.env(), "OPENCODE_SESSION_ID=ses_E2E2")
+	if status := cred.run(ctx, t, session1, "status"); status.exitCode != 0 || !strings.Contains(status.stdout, `"session": "ses_E2E1"`) {
+		t.Fatalf("bao-cred status in a session = %+v", status)
+	}
+
+	token1 := cred.sessionToken(t, "e2e-project-a", "ses_E2E1")
+	var lookup struct {
+		Data struct {
+			EntityID string   `json:"entity_id"`
+			Policies []string `json:"policies"`
+		} `json:"data"`
+	}
+	decodeResponse(t, mustCall(t, ctx, bao, token1, http.MethodGet, "auth/token/lookup-self", nil, http.StatusOK), &lookup)
+	if lookup.Data.EntityID == "" || lookup.Data.EntityID == identityA.EntityID ||
+		!slices.Contains(lookup.Data.Policies, "agent-grant-project-e2e-project-a") || !slices.Contains(lookup.Data.Policies, "agent-grant-global") {
+		t.Fatalf("session token = %+v", lookup.Data)
+	}
+
+	session1Entity := lookup.Data.EntityID
+	assertRead(ctx, t, bao, token1, "alpha", http.StatusOK)
+	t.Log("a session token was minted from the project token with its own entity; project A's Grants reach it")
+
+	// A session request defaults to session scope: only that session gets it.
+	sessionRead := cred.start(ctx, session1, "read", "--reason", "e2e: session iota", "--field", "data.value", "--timeout", "2m", "kv/data/e2e/iota")
+	iotaRequest := approver.waitForPending(ctx, t, "kv/data/e2e/iota")
+	if requester := iotaRequest.GetRequester(); requester.GetSession() != "ses_E2E1" || requester.GetProject() != "e2e-project-a" || len(requester.GetScopes()) != 3 ||
+		iotaRequest.GetItems()[0].GetScope() != authorizerv1.Scope_SCOPE_SESSION {
+		t.Fatalf("approver view of a session request = %+v", iotaRequest)
+	}
+
+	approver.decide(ctx, t, iotaRequest, map[string]authorizerv1.Decision{"kv/data/e2e/iota": authorizerv1.Decision_DECISION_APPROVE}, nil)
+	if result := sessionRead.wait(t); result.exitCode != 0 || result.stdout != "secret-iota" {
+		t.Fatalf("session read = %+v", result)
+	}
+
+	token2 := cred.run(ctx, t, session2, "run", "--", "/bin/sh", "-c", `printf %s "$BAO_TOKEN"`)
+	if token2.exitCode != 0 || token2.stdout == "" || token2.stdout == token1 {
+		t.Fatalf("bao-cred run in session 2 = %+v", token2)
+	}
+
+	assertRead(ctx, t, bao, token2.stdout, "iota", http.StatusForbidden)
+	assertRead(ctx, t, bao, identityA.Token, "iota", http.StatusForbidden)
+	if policies := entityGrantPolicies(ctx, t, bao, session1Entity); len(policies) != 1 {
+		t.Fatalf("session 1 entity grant policies = %v, want its session policy", policies)
+	}
+
+	t.Log("a session-scope Grant reached only its session; bao-cred run handed session 2 its own token")
+
+	// The Approver widens a project request to global: every project's
+	// tokens, here identity B's, get it.
+	globalRequest := cred.start(ctx, session2, "request", "--reason", "e2e: kappa for everyone", "--item", "kv/data/e2e/kappa=read", "--scope", "project", "--timeout", "2m")
+	kappa := approver.waitForPending(ctx, t, "kv/data/e2e/kappa")
+	if kappa.GetItems()[0].GetScope() != authorizerv1.Scope_SCOPE_PROJECT {
+		t.Fatalf("requested scope = %s", kappa.GetItems()[0].GetScope())
+	}
+
+	approver.decideScoped(ctx, t, kappa, "kv/data/e2e/kappa", authorizerv1.Scope_SCOPE_GLOBAL)
+	if result := globalRequest.wait(t); result.exitCode != 0 || !strings.Contains(result.stdout, `"scope": "global"`) {
+		t.Fatalf("widened request = %+v", result)
+	}
+
+	for _, token := range []string{token1, identityA.Token, identityB.Token} {
+		assertRead(ctx, t, bao, token, "kappa", http.StatusOK)
+	}
+
+	if grants := cred.run(ctx, t, identityB.env(), "grants"); grants.exitCode != 0 || !strings.Contains(grants.stdout, `"scope": "global"`) {
+		t.Fatalf("identity B grants = %+v", grants)
+	}
+
+	t.Log("the Approver widened a project request to global; tokens of every project read it")
 
 	// A short-lived Grant's block lapses through OpenBao's own expiration while
-	// the other blocks of the session policy keep working.
-	short := cred.start(ctx, sessionA.Token, "request", "--reason", "e2e: brief delta", "--item", "kv/data/e2e/delta=read", "--ttl", "5s", "--timeout", "2m")
+	// the other blocks of the Requester policy keep working.
+	short := cred.start(ctx, identityA.env(), "request", "--reason", "e2e: brief delta", "--item", "kv/data/e2e/delta=read", "--ttl", "5s", "--timeout", "2m")
 	delta := approver.waitForPending(ctx, t, "kv/data/e2e/delta")
 	approver.decide(ctx, t, delta, map[string]authorizerv1.Decision{"kv/data/e2e/delta": authorizerv1.Decision_DECISION_APPROVE}, nil)
 	if result := short.wait(t); result.exitCode != 0 {
 		t.Fatalf("short grant request = %+v", result)
 	}
 
-	assertRead(ctx, t, bao, sessionA.Token, "delta", http.StatusOK)
-	waitForRead(ctx, t, bao, sessionA.Token, "delta", http.StatusForbidden, 20*time.Second)
-	assertRead(ctx, t, bao, sessionA.Token, "alpha", http.StatusOK)
+	assertRead(ctx, t, bao, identityA.Token, "delta", http.StatusOK)
+	waitForRead(ctx, t, bao, identityA.Token, "delta", http.StatusForbidden, 20*time.Second)
+	assertRead(ctx, t, bao, identityA.Token, "alpha", http.StatusOK)
 	t.Log("a 5s Grant stopped working after it expired; alpha still works")
 
 	// Revoking a Grant takes effect immediately.
-	grantID := approver.activeGrant(ctx, t, "e2e-session-a", "kv/data/e2e/gamma")
+	grantID := approver.activeGrant(ctx, t, "e2e-project-a", "kv/data/e2e/gamma")
 	if _, revokeErr := approver.rpc.RevokeGrant(ctx, connect.NewRequest(&authorizerv1.RevokeGrantRequest{GrantId: grantID})); revokeErr != nil {
 		t.Fatalf("revoke Grant: %v", revokeErr)
 	}
 
-	assertRead(ctx, t, bao, sessionA.Token, "gamma", http.StatusForbidden)
-	assertRead(ctx, t, bao, sessionA.Token, "alpha", http.StatusOK)
+	assertRead(ctx, t, bao, identityA.Token, "gamma", http.StatusForbidden)
+	assertRead(ctx, t, bao, identityA.Token, "alpha", http.StatusOK)
 	t.Log("revoking one Grant removed only that access")
 
 	// A read with --reason files a request on permission denied and retries after approval.
-	autoRead := cred.start(ctx, sessionA.Token, "read", "--reason", "e2e: read epsilon", "--field", "data.value", "--timeout", "2m", "kv/data/e2e/epsilon")
+	autoRead := cred.start(ctx, identityA.env(), "read", "--reason", "e2e: read epsilon", "--field", "data.value", "--timeout", "2m", "kv/data/e2e/epsilon")
 	epsilon := approver.waitForPending(ctx, t, "kv/data/e2e/epsilon")
 	approver.decide(ctx, t, epsilon, map[string]authorizerv1.Decision{"kv/data/e2e/epsilon": authorizerv1.Decision_DECISION_APPROVE}, nil)
 	if result := autoRead.wait(t); result.exitCode != 0 || result.stdout != "secret-epsilon" {
 		t.Fatalf("auto-requesting read = %+v", result)
 	}
 
-	withoutReason := cred.run(ctx, t, sessionB.Token, "read", "kv/data/e2e/epsilon")
+	withoutReason := cred.run(ctx, t, identityB.env(), "read", "kv/data/e2e/epsilon")
 	if withoutReason.exitCode != 1 || !strings.Contains(withoutReason.stderr, "--reason") {
 		t.Fatalf("denied read without --reason = %+v", withoutReason)
 	}
 
-	grants := cred.run(ctx, t, sessionA.Token, "grants")
+	grants := cred.run(ctx, t, identityA.env(), "grants")
 	if grants.exitCode != 0 || !strings.Contains(grants.stdout, "kv/data/e2e/alpha") || !strings.Contains(grants.stdout, "kv/data/e2e/epsilon") || strings.Contains(grants.stdout, "kv/data/e2e/gamma") {
 		t.Fatalf("bao-cred grants = %+v", grants)
 	}
@@ -422,7 +515,7 @@ grantable "e2e-kv" {
 	t.Log("bao-cred read --reason requested access on denial and read the secret after approval")
 
 	// A Requester finds a concrete path in the catalog and requests it.
-	catalog := cred.run(ctx, t, sessionB.Token, "grantable")
+	catalog := cred.run(ctx, t, identityB.env(), "grantable")
 	var grantables []struct {
 		Name          string   `json:"name"`
 		Path          string   `json:"path"`
@@ -440,7 +533,7 @@ grantable "e2e-kv" {
 		t.Fatalf("e2e-kv grantable = %+v", rule)
 	}
 
-	theta := cred.start(ctx, sessionB.Token, "read", "--reason", "e2e: theta from the catalog", "--field", "data.value", "--timeout", "2m", "kv/data/e2e/theta")
+	theta := cred.start(ctx, identityB.env(), "read", "--reason", "e2e: theta from the catalog", "--field", "data.value", "--timeout", "2m", "kv/data/e2e/theta")
 	thetaRequest := approver.waitForPending(ctx, t, "kv/data/e2e/theta")
 	approver.decide(ctx, t, thetaRequest, map[string]authorizerv1.Decision{"kv/data/e2e/theta": authorizerv1.Decision_DECISION_APPROVE}, nil)
 	if result := theta.wait(t); result.exitCode != 0 || result.stdout != "secret-theta" {
@@ -469,7 +562,7 @@ grantable "e2e-kv" {
 
 	approver.decide(ctx, t, zeta, map[string]authorizerv1.Decision{"kv/data/e2e/zeta": authorizerv1.Decision_DECISION_APPROVE}, nil)
 	assertRead(ctx, t, bao, ciToken, "zeta", http.StatusOK)
-	assertRead(ctx, t, bao, sessionA.Token, "zeta", http.StatusForbidden)
+	assertRead(ctx, t, bao, identityA.Token, "zeta", http.StatusForbidden)
 
 	// An identity that is both Requester and Approver can't decide its own request.
 	selfToken := appRoleLogin(ctx, t, bao, selfRole)
@@ -492,12 +585,48 @@ grantable "e2e-kv" {
 
 	// The authorizer token can change nothing on an entity except its policies.
 
-	mustCall(t, ctx, bao, authorizerToken, http.MethodPost, "identity/entity/id/"+sessionA.EntityID, map[string]any{"name": "renamed"}, http.StatusForbidden)
-	mustCall(t, ctx, bao, authorizerToken, http.MethodPost, "identity/entity/id/"+sessionA.EntityID, map[string]any{"disabled": true}, http.StatusForbidden)
+	mustCall(t, ctx, bao, authorizerToken, http.MethodPost, "identity/entity/id/"+identityA.EntityID, map[string]any{"name": "renamed"}, http.StatusForbidden)
+	mustCall(t, ctx, bao, authorizerToken, http.MethodPost, "identity/entity/id/"+identityA.EntityID, map[string]any{"disabled": true}, http.StatusForbidden)
 	mustCall(t, ctx, bao, authorizerToken, http.MethodPost, "sys/policies/acl/not-a-grant", map[string]string{"policy": "path \"kv/*\" { capabilities = [\"read\"] }"}, http.StatusForbidden)
 	t.Log("the authorizer token cannot rename or disable entities or write other policies")
 
-	t.Log("real OpenBao session-grant workflow passed")
+	// Logout revokes the Named Token; the next command has no token.
+	if logout := cred.run(ctx, t, identityA.env(), "logout"); logout.exitCode != 0 {
+		t.Fatalf("bao-cred logout = %+v", logout)
+	}
+
+	mustCall(t, ctx, bao, identityA.Token, http.MethodGet, "auth/token/lookup-self", nil, http.StatusForbidden)
+	// Session tokens are children of the Named Token and die with it.
+	mustCall(t, ctx, bao, token1, http.MethodGet, "auth/token/lookup-self", nil, http.StatusForbidden)
+	if afterLogout := cred.run(ctx, t, identityA.env(), "grants"); afterLogout.exitCode != 1 {
+		t.Fatalf("bao-cred grants after logout = %+v", afterLogout)
+	}
+
+	t.Log("bao-cred logout revoked and deleted the Named Token")
+
+	// bao-cred init names the identity in a committed file at the git root;
+	// commands anywhere in the project then need no environment variables.
+	// The developer's own token gets NOT_REQUESTER from GrantService, so a
+	// working `grants` proves the Named Token was used.
+	project := filepath.Join(runtimeDirectory, "e2e-project-c")
+	for _, directory := range []string{filepath.Join(project, ".git"), filepath.Join(project, "src")} {
+		if mkdirErr := os.MkdirAll(directory, 0o755); mkdirErr != nil {
+			t.Fatalf("create project: %v", mkdirErr)
+		}
+	}
+
+	if initialized := cred.runIn(ctx, t, project, nil, "init", "--store", "file"); initialized.exitCode != 0 || !strings.Contains(initialized.stdout, `"identity": "e2e-project-c"`) {
+		t.Fatalf("bao-cred init = %+v", initialized)
+	}
+
+	// Its only Grant is the global one approved earlier.
+	if listed := cred.runIn(ctx, t, filepath.Join(project, "src"), nil, "grants"); listed.exitCode != 0 ||
+		!strings.Contains(listed.stdout, "kv/data/e2e/kappa") || strings.Contains(listed.stdout, "kv/data/e2e/alpha") {
+		t.Fatalf("bao-cred grants inside the project = %+v", listed)
+	}
+
+	t.Log("bao-cred init wrote .bao-identity; bao-cred inside the project used its Named Token without environment variables")
+	t.Log("real OpenBao Named Identity grant workflow passed")
 }
 
 type isolatedProcessPaths struct {
@@ -522,51 +651,6 @@ type liveAPI struct {
 	port    int
 }
 
-type mintedSession struct {
-	SessionID     string `json:"session_id"`
-	RootSessionID string `json:"root_session_id"`
-	EntityAlias   string `json:"entity_alias"`
-	Token         string `json:"token"`
-	EntityID      string `json:"entity_id"`
-}
-
-// sessionMinter runs the opencode plugin's mint CLI, so the E2E exercises the
-// same minting code the plugin uses.
-type sessionMinter struct {
-	bun     string
-	cli     string
-	root    string
-	paths   isolatedProcessPaths
-	address string
-	roleID  string
-	secret  string
-}
-
-func (m sessionMinter) mint(ctx context.Context, t *testing.T, sessionID, title string, parents ...string) mintedSession {
-	t.Helper()
-	arguments := []string{m.cli, "--session-id", sessionID, "--address", m.address, "--role-id-file", m.roleID, "--secret-id-file", m.secret, "--directory", m.root}
-	if title != "" {
-		arguments = append(arguments, "--title", title)
-	}
-
-	for _, parent := range parents {
-		arguments = append(arguments, "--parent", parent)
-	}
-
-	result := runProcess(ctx, m.paths.environment(), m.bun, arguments...)
-	if result.exitCode != 0 {
-		t.Fatalf("mint session %s: exit %d: %s", sessionID, result.exitCode, result.stderr)
-	}
-
-	var session mintedSession
-	decodeResponse(t, []byte(result.stdout), &session)
-	if session.Token == "" {
-		t.Fatalf("mint session %s returned no token", sessionID)
-	}
-
-	return session
-}
-
 type baoCred struct {
 	binary     string
 	paths      isolatedProcessPaths
@@ -574,19 +658,78 @@ type baoCred struct {
 	authorizer string
 }
 
-func (c baoCred) environment(token string) []string {
-	return c.paths.environment("BAO_ADDR="+c.address, "BAO_TOKEN="+token, "BAO_AUTHORIZER_ADDR="+c.authorizer)
+// environment adds the OpenBao and authorizer addresses to requester, the
+// variables that select the Requester's token.
+func (c baoCred) environment(requester []string) []string {
+	return c.paths.environment(append([]string{"BAO_ADDR=" + c.address, "BAO_AUTHORIZER_ADDR=" + c.authorizer}, requester...)...)
 }
 
-func (c baoCred) run(ctx context.Context, t *testing.T, token string, arguments ...string) processResult {
+func (c baoCred) run(ctx context.Context, t *testing.T, requester []string, arguments ...string) processResult {
 	t.Helper()
-	return runProcess(ctx, c.environment(token), c.binary, arguments...)
+	return runProcess(ctx, c.environment(requester), c.binary, arguments...)
 }
 
-func (c baoCred) start(ctx context.Context, token string, arguments ...string) *backgroundProcess {
+func (c baoCred) runIn(ctx context.Context, t *testing.T, directory string, requester []string, arguments ...string) processResult {
+	t.Helper()
+	return runProcessIn(ctx, directory, c.environment(requester), c.binary, arguments...)
+}
+
+func (c baoCred) start(ctx context.Context, requester []string, arguments ...string) *backgroundProcess {
 	done := make(chan processResult, 1)
-	go func() { done <- runProcess(ctx, c.environment(token), c.binary, arguments...) }()
+	go func() { done <- runProcess(ctx, c.environment(requester), c.binary, arguments...) }()
 	return &backgroundProcess{done: done}
+}
+
+// namedIdentity is a Named Token minted by bao-cred auth.
+type namedIdentity struct {
+	Name     string
+	Token    string
+	EntityID string
+	Store    string
+	TTL      time.Duration
+}
+
+// sessionToken reads the session token bao-cred stored for an agent session.
+func (c baoCred) sessionToken(t *testing.T, project, session string) string {
+	t.Helper()
+	token, err := os.ReadFile(filepath.Join(c.paths.home, ".local", "state", "bao-cred", "sessions", project, session+".token"))
+	if err != nil {
+		t.Fatalf("read session token: %v", err)
+	}
+
+	return strings.TrimSpace(string(token))
+}
+
+// env selects the identity the way a project's .envrc does.
+func (i namedIdentity) env() []string { return []string{"BAO_IDENTITY=" + i.Name} }
+
+// auth runs bao-cred auth with the developer's ~/.vault-token and reads the
+// stored token back for direct OpenBao checks.
+func (c baoCred) auth(ctx context.Context, t *testing.T, name string) namedIdentity {
+	t.Helper()
+	result := c.run(ctx, t, nil, "auth", "--store", "file", name)
+	if result.exitCode != 0 {
+		t.Fatalf("bao-cred auth %s = %+v", name, result)
+	}
+
+	var status struct {
+		Identity string `json:"identity"`
+		Store    string `json:"store"`
+		EntityID string `json:"entity_id"`
+		TTL      string `json:"ttl"`
+	}
+	decodeResponse(t, []byte(result.stdout), &status)
+	ttl, err := time.ParseDuration(status.TTL)
+	if err != nil || status.Identity != name {
+		t.Fatalf("bao-cred auth %s status = %+v", name, status)
+	}
+
+	token, err := os.ReadFile(filepath.Join(c.paths.home, ".local", "state", "bao-cred", name+".token"))
+	if err != nil {
+		t.Fatalf("read stored Named Token: %v", err)
+	}
+
+	return namedIdentity{Name: name, Token: strings.TrimSpace(string(token)), EntityID: status.EntityID, Store: status.Store, TTL: ttl}
 }
 
 type processResult struct {
@@ -611,7 +754,12 @@ func (p *backgroundProcess) wait(t *testing.T) processResult {
 }
 
 func runProcess(ctx context.Context, environment []string, binary string, arguments ...string) processResult {
+	return runProcessIn(ctx, "", environment, binary, arguments...)
+}
+
+func runProcessIn(ctx context.Context, directory string, environment []string, binary string, arguments ...string) processResult {
 	command := exec.CommandContext(ctx, binary, arguments...)
+	command.Dir = directory
 	command.Env = environment
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
@@ -746,7 +894,40 @@ func (a *approverClient) decide(ctx context.Context, t *testing.T, request *auth
 	}
 }
 
-func (a *approverClient) activeGrant(ctx context.Context, t *testing.T, sessionID, path string) string {
+// decideScoped approves the item at path with scope.
+func (a *approverClient) decideScoped(ctx context.Context, t *testing.T, request *authorizerv1.GrantRequest, path string, scope authorizerv1.Scope) {
+	t.Helper()
+	for _, item := range request.GetItems() {
+		if item.GetPath() != path {
+			continue
+		}
+
+		decision := &authorizerv1.ItemDecision{ItemId: item.GetId(), Decision: authorizerv1.Decision_DECISION_APPROVE, Scope: scope}
+		if _, err := a.rpc.DecideItems(ctx, connect.NewRequest(&authorizerv1.DecideItemsRequest{
+			GrantRequestId: request.GetId(), Decisions: []*authorizerv1.ItemDecision{decision},
+		})); err != nil {
+			t.Fatalf("decide items: %v", err)
+		}
+
+		return
+	}
+
+	t.Fatalf("no item %s in request %s", path, request.GetId())
+}
+
+// entityGrantPolicies lists the Grant policies attached to an entity.
+func entityGrantPolicies(ctx context.Context, t *testing.T, bao *liveAPI, entityID string) []string {
+	t.Helper()
+	var entity struct {
+		Data struct {
+			Policies []string `json:"policies"`
+		} `json:"data"`
+	}
+	decodeResponse(t, mustCall(t, ctx, bao, rootToken, http.MethodGet, "identity/entity/id/"+entityID, nil, http.StatusOK), &entity)
+	return slices.DeleteFunc(entity.Data.Policies, func(name string) bool { return !strings.HasPrefix(name, "agent-grant-") })
+}
+
+func (a *approverClient) activeGrant(ctx context.Context, t *testing.T, requesterID, path string) string {
 	t.Helper()
 	response, err := a.rpc.ListGrants(ctx, connect.NewRequest(&authorizerv1.ListGrantsRequest{}))
 	if err != nil {
@@ -754,12 +935,12 @@ func (a *approverClient) activeGrant(ctx context.Context, t *testing.T, sessionI
 	}
 
 	for _, grant := range response.Msg.GetGrants() {
-		if grant.GetPath() == path && grant.GetRequester().GetId() == sessionID {
+		if grant.GetPath() == path && grant.GetRequester().GetId() == requesterID {
 			return grant.GetId()
 		}
 	}
 
-	t.Fatalf("no active Grant for %s in session %s: %v", path, sessionID, response.Msg.GetGrants())
+	t.Fatalf("no active Grant for %s of Requester %s: %v", path, requesterID, response.Msg.GetGrants())
 	return ""
 }
 

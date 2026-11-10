@@ -31,23 +31,25 @@ empty so the service does not need a frontend directory at runtime.
   [`authorizer-discover-policy.hcl`](authorizer-discover-policy.hcl))
   and an orphan authorizer token without the default policy;
 - the `approver` user, its `openbao-authorizer-approver` marker policy and the
-  `local-approvers` identity group;
+  `local-approvers` identity group; the user also holds the
+  `named-identity-minter` policy, so it can mint Named Tokens;
 - a `sys/config/cors` entry allowing the public origin, so the PWA can sign
   approvers in to OpenBao from the browser;
-- the `opencode-session` baseline policy and token role
-  (`orphan`, renewable, 24h period, entity aliases `opencode-session-*`);
-- the `opencode-minter` policy and AppRole, which can only call
-  `auth/token/create/opencode-session`;
-- an example secret at `kv/opencode/example`, plus `grantable` rules in
-  `app.hcl` for `kv/data/opencode/*`, `kv/metadata/opencode/*` and
+- the `named-identity` baseline policy and token role (`orphan`, renewable,
+  768h period, any entity alias, plus the project and global Grant policies);
+  the baseline lets Named Tokens mint Session Tokens;
+- the `agent-session` baseline policy and token role (child tokens,
+  renewable, 24h period, any entity alias, plus the Grant policies);
+- the `named-identity-minter` policy, which can only call
+  `auth/token/create/named-identity`;
+- an example secret at `kv/agents/example`, plus `grantable` rules in
+  `app.hcl` for `kv/data/agents/*`, `kv/metadata/agents/*` and
   `github/token/project-*`; the first and last discover their concrete paths
-  from `kv/metadata/opencode` and `github/permissionsets`, which
+  from `kv/metadata/agents` and `github/permissionsets`, which
   `bao-cred grantable` lists;
 - in `app.hcl`, an `approver_login` block offering userpass and token sign-in,
-  and one `requester "opencode"` rule matching the `opencode-session` token
-  role. The minter AppRole shares the `approle` mount, so don't add an
-  `auth_mount = "approle"` rule here; mount a separate AppRole for other
-  Requesters.
+  and `requester "named"` and `requester "sessions"` rules matching the
+  `named-identity` and `agent-session` token roles.
 
 Generated material remains local:
 
@@ -56,8 +58,6 @@ Generated material remains local:
 ~/.config/openbao-authorizer/app.hcl
 ~/.config/openbao-authorizer/encryption-key
 ~/.config/openbao-authorizer/authorizer-token
-~/.config/openbao-authorizer/opencode-minter-role-id
-~/.config/openbao-authorizer/opencode-minter-secret-id
 ```
 
 Sign into the PWA as `approver` with the generated approver password. The
@@ -65,8 +65,7 @@ browser sends the password only to OpenBao and hands the resulting token to the
 authorizer, which revokes it once it has created the app session. Approvers'
 browsers must reach OpenBao at `approver_login.openbao_address`: it defaults to
 `BAO_ADDR`, and `APPROVER_OPENBAO_ADDRESS` in `bootstrap.env` overrides it,
-e.g. with a public route to OpenBao. The opencode plugin reads the minter role ID and secret ID files
-and mints one Session Token per agent session. Never publish these files.
+e.g. with a public route to OpenBao. Never publish these files.
 
 ## Operations
 
@@ -78,25 +77,23 @@ journalctl --user -u openbao-authorizer-openbao.service -u openbao-authorizer.se
 
 Restarting the OpenBao unit also reprovisions it. Because the app is bound to
 that unit, systemd restarts the app with the newly generated authorizer token.
-The in-memory dev server forgets every Grant and Session Identity on restart;
-delete `~/.local/state/openbao-authorizer/app.db` too if stale grants in the
-PWA are confusing.
+The in-memory dev server forgets every Grant, Named Identity and Named Token
+on restart, so run `bao-cred auth` again afterwards; delete
+`~/.local/state/openbao-authorizer/app.db` too if stale grants in the PWA are
+confusing.
 
-### Mint a Session Token by hand
-
-The opencode plugin normally does this. To try the flow from a shell:
+### Mint a Named Token
 
 ```sh
-cd ~/.config/openbao-authorizer
 export BAO_ADDR=http://127.0.0.1:18200
-minter="$(bao write -field=token auth/approle/login \
-  role_id="$(cat opencode-minter-role-id)" secret_id="$(cat opencode-minter-secret-id)")"
-export BAO_TOKEN="$(BAO_TOKEN="${minter}" bao token create -role=opencode-session \
-  -entity-alias=opencode-session-manual -metadata=title="Manual test" \
-  -metadata=directory="${PWD}" -field=token)"
 export BAO_AUTHORIZER_ADDR=http://127.0.0.1:18202
-bao-cred read --reason "Try the local authorizer" kv/data/opencode/example
+bao login -method=userpass username=approver   # password: ~/.config/openbao-authorizer/approver-password
+cd ~/src/some-project && bao-cred init local-test   # or: bao-cred auth local-test, then BAO_IDENTITY=local-test
+bao-cred read --reason "Try the local authorizer" kv/data/agents/example
 ```
+
+The Named Identity is a separate entity from the `approver` user, so the same
+person can approve its requests in the PWA.
 
 ## Updating the application
 
@@ -202,8 +199,8 @@ permission-set administration are refused before an approver sees them.
 
 ### 4. Run `gh` with a Grant
 
-Inside an opencode session the plugin has already put a Session Token in
-`BAO_TOKEN`. When the token lacks access, `bao-cred` files a Grant Request with
+In a project set up with `bao-cred init`, bao-cred uses that identity's Named
+Token. When the token lacks access, `bao-cred` files a Grant Request with
 the given reason, waits for an Approver, and retries the read once:
 
 ```sh
@@ -220,8 +217,8 @@ https://authorizer.example.com
 
 Sign in there as `approver` with the current value of
 `~/.config/openbao-authorizer/approver-password`. The Grant lasts at most one
-hour (the `github-token` rule's `max_ttl`), so later `gh` calls in the same
-session read the path without asking again. The GitHub installation token
+hour (the `github-token` rule's `max_ttl`), so later `gh` calls under the same
+Named Identity read the path without asking again. The GitHub installation token
 expires at GitHub after about one hour and is never written to disk by
 `bao-cred`.
 

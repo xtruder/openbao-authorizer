@@ -363,7 +363,7 @@ func TestGrantsPrintsJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := `[{"id":"grant-1","item_id":"item-1","path":"kv/data/a","capabilities":["read"],` +
+	want := `[{"id":"grant-1","item_id":"item-1","path":"kv/data/a","capabilities":["read"],"scope":"session",` +
 		`"created_at":"2026-10-09T11:00:00Z","expires_at":"2026-10-09T12:00:00Z"}]`
 	if got := compactJSON(t, stdout.Bytes()); got != want {
 		t.Fatalf("stdout = %s\nwant     %s", got, want)

@@ -42,8 +42,14 @@ approver_login {
 # wins. token_role matches the token's role, auth_mount the auth mount it was
 # issued from, so every token of that mount qualifies: don't share the mount with
 # other machine logins. Tokens without an identity entity are always refused.
-requester "opencode" {
-  token_role = "opencode-session"
+# Named Tokens minted by bao-cred auth.
+requester "named" {
+  token_role = "named-identity"
+}
+
+# Agent session tokens, minted by bao-cred from a project's Named Token.
+requester "sessions" {
+  token_role = "agent-session"
 }
 
 requester "ci" {

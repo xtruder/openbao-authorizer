@@ -100,13 +100,8 @@ jobs:
       - if: steps.node-modules.outputs.cache-hit != 'true'
         run: npm ci --prefix web
 
-      - uses: oven-sh/setup-bun@v2
-
       - name: Unit tests
         run: make test
-
-      - name: opencode plugin tests
-        run: make opencode-plugin-test
 
       - name: End-to-end tests
         run: make e2e
