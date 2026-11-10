@@ -106,7 +106,7 @@ container image.
 | Token role `named-identity` | `allowed_policies=["named-identity","agent-grant-global"]`, `allowed_policies_glob=["agent-grant-project-*"]`, `orphan=true`, `renewable=true`, `token_period=768h`, `allowed_entity_aliases=["*"]`. OpenBao caps the period at the token mount's max TTL (768h by default) |
 | Baseline policy `agent-session` | Empty or site-defined ([`deploy/local/agent-session-policy.hcl`](deploy/local/agent-session-policy.hcl)) |
 | Token role `agent-session` | `allowed_policies=["agent-session","agent-grant-global"]`, `allowed_policies_glob=["agent-grant-project-*"]`, `orphan=false`, `renewable=true`, `token_period=24h`, `allowed_entity_aliases=["*"]` |
-| Minter policy `named-identity-minter` | `update` on `auth/token/create/named-identity` only ([`deploy/local/named-identity-minter-policy.hcl`](deploy/local/named-identity-minter-policy.hcl)), on the humans who run `bao-cred auth` |
+| Minter policy `named-identity-minter` | `update` on `auth/token/create/named-identity` only ([`deploy/local/named-identity-minter-policy.hcl`](deploy/local/named-identity-minter-policy.hcl)), on a login used only to run `bao-cred init` and `auth`, such as a `dev` userpass user. Never give it to an approver: `bao login` leaves the token in `~/.vault-token`, where agents can read it, and an approver token would let them approve their own requests |
 | Authorizer policy | [`config/authorizer-policy.hcl`](config/authorizer-policy.hcl), on a dedicated orphan token created without the default policy |
 | Approver policy | [`config/approver-policy.hcl`](config/approver-policy.hcl), on the human approvers' identity group; its name is `openbao.approver_policy` |
 | Approver auth methods | Any of token, userpass, LDAP, GitHub or OIDC, listed in `approver_login`. Approver tokens need an entity |
@@ -232,7 +232,7 @@ flags.
 ### Named Identities
 
 ```sh
-bao login                      # your own token, holding the minter policy
+bao login -method=userpass username=dev   # a login holding only the minter policy
 cd ~/src/myproject
 bao-cred init                  # writes .bao-identity at the git root, mints its token
 git add .bao-identity

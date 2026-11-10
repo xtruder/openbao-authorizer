@@ -31,8 +31,10 @@ empty so the service does not need a frontend directory at runtime.
   [`authorizer-discover-policy.hcl`](authorizer-discover-policy.hcl))
   and an orphan authorizer token without the default policy;
 - the `approver` user, its `openbao-authorizer-approver` marker policy and the
-  `local-approvers` identity group; the user also holds the
-  `named-identity-minter` policy, so it can mint Named Tokens;
+  `local-approvers` identity group;
+- the `dev` user, holding only the `named-identity-minter` policy, which mints
+  Named Tokens with `bao-cred init`. It is separate from `approver` because
+  `bao login` leaves its token in `~/.vault-token`, where agents can read it;
 - a `sys/config/cors` entry allowing the public origin, so the PWA can sign
   approvers in to OpenBao from the browser;
 - the `named-identity` baseline policy and token role (`orphan`, renewable,
@@ -55,6 +57,7 @@ Generated material remains local:
 
 ```text
 ~/.config/openbao-authorizer/approver-password
+~/.config/openbao-authorizer/dev-password
 ~/.config/openbao-authorizer/app.hcl
 ~/.config/openbao-authorizer/encryption-key
 ~/.config/openbao-authorizer/authorizer-token
@@ -87,13 +90,14 @@ confusing.
 ```sh
 export BAO_ADDR=http://127.0.0.1:18200
 export BAO_AUTHORIZER_ADDR=http://127.0.0.1:18202
-bao login -method=userpass username=approver   # password: ~/.config/openbao-authorizer/approver-password
+bao login -method=userpass username=dev   # password: ~/.config/openbao-authorizer/dev-password
 cd ~/src/some-project && bao-cred init local-test   # or: bao-cred auth local-test, then BAO_IDENTITY=local-test
 bao-cred read --reason "Try the local authorizer" kv/data/agents/example
 ```
 
-The Named Identity is a separate entity from the `approver` user, so the same
-person can approve its requests in the PWA.
+Approve its requests in the PWA as `approver`. Keep the approver's password
+for the browser only: an approver token in `~/.vault-token` would let agents
+approve their own requests.
 
 ## Updating the application
 

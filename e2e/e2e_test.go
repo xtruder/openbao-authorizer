@@ -38,7 +38,7 @@ const (
 	minterPolicy     = "named-identity-minter"
 	tokenRole        = "named-identity"
 	sessionRole      = "agent-session"
-	developerPass    = "developer-e2e-password"
+	developerPass    = "dev-e2e-password"
 	ciRole           = "ci"
 	selfRole         = "self-approver"
 )
@@ -163,7 +163,7 @@ func TestNamedIdentityGrantWorkflow(t *testing.T) {
 		"password": approverPassword, "token_policies": []string{approverPolicy},
 	}, http.StatusOK, http.StatusNoContent)
 	// The developer mints Named Tokens with their own login token.
-	mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/userpass/users/developer", map[string]any{
+	mustCall(t, ctx, bao, rootToken, http.MethodPost, "auth/userpass/users/dev", map[string]any{
 		"password": developerPass, "token_policies": []string{minterPolicy},
 	}, http.StatusOK, http.StatusNoContent)
 	authorizerToken := createToken(ctx, t, bao, map[string]any{"policies": []string{authorizerPolicy}, "no_default_policy": true, "ttl": "1h"})
@@ -272,7 +272,7 @@ grantable "e2e-kv" {
 
 	// The developer logs in as `bao login` would, writing ~/.vault-token
 	// into the isolated HOME that bao-cred auth reads.
-	developerToken := responseAuthToken(t, mustCall(t, ctx, bao, "", http.MethodPost, "auth/userpass/login/developer", map[string]string{"password": developerPass}, http.StatusOK))
+	developerToken := responseAuthToken(t, mustCall(t, ctx, bao, "", http.MethodPost, "auth/userpass/login/dev", map[string]string{"password": developerPass}, http.StatusOK))
 	writeSecretFile(t, filepath.Join(isolatedHome, ".vault-token"), developerToken)
 	cred := baoCred{binary: baoCredBinary, paths: processPaths, address: baoAddress, authorizer: application.baseURL}
 	identityA := cred.auth(ctx, t, "e2e-project-a")

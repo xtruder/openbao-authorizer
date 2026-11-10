@@ -80,7 +80,7 @@ if ! "${OPENBAO_BIN}" secrets list -format=json | jq -e 'has("github/")' >/dev/n
 fi
 
 "${OPENBAO_BIN}" write auth/userpass/users/approver \
-  password="${APPROVER_PASSWORD}" policies=openbao-authorizer-approver,named-identity-minter token_period=24h >/dev/null
+  password="${APPROVER_PASSWORD}" policies=openbao-authorizer-approver token_period=24h >/dev/null
 
 approver_login="$("${OPENBAO_BIN}" write -format=json auth/userpass/login/approver password="${APPROVER_PASSWORD}")"
 approver_entity="$(jq -er '.auth.entity_id' <<<"${approver_login}")"
@@ -124,6 +124,17 @@ authorizer_token="$(jq -er '.auth.client_token' <<<"${authorizer_response}")"
 
 config_directory="$(dirname "${APP_CONFIG_FILE}")"
 install -d -m 0700 "${config_directory}"
+
+# The dev user only mints Named Tokens with `bao-cred init`. It is separate
+# from the approver because `bao login` leaves its token in ~/.vault-token,
+# where agents can read it, and an approver token would let them approve
+# their own requests.
+if [[ ! -s "${config_directory}/dev-password" ]]; then
+  openssl rand -base64 24 | tr -d '\n' >"${config_directory}/dev-password"
+fi
+chmod 0600 "${config_directory}/dev-password"
+"${OPENBAO_BIN}" write auth/userpass/users/dev \
+  password=@"${config_directory}/dev-password" policies=named-identity-minter token_period=24h >/dev/null
 printf '%s\n' "${APP_ENCRYPTION_KEY}" >"${config_directory}/encryption-key"
 printf '%s\n' "${authorizer_token}" >"${config_directory}/authorizer-token"
 chmod 0600 "${config_directory}/encryption-key" "${config_directory}/authorizer-token"
