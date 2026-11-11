@@ -341,11 +341,12 @@ cd ~/src/myproject && bao kv get -mount=kv app/config   # as the project's ident
 
 The CLI's `token_helper` must name an existing file, so bao-cred answers to the
 name `bao-cred-token-helper` as `bao-cred token-helper`. Release archives and
-the Homebrew formula ship that link next to `bao-cred`. `--setup` creates it
-when it is missing, next to the `bao-cred` you run as found on `PATH`, so a
-package manager's upgrades keep it working, and writes `token_helper` to
-`~/.bao` (or `$BAO_CONFIG_PATH`). Rerunning changes nothing; a link to another
-program or a different `~/.bao` is replaced only with `--force`.
+the Homebrew formula ship that link next to `bao-cred`. `--setup` uses a link
+that runs the same `bao-cred`, next to it or on `PATH`; otherwise it creates
+one next to the `bao-cred` you run, as found on `PATH`, so a package manager's
+upgrades keep it working. It then writes `token_helper` to `~/.bao` (or
+`$BAO_CONFIG_PATH`). Rerunning changes nothing; a link to another program or
+a different `~/.bao` is replaced only with `--force`.
 
 - `get` prints the token, renewing, re-minting and minting Session Tokens as
   every bao-cred command does. A selected identity without a token is an

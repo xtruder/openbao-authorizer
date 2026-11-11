@@ -139,35 +139,15 @@ func baoConfigPath() (string, error) {
 	return filepath.Join(home, ".bao"), nil
 }
 
-// setupTokenHelper links tokenHelperName to executable in its directory and
-// writes config naming the link as the bao CLI's token_helper. It leaves a
-// link or config that is already right alone, including a link a release
-// archive or package manager made, which resolves to the same file, and
-// replaces different ones only with force.
+// setupTokenHelper names a tokenHelperName link to executable as the bao
+// CLI's token_helper in config. It uses an existing link that resolves to
+// executable, next to it or on PATH, as release archives and package
+// managers ship one, and otherwise creates one next to executable. A link to
+// another program, or a different config, is replaced only with force.
 func setupTokenHelper(executable, config string, force bool, progress progressFunc) error {
-	link := filepath.Join(filepath.Dir(executable), tokenHelperName)
-	// A relative target keeps working when the directory moves.
-	target := filepath.Base(executable)
-	switch current, err := os.Readlink(link); {
-	case err == nil && (current == target || sameFile(link, executable)):
-	case err != nil && errors.Is(err, fs.ErrNotExist):
-		if err := os.Symlink(target, link); err != nil {
-			return fmt.Errorf("link %s: %w", link, err)
-		}
-
-		progress(fmt.Sprintf("linked %s to %s", link, target))
-	case !force:
-		return fmt.Errorf("%s already exists and doesn't link to %s; pass --force to replace it", link, target)
-	default:
-		if err := os.Remove(link); err != nil {
-			return fmt.Errorf("replace %s: %w", link, err)
-		}
-
-		if err := os.Symlink(target, link); err != nil {
-			return fmt.Errorf("link %s: %w", link, err)
-		}
-
-		progress(fmt.Sprintf("replaced %s with a link to %s", link, target))
+	link, err := tokenHelperLink(executable, force, progress)
+	if err != nil {
+		return err
 	}
 
 	want := fmt.Sprintf("token_helper = %q\n", link)
@@ -187,6 +167,45 @@ func setupTokenHelper(executable, config string, force bool, progress progressFu
 
 	progress(fmt.Sprintf("wrote %s: bao now gets its token from bao-cred", config))
 	return nil
+}
+
+// tokenHelperLink returns the tokenHelperName link that runs executable,
+// creating it next to executable when neither that directory nor PATH has
+// one. A link on PATH to another bao-cred is not used: bao would run a
+// different version than the one being set up.
+func tokenHelperLink(executable string, force bool, progress progressFunc) (string, error) {
+	link := filepath.Join(filepath.Dir(executable), tokenHelperName)
+	if sameFile(link, executable) {
+		return link, nil
+	}
+
+	if found, err := exec.LookPath(tokenHelperName); err == nil {
+		if found, err = filepath.Abs(found); err == nil && sameFile(found, executable) {
+			progress(fmt.Sprintf("using %s on PATH", found))
+			return found, nil
+		}
+	}
+
+	// A relative target keeps working when the directory moves.
+	target := filepath.Base(executable)
+	switch _, err := os.Lstat(link); {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		return "", fmt.Errorf("check %s: %w", link, err)
+	case !force:
+		return "", fmt.Errorf("%s already exists and doesn't run %s; pass --force to replace it", link, executable)
+	default:
+		if err := os.Remove(link); err != nil {
+			return "", fmt.Errorf("replace %s: %w", link, err)
+		}
+	}
+
+	if err := os.Symlink(target, link); err != nil {
+		return "", fmt.Errorf("link %s: %w", link, err)
+	}
+
+	progress(fmt.Sprintf("linked %s to %s", link, target))
+	return link, nil
 }
 
 // tokenHelperGet prints the token without a newline, or nothing when there is

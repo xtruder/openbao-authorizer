@@ -128,6 +128,7 @@ func TestTokenHelperUsageErrors(t *testing.T) {
 }
 
 func TestTokenHelperSetup(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
 	bin := t.TempDir()
 	executable := filepath.Join(bin, "bao-cred")
 	writeTestFile(t, executable, "#!/bin/sh\n")
@@ -183,6 +184,7 @@ func TestTokenHelperSetup(t *testing.T) {
 func TestTokenHelperSetupKeepsAPackageManagersLink(t *testing.T) {
 	// Homebrew links bin/bao-cred and bin/bao-cred-token-helper to the
 	// versioned files in its Cellar.
+	t.Setenv("PATH", t.TempDir())
 	prefix := t.TempDir()
 	cellar := filepath.Join(prefix, "Cellar", "openbao-authorizer", "1.0.0", "bin")
 	bin := filepath.Join(prefix, "bin")
@@ -214,6 +216,48 @@ func TestTokenHelperSetupKeepsAPackageManagersLink(t *testing.T) {
 
 	// The config names the stable prefix path, which upgrades relink.
 	if contents, err := os.ReadFile(config); err != nil || !strings.Contains(string(contents), filepath.Join(bin, tokenHelperName)) {
+		t.Fatalf("config = %q, %v", contents, err)
+	}
+}
+
+func TestTokenHelperSetupUsesAHelperOnPath(t *testing.T) {
+	installed := t.TempDir()
+	executable := filepath.Join(installed, "bao-cred")
+	writeTestFile(t, executable, "#!/bin/sh\n")
+	// PATH lookups find only executables.
+	if err := os.Chmod(executable, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// A helper elsewhere on PATH that runs the same bao-cred is used as is.
+	onPath := t.TempDir()
+	t.Setenv("PATH", onPath)
+	if err := os.Symlink(executable, filepath.Join(onPath, tokenHelperName)); err != nil {
+		t.Fatal(err)
+	}
+
+	config := filepath.Join(t.TempDir(), ".bao")
+	if err := setupTokenHelper(executable, config, false, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+
+	if contents, err := os.ReadFile(config); err != nil || !strings.Contains(string(contents), filepath.Join(onPath, tokenHelperName)) {
+		t.Fatalf("config = %q, %v", contents, err)
+	}
+
+	if _, err := os.Lstat(filepath.Join(installed, tokenHelperName)); !os.IsNotExist(err) {
+		t.Fatalf("setup linked next to bao-cred despite the helper on PATH: %v", err)
+	}
+
+	// One that runs another bao-cred is not: setup links next to this one.
+	other := filepath.Join(t.TempDir(), "bao-cred")
+	writeTestFile(t, other, "#!/bin/sh\n")
+	config = filepath.Join(t.TempDir(), ".bao")
+	if err := setupTokenHelper(other, config, false, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+
+	if contents, err := os.ReadFile(config); err != nil || !strings.Contains(string(contents), filepath.Join(filepath.Dir(other), tokenHelperName)) {
 		t.Fatalf("config = %q, %v", contents, err)
 	}
 }
