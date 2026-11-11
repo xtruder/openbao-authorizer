@@ -833,8 +833,8 @@ grantable "e2e-ssh" {
 	}
 
 	tokenHelper := filepath.Join(filepath.Dir(baoCredCopy), "bao-cred-token-helper")
-	if config, readErr := os.ReadFile(filepath.Join(processPaths.home, ".bao")); readErr != nil || !strings.Contains(string(config), tokenHelper) {
-		t.Fatalf("~/.bao = %q, %v", config, readErr)
+	if config, configErr := os.ReadFile(filepath.Join(processPaths.home, ".bao")); configErr != nil || !strings.Contains(string(config), tokenHelper) {
+		t.Fatalf("~/.bao = %q, %v", config, configErr)
 	}
 
 	baoCLI := func(directory string, arguments ...string) processResult {
