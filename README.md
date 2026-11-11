@@ -329,16 +329,20 @@ deletes them from every store.
 
 bao-cred can be the `bao` CLI's token helper, so plain `bao` commands use the
 token bao-cred would: in a project with an identity, its Named Token (its
-Session Token inside an Agent Session); elsewhere, your `bao login` token. The
-CLI's `token_helper` must name an existing file, so link bao-cred under the
-name `bao-cred-token-helper`, which makes it act as `bao-cred token-helper`:
+Session Token inside an Agent Session); elsewhere, your `bao login` token, so
+no token sits in a config file or `.envrc`.
 
 ```sh
-ln -s bao-cred ~/.local/bin/bao-cred-token-helper
-echo "token_helper = \"$HOME/.local/bin/bao-cred-token-helper\"" > ~/.bao   # or $BAO_CONFIG_PATH
-
+bao-cred token-helper --setup
 cd ~/src/myproject && bao kv get -mount=kv app/config   # as the project's identity
 ```
+
+The CLI's `token_helper` must name an existing file, so bao-cred answers to the
+name `bao-cred-token-helper` as `bao-cred token-helper`. `--setup` links that
+name next to the `bao-cred` you run, as found on `PATH` so a package manager's
+upgrades keep it working, and writes `token_helper` to `~/.bao` (or
+`$BAO_CONFIG_PATH`). Rerunning changes nothing; a different link or `~/.bao`
+is replaced only with `--force`.
 
 - `get` prints the token, renewing, re-minting and minting Session Tokens as
   every bao-cred command does. A selected identity without a token is an

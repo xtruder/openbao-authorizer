@@ -818,16 +818,25 @@ grantable "e2e-ssh" {
 	// With bao-cred as the bao CLI's token helper, plain bao commands in the
 	// project act as its identity and elsewhere as the developer, and
 	// bao login stores the developer's token where bao-cred mints from.
-	tokenHelper := filepath.Join(runtimeDirectory, "bin", "bao-cred-token-helper")
-	if mkdirErr := os.MkdirAll(filepath.Dir(tokenHelper), 0o755); mkdirErr != nil {
+	// --setup links the helper name next to the binary and writes ~/.bao.
+	baoCredCopy := filepath.Join(runtimeDirectory, "bin", "bao-cred")
+	if mkdirErr := os.MkdirAll(filepath.Dir(baoCredCopy), 0o755); mkdirErr != nil {
 		t.Fatalf("create helper directory: %v", mkdirErr)
 	}
 
-	if linkErr := os.Symlink(baoCredBinary, tokenHelper); linkErr != nil {
-		t.Fatalf("link the token helper: %v", linkErr)
+	if linkErr := os.Symlink(baoCredBinary, baoCredCopy); linkErr != nil {
+		t.Fatalf("link bao-cred: %v", linkErr)
 	}
 
-	writeSecretFile(t, filepath.Join(processPaths.home, ".bao"), fmt.Sprintf("token_helper = %q\n", tokenHelper))
+	if setup := runProcessIn(ctx, workdir, processPaths.environment(), baoCredCopy, "token-helper", "--setup"); setup.exitCode != 0 {
+		t.Fatalf("bao-cred token-helper --setup = %+v", setup)
+	}
+
+	tokenHelper := filepath.Join(filepath.Dir(baoCredCopy), "bao-cred-token-helper")
+	if config, readErr := os.ReadFile(filepath.Join(processPaths.home, ".bao")); readErr != nil || !strings.Contains(string(config), tokenHelper) {
+		t.Fatalf("~/.bao = %q, %v", config, readErr)
+	}
+
 	baoCLI := func(directory string, arguments ...string) processResult {
 		return runProcessIn(ctx, directory, processPaths.environment("BAO_ADDR="+baoAddress), baoBinary, arguments...)
 	}

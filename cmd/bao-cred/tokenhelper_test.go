@@ -126,3 +126,64 @@ func TestTokenHelperUsageErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestTokenHelperSetup(t *testing.T) {
+	bin := t.TempDir()
+	executable := filepath.Join(bin, "bao-cred")
+	writeTestFile(t, executable, "#!/bin/sh\n")
+	config := filepath.Join(t.TempDir(), ".bao")
+	link := filepath.Join(bin, tokenHelperName)
+	want := `token_helper = "` + link + `"` + "\n"
+
+	// Setup links the helper name and names the link in the config; a rerun
+	// changes nothing.
+	for range 2 {
+		if err := setupTokenHelper(executable, config, false, func(string) {}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if target, err := os.Readlink(link); err != nil || target != "bao-cred" {
+		t.Fatalf("link = %q, %v", target, err)
+	}
+
+	if contents, err := os.ReadFile(config); err != nil || string(contents) != want {
+		t.Fatalf("config = %q, %v", contents, err)
+	}
+
+	// A different config or link is replaced only with force.
+	writeTestFile(t, config, `token_helper = "/usr/local/bin/other"`+"\n")
+	if err := setupTokenHelper(executable, config, false, func(string) {}); err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("other config: %v", err)
+	}
+
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Symlink("/usr/local/bin/other", link); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := setupTokenHelper(executable, config, false, func(string) {}); err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("other link: %v", err)
+	}
+
+	if err := setupTokenHelper(executable, config, true, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+
+	target, linkErr := os.Readlink(link)
+	contents, configErr := os.ReadFile(config)
+	if linkErr != nil || target != "bao-cred" || configErr != nil || string(contents) != want {
+		t.Fatalf("after --force: link %q (%v), config %q (%v)", target, linkErr, contents, configErr)
+	}
+}
+
+func TestTokenHelperSetupUsageErrors(t *testing.T) {
+	for _, arguments := range [][]string{{"token-helper", "--setup", "get"}, {"token-helper", "--force", "get"}} {
+		if err := run(arguments, &bytes.Buffer{}, &bytes.Buffer{}); exitCode(err) != exitUsage {
+			t.Errorf("%v: error = %v", arguments, err)
+		}
+	}
+}

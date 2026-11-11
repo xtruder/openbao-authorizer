@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -30,27 +31,40 @@ func commandArguments(argv []string) []string {
 }
 
 func newTokenHelperCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:   "token-helper get|store|erase",
+	var setup, force bool
+	command := &cobra.Command{
+		Use:   "token-helper get|store|erase | --setup",
 		Short: "Act as the bao CLI's token helper",
 		Long: `Implements the bao CLI's token helper protocol, so plain bao commands use the
 token bao-cred would: inside a project with an identity, its Session Token in
 an Agent Session, else its Named Token; elsewhere, your bao login token.
 
-The CLI needs a file path, so link bao-cred under the name ` + tokenHelperName + `
-and name that link in ~/.bao (or $BAO_CONFIG_PATH):
-
-  ln -s bao-cred ~/.local/bin/` + tokenHelperName + `
-  echo 'token_helper = "'$HOME'/.local/bin/` + tokenHelperName + `"' > ~/.bao
+The CLI needs a file path, so bao-cred answers to the name ` + tokenHelperName + `
+as bao-cred token-helper. --setup links that name next to the bao-cred you
+run and names the link as token_helper in ~/.bao (or $BAO_CONFIG_PATH). It is
+safe to rerun; --force replaces a different link or config.
 
 get prints the token. store, called by bao login, writes the login token to
 ~/.vault-token, where bao-cred mints Named Tokens from. erase, called by bao
 logout and bao token revoke -self, deletes ~/.vault-token, unless an identity
 is selected: the token revoked was then the identity's, which bao-cred mints
 again on next use. BAO_TOKEN and VAULT_TOKEN bypass the helper, as always.`,
-		Example: `  bao read kv/data/app        # in a project: as the project's identity
+		Example: `  bao-cred token-helper --setup
+  bao read kv/data/app        # in a project: as the project's identity
   BAO_TOKEN=$(cat ~/.vault-token) bao policy list   # as yourself inside a project`,
 		Args: func(command *cobra.Command, arguments []string) error {
+			if setup {
+				if len(arguments) != 0 {
+					return usageError(errors.New("--setup takes no operation"))
+				}
+
+				return nil
+			}
+
+			if force {
+				return usageError(errors.New("--force only applies to --setup"))
+			}
+
 			if len(arguments) != 1 {
 				return usageError(fmt.Errorf("%s needs exactly one operation: get, store, or erase", command.Name()))
 			}
@@ -58,6 +72,20 @@ again on next use. BAO_TOKEN and VAULT_TOKEN bypass the helper, as always.`,
 			return nil
 		},
 		RunE: func(command *cobra.Command, arguments []string) error {
+			if setup {
+				executable, err := invokedExecutable()
+				if err != nil {
+					return err
+				}
+
+				config, err := baoConfigPath()
+				if err != nil {
+					return err
+				}
+
+				return setupTokenHelper(executable, config, force, newProgress(command.ErrOrStderr(), false))
+			}
+
 			identity := identityFlag(command)
 			switch arguments[0] {
 			case "get":
@@ -71,6 +99,87 @@ again on next use. BAO_TOKEN and VAULT_TOKEN bypass the helper, as always.`,
 			}
 		},
 	}
+
+	command.Flags().BoolVar(&setup, "setup", false, "link "+tokenHelperName+" and name it as token_helper in ~/.bao")
+	command.Flags().BoolVar(&force, "force", false, "with --setup, replace a different link or token_helper")
+	return command
+}
+
+// invokedExecutable is the bao-cred that was run, as invoked: through PATH
+// that is the stable path of a package manager's link, such as Homebrew's,
+// where os.Executable would resolve to a versioned file an upgrade removes.
+func invokedExecutable() (string, error) {
+	path, err := exec.LookPath(os.Args[0])
+	if err != nil {
+		if path, err = os.Executable(); err != nil {
+			return "", fmt.Errorf("locate bao-cred: %w", err)
+		}
+	}
+
+	return filepath.Abs(path)
+}
+
+// baoConfigPath is the bao CLI's config file: $BAO_CONFIG_PATH, else ~/.bao.
+func baoConfigPath() (string, error) {
+	if path := os.Getenv("BAO_CONFIG_PATH"); path != "" {
+		return filepath.Abs(path)
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("locate home directory: %w", err)
+	}
+
+	return filepath.Join(home, ".bao"), nil
+}
+
+// setupTokenHelper links tokenHelperName to executable in its directory and
+// writes config naming the link as the bao CLI's token_helper. It leaves a
+// link or config that is already right alone and replaces different ones
+// only with force.
+func setupTokenHelper(executable, config string, force bool, progress progressFunc) error {
+	link := filepath.Join(filepath.Dir(executable), tokenHelperName)
+	// A relative target keeps working when the directory moves.
+	target := filepath.Base(executable)
+	switch current, err := os.Readlink(link); {
+	case err == nil && current == target:
+	case err != nil && errors.Is(err, fs.ErrNotExist):
+		if err := os.Symlink(target, link); err != nil {
+			return fmt.Errorf("link %s: %w", link, err)
+		}
+
+		progress(fmt.Sprintf("linked %s to %s", link, target))
+	case !force:
+		return fmt.Errorf("%s already exists and doesn't link to %s; pass --force to replace it", link, target)
+	default:
+		if err := os.Remove(link); err != nil {
+			return fmt.Errorf("replace %s: %w", link, err)
+		}
+
+		if err := os.Symlink(target, link); err != nil {
+			return fmt.Errorf("link %s: %w", link, err)
+		}
+
+		progress(fmt.Sprintf("replaced %s with a link to %s", link, target))
+	}
+
+	want := fmt.Sprintf("token_helper = %q\n", link)
+	switch contents, err := os.ReadFile(config); { // #nosec G304 -- the bao CLI's own config file.
+	case err == nil && string(contents) == want:
+		progress(fmt.Sprintf("%s already names %s", config, link))
+		return nil
+	case err == nil && !force:
+		return fmt.Errorf("%s already exists with other settings; pass --force to replace it with: %s", config, strings.TrimSpace(want))
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("read %s: %w", config, err)
+	}
+
+	if err := writeFile(config, []byte(want)); err != nil {
+		return err
+	}
+
+	progress(fmt.Sprintf("wrote %s: bao now gets its token from bao-cred", config))
+	return nil
 }
 
 // tokenHelperGet prints the token without a newline, or nothing when there is
