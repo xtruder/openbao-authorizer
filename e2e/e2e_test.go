@@ -5,6 +5,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -23,6 +24,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"golang.org/x/crypto/ssh"
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	authorizerv1 "github.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1"
@@ -133,6 +135,16 @@ func TestNamedIdentityGrantWorkflow(t *testing.T) {
 		}, http.StatusOK)
 	}
 
+	// An SSH CA whose e2e-node role signs only the core@e2e-node principal,
+	// as a homelab role per node and user does.
+	mustCall(t, ctx, bao, rootToken, http.MethodPost, "sys/mounts/ssh", map[string]string{"type": "ssh"}, http.StatusOK, http.StatusNoContent)
+	mustCall(t, ctx, bao, rootToken, http.MethodPost, "ssh/config/ca", map[string]any{"generate_signing_key": true}, http.StatusOK, http.StatusNoContent)
+	mustCall(t, ctx, bao, rootToken, http.MethodPost, "ssh/roles/e2e-node", map[string]any{
+		"key_type": "ca", "allow_user_certificates": true, "allowed_users": "core@e2e-node", "default_user": "core@e2e-node",
+		"ttl": "5m", "max_ttl": "10m", "allowed_extensions": "permit-pty", "default_extensions": map[string]string{"permit-pty": ""},
+		"key_id_format": "{{role_name}}-{{token_display_name}}",
+	}, http.StatusOK, http.StatusNoContent)
+
 	// The e2e-kv rule discovers its paths by listing kv/metadata/e2e.
 	writePolicy(ctx, t, bao, authorizerPolicy, readRepositoryFile(t, repositoryRoot, "config/authorizer-policy.hcl")+
 		"path \"kv/metadata/e2e\" {\n  capabilities = [\"list\"]\n}\n")
@@ -223,6 +235,12 @@ grantable "e2e-kv" {
   max_ttl      = "2h"
   description  = "E2E secrets"
   discover     = "kv/metadata/e2e"
+}
+grantable "e2e-ssh" {
+  path         = "ssh/sign/*"
+  capabilities = ["update"]
+  max_ttl      = "1h"
+  description  = "SSH certificates"
 }
 `, staticDirectory, filepath.Join(runtimeDirectory, "app.db"), encryptionKeyFile, baoAddress, authorizerTokenFile, approverPolicy, baoAddress, tokenRole, sessionRole)
 	writeSecretFile(t, appConfig, configuration)
@@ -532,7 +550,7 @@ grantable "e2e-kv" {
 		Paths         []string `json:"paths"`
 		DiscoverError string   `json:"discover_error"`
 	}
-	if catalog.exitCode != 0 || json.Unmarshal([]byte(catalog.stdout), &grantables) != nil || len(grantables) != 1 {
+	if catalog.exitCode != 0 || json.Unmarshal([]byte(catalog.stdout), &grantables) != nil || len(grantables) != 2 || grantables[1].Name != "e2e-ssh" {
 		t.Fatalf("bao-cred grantable = %+v", catalog)
 	}
 
@@ -549,6 +567,48 @@ grantable "e2e-kv" {
 	}
 
 	t.Log("bao-cred grantable listed kv/data/e2e/theta from kv/metadata/e2e; reading it with --reason worked after approval")
+
+	// A write with --reason requests update on denial, then has OpenBao sign
+	// an SSH key with the role's fixed principal.
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate SSH key: %v", err)
+	}
+
+	signer, err := ssh.NewSignerFromKey(privateKey)
+	if err != nil {
+		t.Fatalf("SSH signer: %v", err)
+	}
+
+	publicKeyFile := filepath.Join(runtimeDirectory, "ssh-key.pub")
+	certificateFile := filepath.Join(runtimeDirectory, "ssh-key-cert.pub")
+	writeSecretFile(t, publicKeyFile, string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
+	signing := cred.start(ctx, identityB.env(), "write", "--reason", "e2e: ssh to e2e-node", "--field", "signed_key",
+		"--output", certificateFile, "--timeout", "2m", "ssh/sign/e2e-node", "public_key=@"+publicKeyFile)
+	signRequest := approver.waitForPending(ctx, t, "ssh/sign/e2e-node")
+	approver.decide(ctx, t, signRequest, map[string]authorizerv1.Decision{"ssh/sign/e2e-node": authorizerv1.Decision_DECISION_APPROVE}, nil)
+	if result := signing.wait(t); result.exitCode != 0 || result.stdout != "" {
+		t.Fatalf("bao-cred write ssh/sign/e2e-node = %+v", result)
+	}
+
+	signed, err := os.ReadFile(certificateFile)
+	if err != nil {
+		t.Fatalf("read SSH certificate: %v", err)
+	}
+
+	parsedKey, _, _, _, err := ssh.ParseAuthorizedKey(signed)
+	certificate, isCertificate := parsedKey.(*ssh.Certificate)
+	if err != nil || !isCertificate || certificate.CertType != ssh.UserCert ||
+		!slices.Equal(certificate.ValidPrincipals, []string{"core@e2e-node"}) || !strings.HasPrefix(certificate.KeyId, "e2e-node-") ||
+		!bytes.Equal(certificate.Key.Marshal(), signer.PublicKey().Marshal()) {
+		t.Fatalf("SSH certificate = %+v, %v", parsedKey, err)
+	}
+
+	if lifetime := time.Duration(certificate.ValidBefore-certificate.ValidAfter) * time.Second; lifetime > 6*time.Minute {
+		t.Fatalf("SSH certificate lifetime = %s, want the role's 5m", lifetime)
+	}
+
+	t.Log("bao-cred write --reason requested update on ssh/sign/e2e-node and wrote a certificate for core@e2e-node only")
 
 	// Only tokens matching a Requester Rule may request Grants.
 	humanToken := responseAuthToken(t, mustCall(t, ctx, bao, "", http.MethodPost, "auth/userpass/login/approver", map[string]string{"password": approverPassword}, http.StatusOK))

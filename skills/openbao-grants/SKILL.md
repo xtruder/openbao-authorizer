@@ -1,6 +1,6 @@
 ---
 name: openbao-grants
-description: Use when a task needs a secret or credential from OpenBao/Vault (API tokens, database passwords, cloud keys, `bao`/`vault` CLI, secretspec `openbao://`), when an OpenBao read or secretspec fails with permission denied, or when you must ask a human to grant access with bao-cred.
+description: Use when a task needs a secret or credential from OpenBao/Vault (API tokens, database passwords, cloud keys, `bao`/`vault` CLI, secretspec `openbao://`), when an OpenBao read or secretspec fails with permission denied, when signing an SSH key or calling another OpenBao endpoint that takes parameters, or when you must ask a human to grant access with bao-cred.
 ---
 
 # OpenBao grants
@@ -39,6 +39,19 @@ bao-cred read --reason "Run the integration tests against the staging DB" \
 - `bao-cred read [flags] <path> [-- command ...]` reads `<path>`. With `--reason`, a permission-denied read files a Grant Request for `PATH=read`, waits for the Approver, then retries once. Without `--reason` it just fails with a hint.
 - Output options: `--map ENV=field` (repeatable; with `-- command` it sets the command's environment), `--output FILE` (mode 0600), `--format json|dotenv|shell|template`, `--field NAME` (one value to stdout).
 - Flags take two dashes (`--reason`, not `-reason`). Everything after `--` goes to the command unchanged.
+
+## Write to an endpoint
+
+Some endpoints take parameters and return a credential, such as `ssh/sign/<role>`, which signs an SSH public key:
+
+```sh
+bao-cred write --reason "Deploy the app to jarvis as the user asked" --field signed_key \
+  --output "$dir/key-cert.pub" ssh/sign/jarvis-core public_key=@"$dir/key.pub"
+```
+
+- `bao-cred write [flags] <path> [key=value ...] [-- command ...]` writes the pairs and delivers the response like `read`. `key=@file` reads a value from a file, `key=-` from stdin.
+- With `--reason`, a permission-denied write files a Grant Request for `PATH=update` (`--capabilities create,update` for a path that may not exist yet), waits, then retries once.
+- Pick an existing role from `bao-cred grantable`; the role, not your parameters, decides what you get.
 
 ## Request several paths at once
 

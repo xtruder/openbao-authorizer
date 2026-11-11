@@ -32,6 +32,65 @@ func readCredentials(ctx context.Context, client *openbao.Client, path string) (
 	return secret.Data, nil
 }
 
+// writeCredentials writes data to path and returns the response's data
+// object, which is empty for endpoints that return no content.
+func writeCredentials(ctx context.Context, client *openbao.Client, path string, data map[string]any) (map[string]any, error) {
+	secret, err := client.Logical().WriteWithContext(ctx, path, data)
+	if err != nil {
+		return nil, fmt.Errorf("write %q: %w", path, err)
+	}
+
+	if secret == nil || secret.Data == nil {
+		return map[string]any{}, nil
+	}
+
+	return secret.Data, nil
+}
+
+// parseWriteData parses write's key=value arguments like bao write does:
+// key=@file takes the value from a file and key=- from stdin, at most once.
+// Malformed arguments are usage errors; unreadable files are not.
+func parseWriteData(arguments []string, stdin io.Reader) (map[string]any, error) {
+	data := make(map[string]any, len(arguments))
+	stdinUsed := false
+	for _, argument := range arguments {
+		key, value, ok := strings.Cut(argument, "=")
+		if !ok || key == "" {
+			return nil, usageError(fmt.Errorf("data must be key=value, key=@file, or key=-: %q", argument))
+		}
+
+		if _, duplicate := data[key]; duplicate {
+			return nil, usageError(fmt.Errorf("duplicate data key %q", key))
+		}
+
+		switch {
+		case value == "-":
+			if stdinUsed {
+				return nil, usageError(errors.New("only one data value can be read from stdin"))
+			}
+
+			stdinUsed = true
+			contents, err := io.ReadAll(stdin)
+			if err != nil {
+				return nil, fmt.Errorf("read %s from stdin: %w", key, err)
+			}
+
+			value = string(contents)
+		case strings.HasPrefix(value, "@"):
+			contents, err := os.ReadFile(value[1:]) // #nosec G304 -- the user names the file to send.
+			if err != nil {
+				return nil, fmt.Errorf("read %s: %w", key, err)
+			}
+
+			value = string(contents)
+		}
+
+		data[key] = value
+	}
+
+	return data, nil
+}
+
 func isPermissionDenied(err error) bool {
 	responseErr, ok := errors.AsType[*openbao.ResponseError](err)
 	return ok && responseErr.StatusCode == http.StatusForbidden

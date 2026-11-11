@@ -1,4 +1,4 @@
-// Command bao-cred reads OpenBao credentials and requests Grants for the current Requester.
+// Command bao-cred reads and writes OpenBao credentials and requests Grants for the current Requester.
 package main
 
 import (
@@ -21,7 +21,7 @@ import (
 	authorizerv1 "github.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1"
 )
 
-const rootLong = `Reads credentials from OpenBao with the Requester's token from BAO_TOKEN,
+const rootLong = `Reads and writes credentials in OpenBao with the Requester's token from BAO_TOKEN,
 VAULT_TOKEN, the stored Named Token of --identity, BAO_IDENTITY or the
 project's .bao-identity file at its git root, or else the token file
 ~/.vault-token written by bao login (skipped when BAO_NO_TOKEN_FILE is set). When the token lacks access, bao-cred can file a Grant Request with
@@ -48,7 +48,8 @@ const rootExample = `  bao-cred init
   bao-cred read --reason "open a PR in org/repo" --field token github/token/project-example
   bao-cred request --reason "migrate app schema" --item database/creds/app=read --item kv/data/app=read,update
   bao-cred read --format dotenv --map DB_USER=username --map DB_PASSWORD=password database/creds/app
-  bao-cred read --map GH_TOKEN=token github/token/project-example -- gh repo view org/repo`
+  bao-cred read --map GH_TOKEN=token github/token/project-example -- gh repo view org/repo
+  bao-cred write --reason "ssh to jarvis" --field signed_key --output key-cert.pub ssh/sign/jarvis-core public_key=@key.pub`
 
 const (
 	exitFailure    = 1
@@ -58,19 +59,26 @@ const (
 )
 
 type options struct {
-	identity   string
-	path       string
-	format     string
-	field      string
-	template   string
-	output     string
-	reason     string
-	scope      string
-	authorizer string
-	timeout    time.Duration
-	quiet      bool
-	mappings   []mapping
-	command    []string
+	identity string
+	path     string
+	// write selects a write of data instead of a read.
+	write bool
+	data  map[string]any
+	// fields are the raw key=value arguments of write, before parseWriteData.
+	fields []string
+	// capabilities are requested on permission denied: read, or those of write.
+	capabilities []string
+	format       string
+	field        string
+	template     string
+	output       string
+	reason       string
+	scope        string
+	authorizer   string
+	timeout      time.Duration
+	quiet        bool
+	mappings     []mapping
+	command      []string
 }
 
 // exitError carries a specific exit status. A nil err means the status came
@@ -115,7 +123,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	root := newRootCommand(runRead)
+	root := newRootCommand(runCredentials)
 	root.SetArgs(arguments)
 	root.SetOut(stdout)
 	root.SetErr(stderr)
@@ -127,13 +135,14 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	return err
 }
 
-// readFunc runs the read command; tests replace it to inspect parsed options.
-type readFunc func(ctx context.Context, opts options, stdout, stderr io.Writer) error
+// credentialsFunc runs the read and write commands; tests replace it to
+// inspect parsed options.
+type credentialsFunc func(ctx context.Context, opts options, stdout, stderr io.Writer) error
 
-func newRootCommand(read readFunc) *cobra.Command {
+func newRootCommand(run credentialsFunc) *cobra.Command {
 	root := &cobra.Command{
 		Use:     "bao-cred",
-		Short:   "Read OpenBao credentials and request Grants",
+		Short:   "Read and write OpenBao credentials and request Grants",
 		Long:    rootLong,
 		Example: rootExample,
 		Args:    cobra.ArbitraryArgs,
@@ -153,7 +162,7 @@ func newRootCommand(read readFunc) *cobra.Command {
 	root.SetFlagErrorFunc(flagError)
 	root.PersistentFlags().String("identity", "", "Named Identity whose stored token to use (default $BAO_IDENTITY)")
 	root.AddCommand(
-		newReadCommand(read), newRequestCommand(), newGrantsCommand(), newRevokeCommand(), newGrantableCommand(),
+		newReadCommand(run), newWriteCommand(run), newRequestCommand(), newGrantsCommand(), newRevokeCommand(), newGrantableCommand(),
 		newInitCommand(), newAuthCommand(), newStatusCommand(), newEnvCommand(), newLogoutCommand(), newRunCommand(),
 	)
 	return root
@@ -173,7 +182,7 @@ func flagError(command *cobra.Command, err error) error {
 	return usageError(err)
 }
 
-func newReadCommand(read readFunc) *cobra.Command {
+func newReadCommand(run credentialsFunc) *cobra.Command {
 	var (
 		opts        options
 		rawMappings []string
@@ -192,6 +201,7 @@ hint.`,
   bao-cred read --reason "open a PR in org/repo" --field token github/token/project-example
   bao-cred read --map GH_TOKEN=token github/token/project-example -- gh repo view org/repo`,
 		RunE: func(command *cobra.Command, arguments []string) error {
+			opts.capabilities = []string{"read"}
 			parsed, err := parseOptions(opts, rawMappings, arguments, command.ArgsLenAtDash())
 			if err != nil {
 				return err
@@ -199,27 +209,79 @@ hint.`,
 
 			parsed.identity = identityFlag(command)
 
-			return read(command.Context(), parsed, command.OutOrStdout(), command.ErrOrStderr())
+			return run(command.Context(), parsed, command.OutOrStdout(), command.ErrOrStderr())
+		},
+	}
+
+	addCredentialFlags(command.Flags(), &opts, &rawMappings, "read")
+	return command
+}
+
+func newWriteCommand(run credentialsFunc) *cobra.Command {
+	var (
+		opts        options
+		rawMappings []string
+	)
+
+	command := &cobra.Command{
+		Use:   "write [flags] <openbao-path> [key=value ...] [-- command [args...]]",
+		Short: "Write data to an OpenBao path",
+		Long: `Writes the key=value pairs to <openbao-path> and prints the data object of
+the response, or runs a command with mapped fields in its environment. Use it
+for endpoints that take parameters and return credentials, such as
+ssh/sign/<role>. As with bao write, key=@file reads a value from a file and
+key=- from stdin.
+
+On permission denied, --reason files a Grant Request for PATH with
+--capabilities (default update), waits for a decision, and retries the write
+once. Without --reason the write fails with a hint.`,
+		Example: `  bao-cred write --reason "ssh to jarvis" --field signed_key --output key-cert.pub \
+    ssh/sign/jarvis-core public_key=@key.pub
+  bao-cred write --reason "rotate the webhook secret" --capabilities create,update \
+    kv/data/app/webhook data=@secret.json`,
+		RunE: func(command *cobra.Command, arguments []string) error {
+			opts.write = true
+			parsed, err := parseOptions(opts, rawMappings, arguments, command.ArgsLenAtDash())
+			if err != nil {
+				return err
+			}
+
+			parsed.data, err = parseWriteData(parsed.fields, command.InOrStdin())
+			if err != nil {
+				return err
+			}
+
+			parsed.identity = identityFlag(command)
+
+			return run(command.Context(), parsed, command.OutOrStdout(), command.ErrOrStderr())
 		},
 	}
 
 	flags := command.Flags()
+	addCredentialFlags(flags, &opts, &rawMappings, "write")
+	flags.StringSliceVar(&opts.capabilities, "capabilities", []string{"update"},
+		"with --reason, the capabilities to request: create, update, or both")
+	return command
+}
+
+// addCredentialFlags adds the output and Grant Request flags that read and
+// write share; verb names the operation in their help.
+func addCredentialFlags(flags *pflag.FlagSet, opts *options, rawMappings *[]string, verb string) {
 	flags.StringVar(&opts.format, "format", "json", "output format: json, template, dotenv, or shell")
 	flags.StringVar(&opts.field, "field", "", "print one scalar field at this dot path with no trailing newline")
 	flags.StringVar(&opts.template, "template", "", "render the data object with a Go template")
-	flags.StringArrayVar(&rawMappings, "map", nil,
+	flags.StringArrayVar(rawMappings, "map", nil,
 		"NAME=path mapping for dotenv, shell, or command execution; repeatable")
 	flags.StringVar(&opts.output, "output", "", "atomically overwrite this file with mode 0600 instead of stdout")
 	flags.StringVar(&opts.reason, "reason", "",
-		"on permission denied, request read access with this reason and retry once")
+		fmt.Sprintf("on permission denied, request %s access with this reason and retry once", verb))
 	flags.StringVar(&opts.scope, "scope", "", "with --reason, the suggested scope: session, project, or global")
 	flags.StringVar(&opts.authorizer, "authorizer", "", "authorizer base URL (default $BAO_AUTHORIZER_ADDR)")
 	flags.DurationVar(&opts.timeout, "timeout", 15*time.Minute, "approval wait timeout")
 	flags.BoolVar(&opts.quiet, "quiet", false, "suppress progress messages")
-	return command
 }
 
-func runRead(ctx context.Context, opts options, stdout, stderr io.Writer) error {
+func runCredentials(ctx context.Context, opts options, stdout, stderr io.Writer) error {
 	token, err := requesterToken(ctx, opts.identity)
 	if err != nil {
 		return err
@@ -230,23 +292,33 @@ func runRead(ctx context.Context, opts options, stdout, stderr io.Writer) error 
 		return err
 	}
 
+	// A denied write changed nothing, so retrying it after approval is safe.
+	access := func() (map[string]any, error) {
+		if opts.write {
+			return writeCredentials(ctx, client, opts.path, opts.data)
+		}
+
+		return readCredentials(ctx, client, opts.path)
+	}
+
 	progress := newProgress(stderr, opts.quiet)
-	data, err := readCredentials(ctx, client, opts.path)
+	item := opts.path + "=" + strings.Join(opts.capabilities, ",")
+	data, err := access()
 	if isPermissionDenied(err) {
 		if opts.reason == "" {
 			return fmt.Errorf(
-				"%w\nhint: rerun with --reason TEXT to request read access, or file a Grant Request with "+
-					"bao-cred request --reason TEXT --item %s=read",
-				err, opts.path,
+				"%w\nhint: rerun with --reason TEXT to request access, or file a Grant Request with "+
+					"bao-cred request --reason TEXT --item %s",
+				err, item,
 			)
 		}
 
-		err = requestReadAccess(ctx, opts, token, progress)
+		err = requestAccess(ctx, opts, token, progress)
 		if err != nil {
 			return err
 		}
 
-		data, err = readCredentials(ctx, client, opts.path)
+		data, err = access()
 	}
 
 	if err != nil {
@@ -270,10 +342,11 @@ func runRead(ctx context.Context, opts options, stdout, stderr io.Writer) error 
 	return err
 }
 
-func requestReadAccess(ctx context.Context, opts options, token string, progress progressFunc) error {
+func requestAccess(ctx context.Context, opts options, token string, progress progressFunc) error {
+	item := opts.path + "=" + strings.Join(opts.capabilities, ",")
 	authorizer, err := newAuthorizerClient(opts.authorizer, token)
 	if err != nil {
-		return fmt.Errorf("request read access: %w", err)
+		return fmt.Errorf("request %s: %w", item, err)
 	}
 
 	scope, err := parseScope(opts.scope)
@@ -283,13 +356,13 @@ func requestReadAccess(ctx context.Context, opts options, token string, progress
 
 	request, err := authorizer.createGrantRequest(ctx, &authorizerv1.CreateGrantRequestRequest{
 		Reason: opts.reason,
-		Items:  []*authorizerv1.PermissionItemInput{{Path: opts.path, Capabilities: []string{"read"}, Scope: scope}},
+		Items:  []*authorizerv1.PermissionItemInput{{Path: opts.path, Capabilities: opts.capabilities, Scope: scope}},
 	})
 	if err != nil {
-		return fmt.Errorf("request read access: %w", err)
+		return fmt.Errorf("request %s: %w", item, err)
 	}
 
-	progress(fmt.Sprintf("permission denied; filed Grant Request %s for %s=read", request.ID, opts.path))
+	progress(fmt.Sprintf("permission denied; filed Grant Request %s for %s", request.ID, item))
 	request, err = waitForGrantRequest(ctx, authorizer, request, opts.timeout, progress)
 	if err != nil {
 		return err
@@ -310,11 +383,15 @@ func parseOptions(opts options, rawMappings, arguments []string, dash int) (opti
 		}
 	}
 
-	if dash != 1 {
+	switch {
+	case opts.write && dash < 1:
+		return options{}, usageError(errors.New("an OpenBao path is required"))
+	case !opts.write && dash != 1:
 		return options{}, usageError(errors.New("exactly one OpenBao path is required"))
 	}
 
 	opts.path = arguments[0]
+	opts.fields = arguments[1:dash]
 	opts.reason = strings.TrimSpace(opts.reason)
 	if opts.timeout <= 0 {
 		return options{}, usageError(errors.New("timeout must be positive"))
@@ -345,6 +422,18 @@ func validateOptions(options options) error {
 
 		if _, err := parseScope(options.scope); err != nil {
 			return err
+		}
+	}
+
+	if options.write {
+		if len(options.capabilities) == 0 {
+			return errors.New("--capabilities must name create, update, or both")
+		}
+
+		for _, capability := range options.capabilities {
+			if capability != "create" && capability != "update" {
+				return fmt.Errorf("unsupported write capability %q: use create, update, or both", capability)
+			}
 		}
 	}
 

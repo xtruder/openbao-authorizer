@@ -211,10 +211,10 @@ Terminate TLS at a trusted reverse proxy. The proxy must not buffer responses un
 
 ## Credential requester CLI
 
-`bao-cred` reads OpenBao paths with a **Requester**'s existing OpenBao token,
+`bao-cred` reads and writes OpenBao paths with a **Requester**'s existing OpenBao token,
 usually an **Agent Session**'s **Session Token** or a **Named Identity**'s
 **Named Token**, and files **Grant Requests** with the authorizer when the
-Requester needs more access. `read`, `request`, `grants`, `revoke`,
+Requester needs more access. `read`, `write`, `request`, `grants`, `revoke`,
 `grantable` and `run` work with the Requester's token; `init`, `auth`, `env`, `status` and
 `logout` manage tokens. Run `bao-cred <command> --help` for details.
 
@@ -223,7 +223,7 @@ Requester needs more access. `read`, `request`, `grants`, `revoke`,
 | Token | `BAO_TOKEN`, then `VAULT_TOKEN`, then the token of the Named Identity selected by `--identity`, `BAO_IDENTITY` or the project's `.bao-identity`: its Session Token inside an Agent Session, else its Named Token. Then `~/.vault-token` as written by `bao login` (only the default token helper; skipped when `BAO_NO_TOKEN_FILE` is set). A selected identity without a stored token is an error, never a fall back to `~/.vault-token` |
 | Agent session | `BAO_SESSION_ID`, then opencode's `OPENCODE_SESSION_ID`; `BAO_NO_SESSION` turns sessions off. `BAO_SESSION_ROLE` overrides the `agent-session` role |
 | OpenBao client | Standard client variables such as `BAO_ADDR`, `BAO_NAMESPACE`, and `BAO_CACERT` |
-| Authorizer URL | `--authorizer`, then `BAO_AUTHORIZER_ADDR`; needed only for `request`, `grants`, `grantable`, and `read --reason`. Give the bare origin; bao-cred calls the `GrantService` RPCs under `/api`. It must be HTTPS unless the host is loopback (`localhost`, `127.0.0.0/8`, `::1`), because the token is sent with every call; redirects to plain HTTP are refused |
+| Authorizer URL | `--authorizer`, then `BAO_AUTHORIZER_ADDR`; needed only for `request`, `grants`, `grantable`, and `read --reason` or `write --reason`. Give the bare origin; bao-cred calls the `GrantService` RPCs under `/api`. It must be HTTPS unless the host is loopback (`localhost`, `127.0.0.0/8`, `::1`), because the token is sent with every call; redirects to plain HTTP are refused |
 | Authorizer TLS | System roots plus any CA from `BAO_CACERT`, `BAO_CACERT_BYTES`, or `BAO_CAPATH`; `BAO_SKIP_VERIFY` is ignored for the authorizer |
 
 A project's `.envrc` can set the addresses, so agents pass no token or address
@@ -373,6 +373,35 @@ Without `--reason`, a permission-denied read fails with a hint to rerun with
 `--reason` or to use `bao-cred request`. With `--reason`, bao-cred files a
 **Grant Request** for `PATH=read`, waits up to `--timeout` (default 15m), and
 retries the read once when the item is approved or already granted.
+
+### Writing to endpoints
+
+`bao-cred write` sends parameters to endpoints that return credentials, such
+as `ssh/sign/<role>`, and delivers the response's data object with the same
+output and command options as `read`.
+
+```sh
+# Have OpenBao sign an SSH public key; request update on denial.
+bao-cred write --reason "ssh to jarvis as core" --field signed_key \
+  --output ~/.ssh/id_ed25519-cert.pub ssh/sign/jarvis-core public_key=@$HOME/.ssh/id_ed25519.pub
+
+# Request create and update on a KV v2 path that may not exist yet.
+bao-cred write --reason "seed the app's webhook secret" --capabilities create,update \
+  kv/data/app/webhook data=@webhook.json
+```
+
+Data arguments are `key=value` as for `bao write`: `key=@file` reads the value
+from a file and `key=-` from stdin. On permission denied, `--reason` files a
+Grant Request for the path with `--capabilities` (default `update`; OpenBao
+checks `create` instead when the path does not exist yet on endpoints that
+distinguish them, such as KV), and retries the write once after approval. A
+denied write changed nothing, so the retry is safe. Responses without content
+print `{}`.
+
+Grants cover a path, not its parameters, so the endpoint itself must limit
+what a write can do. For SSH, define one role per node and user (or per
+application) whose `allowed_users`, `default_user`, TTL and extensions are
+fixed; a Grant on `ssh/sign/<role>` then means exactly that login.
 
 ### Requesting Grants
 

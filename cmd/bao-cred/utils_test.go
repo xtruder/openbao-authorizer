@@ -49,6 +49,16 @@ func TestReadClassifiesPermissionDenied(t *testing.T) {
 	}
 }
 
+func TestWriteWithoutContentReturnsEmptyData(t *testing.T) {
+	client := testAPIClient(t, func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusNoContent)
+	})
+	got, err := writeCredentials(t.Context(), client, "path", map[string]any{"key": "value"})
+	if err != nil || got == nil || len(got) != 0 {
+		t.Fatalf("got %#v, %v; want empty data", got, err)
+	}
+}
+
 func testAPIClient(t *testing.T, handler http.HandlerFunc) *openbao.Client {
 	t.Helper()
 	server := httptest.NewServer(handler)

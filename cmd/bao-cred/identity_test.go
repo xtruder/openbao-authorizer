@@ -378,7 +378,7 @@ func TestRequesterTokenUsesNamedIdentity(t *testing.T) {
 
 	t.Setenv("VAULT_TOKEN", "")
 	t.Setenv("BAO_IDENTITY", "myproject")
-	root := newRootCommand(runRead)
+	root := newRootCommand(runCredentials)
 	root.SetArgs([]string{"read", "secret/app"})
 	command, _, err := root.Find([]string{"read"})
 	if err != nil {

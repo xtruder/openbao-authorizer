@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,16 +26,78 @@ const testToken = "requester-token-value"
 // would read with.
 func parseRead(t *testing.T, arguments ...string) (options, error) {
 	t.Helper()
+	return parseCommand(t, "", append([]string{"read"}, arguments...)...)
+}
+
+// parseCommand runs bao-cred with arguments and stdin and returns the options
+// the read or write command would run with.
+func parseCommand(t *testing.T, stdin string, arguments ...string) (options, error) {
+	t.Helper()
 	var parsed options
 	root := newRootCommand(func(_ context.Context, opts options, _, _ io.Writer) error {
 		parsed = opts
 		return nil
 	})
-	root.SetArgs(append([]string{"read"}, arguments...))
+	root.SetArgs(arguments)
+	root.SetIn(strings.NewReader(stdin))
 	root.SetOut(io.Discard)
 	root.SetErr(io.Discard)
 	err := root.Execute()
 	return parsed, err
+}
+
+func TestParseWriteData(t *testing.T) {
+	keyFile := filepath.Join(t.TempDir(), "key.pub")
+	if err := os.WriteFile(keyFile, []byte("ssh-ed25519 AAAA\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	parsed, err := parseCommand(t, "from-stdin",
+		"write", "--field", "signed_key", "ssh/sign/node-user", "public_key=@"+keyFile, "ttl=5m", "note=-", "empty=")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]any{"public_key": "ssh-ed25519 AAAA\n", "ttl": "5m", "note": "from-stdin", "empty": ""}
+	if !parsed.write || parsed.path != "ssh/sign/node-user" || !reflect.DeepEqual(parsed.data, want) {
+		t.Fatalf("unexpected options: %#v", parsed)
+	}
+
+	if !reflect.DeepEqual(parsed.capabilities, []string{"update"}) {
+		t.Fatalf("capabilities = %v, want the update default", parsed.capabilities)
+	}
+
+	parsed, err = parseCommand(t, "", "write", "--reason", "seed", "--capabilities", "create,update", "kv/data/app")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !reflect.DeepEqual(parsed.capabilities, []string{"create", "update"}) || len(parsed.data) != 0 {
+		t.Fatalf("unexpected options: %#v", parsed)
+	}
+}
+
+func TestWriteUsageErrors(t *testing.T) {
+	for _, arguments := range [][]string{
+		{"write"},
+		{"write", "ssh/sign/role", "public_key"},
+		{"write", "ssh/sign/role", "=value"},
+		{"write", "ssh/sign/role", "ttl=5m", "ttl=10m"},
+		{"write", "ssh/sign/role", "a=-", "b=-"},
+		{"write", "--capabilities", "read", "ssh/sign/role"},
+		{"write", "--capabilities", "", "ssh/sign/role"},
+		{"write", "--map", "KEY=signed_key", "ssh/sign/role", "--"},
+	} {
+		_, err := parseCommand(t, "", arguments...)
+		if exitCode(err) != exitUsage {
+			t.Fatalf("%v: error = %v (exit %d)", arguments, err, exitCode(err))
+		}
+	}
+
+	_, err := parseCommand(t, "", "write", "ssh/sign/role", "public_key=@"+filepath.Join(t.TempDir(), "missing"))
+	if exitCode(err) != exitFailure {
+		t.Fatalf("missing file: error = %v (exit %d)", err, exitCode(err))
+	}
 }
 
 func TestParseOutputAndExecModes(t *testing.T) {
@@ -315,6 +378,84 @@ func TestReadWithReasonWithoutAuthorizerURLFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "BAO_AUTHORIZER_ADDR") {
 		t.Fatalf("error = %v", err)
 	}
+}
+
+func TestWriteDeniedWithoutReasonHints(t *testing.T) {
+	openBao := fakeOpenBaoSigner(t, func() bool { return false })
+	authorizer := newFakeAuthorizer(t)
+	setupEnvironment(t, authorizer.url, openBao.URL)
+
+	err := run([]string{"write", "ssh/sign/node-user", "public_key=ssh-ed25519 AAAA"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "--item ssh/sign/node-user=update") {
+		t.Fatalf("error = %v, want hint", err)
+	}
+
+	if exitCode(err) != exitFailure || authorizer.calls() != 0 {
+		t.Fatalf("exit %d, authorizer calls %d", exitCode(err), authorizer.calls())
+	}
+}
+
+func TestWriteWithReasonRequestsAccessAndRetries(t *testing.T) {
+	authorizer := newFakeAuthorizer(t)
+	authorizer.created = testRequest(item("item-1", "ssh/sign/node-user", pending))
+	authorizer.watches = []watchScript{{messages: []*authorizerv1.WatchGrantRequestResponse{
+		snapshot(item("item-1", "ssh/sign/node-user", approved)),
+	}}}
+	openBao := fakeOpenBaoSigner(t, func() bool { return authorizer.watchCount() > 0 })
+	setupEnvironment(t, authorizer.url, openBao.URL)
+
+	certificate := filepath.Join(t.TempDir(), "key-cert.pub")
+	err := run([]string{
+		"write", "--reason", "ssh to node", "--quiet", "--field", "signed_key", "--output", certificate,
+		"ssh/sign/node-user", "public_key=ssh-ed25519 AAAA",
+	}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if contents, err := os.ReadFile(certificate); err != nil || string(contents) != "ssh-ed25519-cert-v01@openssh.com AAAA" {
+		t.Fatalf("certificate = %q, %v", contents, err)
+	}
+
+	want := &authorizerv1.CreateGrantRequestRequest{
+		Reason: "ssh to node",
+		Items:  []*authorizerv1.PermissionItemInput{{Path: "ssh/sign/node-user", Capabilities: []string{"update"}}},
+	}
+	if got := authorizer.inputs(); len(got) != 1 || !proto.Equal(got[0], want) {
+		t.Fatalf("filed %v, want %v", got, want)
+	}
+
+	if openBao.reads() != 2 {
+		t.Fatalf("OpenBao writes = %d, want one retry", openBao.reads())
+	}
+}
+
+// fakeOpenBaoSigner serves ssh/sign/node-user, denying it until allowed
+// reports true. It signs only the public key ssh-ed25519 AAAA.
+func fakeOpenBaoSigner(t *testing.T, allowed func() bool) fakeOpenBaoServer {
+	t.Helper()
+	count := &counter{}
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		if request.Header.Get("X-Vault-Token") != testToken || request.Method != http.MethodPut ||
+			request.URL.Path != "/v1/ssh/sign/node-user" || json.NewDecoder(request.Body).Decode(&body) != nil ||
+			!reflect.DeepEqual(body, map[string]any{"public_key": "ssh-ed25519 AAAA"}) {
+			http.Error(response, "unexpected request", http.StatusBadRequest)
+			return
+		}
+
+		count.add()
+		response.Header().Set("Content-Type", "application/json")
+		if !allowed() {
+			response.WriteHeader(http.StatusForbidden)
+			_, _ = fmt.Fprint(response, `{"errors":["1 error occurred:\n\t* permission denied\n\n"]}`)
+			return
+		}
+
+		_, _ = fmt.Fprint(response, `{"data":{"serial_number":"01","signed_key":"ssh-ed25519-cert-v01@openssh.com AAAA"}}`)
+	}))
+	t.Cleanup(server.Close)
+	return fakeOpenBaoServer{Server: server, count: count}
 }
 
 type fakeOpenBaoServer struct {
