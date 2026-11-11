@@ -2,7 +2,7 @@
 
 Humans approve, item by item, the extra OpenBao permissions that a **Requester**, such as an AI agent working in a project, asks for. Approved permissions apply to the Requester's existing OpenBao token.
 
-A Requester is any OpenBao identity that an operator-defined **Requester Rule** (a token role or an auth mount) lets file requests. The main kinds are a **Named Identity**, a long-lived identity, such as one per project, whose **Named Token** a human mints with `bao-cred init`, and each **Agent Session** working under it: one agent conversation, whose **Session Token** bao-cred mints from the Named Token. A CI job logging in with AppRole can be another kind. The Requester files a **Grant Request**: a reason plus one or more **Permission Items** (path + capabilities). Items outside the operator's **Grantable Rules** are refused at once; the rest wait in an installable React PWA, with Web Push for new items. An **Approver** approves or rejects each item, optionally shortening its TTL and choosing its **Grant Scope**: the one session, the whole project, or every project on the server. An approved item becomes a **Grant**: a path block with its own expiry in the OpenBao policy of its scope. The Requester's unchanged token can read the path immediately, until the Grant expires or is revoked; after expiry the path needs a new approval. See [`CONTEXT.md`](CONTEXT.md) for the vocabulary, and [ADR-0001](docs/adr/0001-identity-scoped-grants.md), [ADR-0005](docs/adr/0005-named-identities.md) and [ADR-0006](docs/adr/0006-grant-scopes.md) for the design decisions.
+A Requester is any OpenBao identity that an operator-defined **Requester Rule** (a token role or an auth mount) lets file requests. The main kinds are a **Named Identity**, a long-lived identity, such as one per project, whose **Named Token** a human mints with `bao-cred init`, and each **Agent Session** working under it: one agent conversation, whose **Session Token** bao-cred mints from the Named Token. A CI job logging in with AppRole can be another kind. The Requester files a **Grant Request**: a reason plus one or more **Permission Items** (path + capabilities). Items outside the operator's **Grantable Rules** are refused at once; the rest wait in an installable React PWA, with Web Push for new items. An **Approver** approves or rejects each item, optionally shortening its TTL and choosing its **Grant Scope**: the one session, the whole project, or every project on the server. An approved item becomes a **Grant**: a path block with its own expiry in the OpenBao policy of its scope. The Requester's unchanged token can read the path immediately, until the Grant expires or is revoked; after expiry the path needs a new approval. See [`CONTEXT.md`](CONTEXT.md) for the vocabulary, and [ADR-0001](docs/adr/0001-identity-scoped-grants.md), [ADR-0005](docs/adr/0005-named-identities.md), [ADR-0006](docs/adr/0006-grant-scopes.md) and [ADR-0007](docs/adr/0007-local-identity-files.md) for the design decisions.
 
 > **OpenBao compatibility:** targets OpenBao **2.7.1** stable. Policy-level `expiration` and entity aliases on token roles are required; OpenBao control groups are not used.
 
@@ -32,12 +32,12 @@ Request reasons, Requester display fields (ID, title, directory, rule), and push
 
 ## Architecture
 
-Agents learn the workflow from the [`openbao-grants` skill](skills/openbao-grants/SKILL.md) ([Agent skill](#agent-skill)); Named Identities are described in [ADR-0005](docs/adr/0005-named-identities.md).
+Agents learn the workflow from the [`openbao-grants` skill](skills/openbao-grants/SKILL.md) ([Agent skill](#agent-skill)); Named Identities are described in [ADR-0005](docs/adr/0005-named-identities.md) and [ADR-0007](docs/adr/0007-local-identity-files.md).
 
 ```text
 human ── bao-cred init (bao login token) ──> OpenBao ──token/create/named-identity──> Named Token
                                                                                           │
-                                                keyring or file, selected by .bao-identity ┘
+                                           keyring or file, selected by .git/bao-identity ┘
                                                                      │ token/create/agent-session
                                                                      ▼ (OPENCODE_SESSION_ID / BAO_SESSION_ID)
 agent ── bao-cred (Bearer Session Token) ──> GrantService ──lookup-self, capabilities-self
@@ -220,7 +220,7 @@ Requester needs more access. `read`, `write`, `ssh`, `request`, `grants`, `revok
 
 | Setting | Source |
 |---|---|
-| Token | `BAO_TOKEN`, then `VAULT_TOKEN`, then the token of the Named Identity selected by `--identity`, `BAO_IDENTITY` or the nearest `.bao-identity` in the working directory or a parent: its Session Token inside an Agent Session, else its Named Token. Then `~/.vault-token` as written by `bao login` (only the default token helper; skipped when `BAO_NO_TOKEN_FILE` is set). A selected identity without a stored token is an error, never a fall back to `~/.vault-token` |
+| Token | `BAO_TOKEN`, then `VAULT_TOKEN`, then the token of the Named Identity selected by `--identity`, `BAO_IDENTITY` or the identity file of the working directory (see [Named Identities](#named-identities)): its Session Token inside an Agent Session, else its Named Token. Then `~/.vault-token` as written by `bao login` (only the default token helper; skipped when `BAO_NO_TOKEN_FILE` is set). A selected identity without a stored token is an error, never a fall back to `~/.vault-token` |
 | Agent session | `BAO_SESSION_ID`, then opencode's `OPENCODE_SESSION_ID`; `BAO_NO_SESSION` turns sessions off. `BAO_SESSION_ROLE` overrides the `agent-session` role |
 | OpenBao client | Standard client variables such as `BAO_ADDR`, `BAO_NAMESPACE`, and `BAO_CACERT` |
 | Authorizer URL | `--authorizer`, then `BAO_AUTHORIZER_ADDR`; needed only for `request`, `grants`, `grantable`, `ssh config`, and when `read`, `write` or `ssh cert` request access. Give the bare origin; bao-cred calls the `GrantService` RPCs under `/api`. It must be HTTPS unless the host is loopback (`localhost`, `127.0.0.0/8`, `::1`), because the token is sent with every call; redirects to plain HTTP are refused |
@@ -234,8 +234,8 @@ flags.
 ```sh
 bao login -method=userpass username=dev   # a login holding only the minter policy
 cd ~/src/myproject
-bao-cred init                  # writes .bao-identity at the git root, mints its token
-git add .bao-identity
+bao-cred init                  # creates myproject-k7q2xm in .git/bao-identity, mints its token
+cd ~ && bao-cred init          # a personal identity in ~/.bao-identity, for everything else
 ```
 
 ```sh
@@ -245,23 +245,29 @@ export BAO_AUTHORIZER_ADDR=https://authorizer.example.com
 eval "$(bao-cred env)"         # only for tools that need BAO_TOKEN, such as bao and secretspec
 ```
 
-`bao-cred init [name]` writes `.bao-identity` at the git root of the current
-directory (the nearest directory with a `.git` directory or file, so worktrees
-work) naming the project's Named Identity, by default the root directory's
-name made valid (`My_App` becomes `my-app`). It refuses to change an existing
-name without `--force`. It then mints the Named Token as `auth` does, unless a
-valid one is already stored. Commit the file: it holds only the name. Anywhere
-in the project, bao-cred then uses that identity's token without
-`BAO_IDENTITY`, and never falls back to `~/.vault-token`, so
-`BAO_NO_TOKEN_FILE` isn't needed. `--identity` and `BAO_IDENTITY` still
-override it.
+`bao-cred init [name]` creates a Named Identity for the current repository,
+named after it plus a random suffix (`My_App` becomes `my-app-k7q2xm`), and
+mints its Named Token as `auth` does, unless a valid one is already stored.
+The suffix keeps the name unique: project Grants belong to the name, so no
+other checkout or machine should share it. `[name]` picks a name instead, and
+an existing one changes only with `--force`.
 
-bao-cred reads the nearest `.bao-identity` in the working directory or any
-parent, past git roots. A file written by hand in a parent directory selects
-an identity for everything below it without a closer file: for example
-`~/.bao-identity` naming a personal identity minted with
-`bao-cred auth <name>`, for your own ssh and tools outside projects. A project
-without its own file then uses that identity too, including its agents.
+The name is written to `bao-identity` in the repository's common git
+directory: `.git/bao-identity` in a clone, shared by all linked worktrees,
+because each worktree's `.git` file points back to it. Git never commits or
+transfers that directory, so a clone can't choose an identity. Outside
+repositories, `init` writes `.bao-identity` to the current directory instead,
+covering everything below it; `init` in your home directory creates a personal
+identity for your own ssh and tools.
+
+bao-cred selects an identity by walking up from the working directory. In a
+repository only its `.git/bao-identity` counts: a `.bao-identity` in the
+working tree is ignored, because it may have come with the clone. Outside
+repositories the nearest `.bao-identity` counts. A repository without an
+identity of its own uses the next one above it, such as `~/.bao-identity`.
+With an identity selected, bao-cred never falls back to `~/.vault-token`, so
+`BAO_NO_TOKEN_FILE` isn't needed. `--identity` and `BAO_IDENTITY` override
+the files.
 
 `bao-cred auth [name]` mints a Named Token through the `named-identity` token
 role (`--role`) with your `~/.vault-token`, ignoring `BAO_TOKEN`, which may
@@ -319,9 +325,16 @@ prints its store, entity ID and TTL (inside a session, the Session Token's);
 `bao-cred logout [name]` revokes the Named Token, and so its sessions, and
 deletes them from every store.
 
-Named Tokens are periodic: each renewal extends one 32-day period. bao-cred
-renews them in `env` and `status` and whenever it mints or renews a Session
-Token, so a project in use stays valid.
+Named Tokens are periodic: each renewal extends one 32-day period, so a token
+in use never expires. bao-cred renews the Named Token whenever it uses it,
+and whenever it mints or renews a Session Token. When the stored token is
+invalid, for example after 32 days unused, or gone from its store, and this
+machine minted that name before (it is in `index.json`), bao-cred mints a new
+one with your `~/.vault-token` and carries on; the identity keeps its Grants.
+That is safe because the name comes from your own identity file or selection.
+Names never minted here, and names removed with `logout`, still need `init`
+or `auth`. bao-cred renews the `bao login` token whenever it mints, so a
+periodic login also lives on while in use.
 
 ### Agent skill
 
@@ -455,10 +468,9 @@ Match originalhost jarvis,jarvis.* user core exec "/usr/local/bin/bao-cred ssh c
 
 ssh passes its environment and working directory to the helper, so it uses the
 same token as other bao-cred commands: inside a project or Agent Session, that
-identity's token. For your own ssh outside projects, select an identity
-explicitly: `BAO_IDENTITY`, or a `.bao-identity` in a parent directory such as
-`~/.bao-identity`. The `bao login` token in `~/.vault-token` usually can't file
-Grant Requests.
+identity's token. For your own ssh outside projects, run `bao-cred init` in
+your home directory once; the `bao login` token in `~/.vault-token` usually
+can't file Grant Requests.
 
 ### Requesting Grants
 

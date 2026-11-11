@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -367,6 +368,7 @@ func TestRequesterTokenUsesNamedIdentity(t *testing.T) {
 	}
 
 	ring.entries[keyringService+"/myproject"] = "named-stored"
+	bao.valid["named-stored"] = true
 	if got, err := requesterToken(t.Context(), "myproject"); err != nil || got != "named-stored" {
 		t.Fatalf("got %q, %v", got, err)
 	}
@@ -497,5 +499,56 @@ func TestLogoutWarnsWhenRevocationFails(t *testing.T) {
 
 	if ring.get("myproject") != "" {
 		t.Fatal("token still stored")
+	}
+}
+
+func TestNamedTokenRenewsOnUseAndRemintsKnownIdentities(t *testing.T) {
+	bao := newFakeTokenStore(t)
+	home := setupIdentityEnvironment(t, bao.URL)
+	ring := useKeyring(t, nil)
+	if err := run([]string{"auth", "myproject"}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A valid token is renewed whenever it is used.
+	if got, err := requesterToken(t.Context(), "myproject"); err != nil || got != "named-1" {
+		t.Fatalf("token %q, %v", got, err)
+	}
+
+	if _, renewed, _ := bao.snapshot(); !slices.Contains(renewed, "named-1") {
+		t.Fatalf("renewed %v, want named-1", renewed)
+	}
+
+	// An expired or revoked token of an identity minted here is minted again
+	// with the bao login token.
+	delete(bao.valid, "named-1")
+	if got, err := requesterToken(t.Context(), "myproject"); err != nil || got != "named-2" || ring.get("myproject") != "named-2" {
+		t.Fatalf("after expiry: token %q, stored %q, %v", got, ring.get("myproject"), err)
+	}
+
+	// So is one deleted from its store.
+	delete(ring.entries, keyringService+"/myproject")
+	if got, err := requesterToken(t.Context(), "myproject"); err != nil || got != "named-3" {
+		t.Fatalf("after deletion: token %q, %v", got, err)
+	}
+
+	// Without a bao login it fails with a hint.
+	delete(bao.valid, "named-3")
+	if err := os.Remove(filepath.Join(home, ".vault-token")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := requesterToken(t.Context(), "myproject"); err == nil || !strings.Contains(err.Error(), "run bao login") {
+		t.Fatalf("error = %v, want a bao login hint", err)
+	}
+
+	// An identity never minted here is not minted on use.
+	if _, err := requesterToken(t.Context(), "elsewhere"); !errors.Is(err, errNoNamedToken) {
+		t.Fatalf("error = %v, want errNoNamedToken", err)
+	}
+
+	_, _, creates := bao.snapshot()
+	if len(creates) != 3 {
+		t.Fatalf("minted %d Named Tokens, want 3", len(creates))
 	}
 }

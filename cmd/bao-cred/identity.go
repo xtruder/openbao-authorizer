@@ -159,55 +159,132 @@ func runAuth(ctx context.Context, name string, flags authFlags, stdout, stderr i
 		return usageError(fmt.Errorf("unsupported store %q", flags.store))
 	}
 
-	login, err := loginToken()
+	client, err := loginClient(ctx)
 	if err != nil {
 		return err
 	}
 
-	client, err := newOpenBaoClient(login)
+	token, store, err := mintNamedToken(ctx, client, name, flags.role, flags.store, newProgress(stderr, flags.quiet), newProgress(stderr, false))
 	if err != nil {
 		return err
 	}
 
-	secret, err := client.Auth().Token().CreateWithRoleWithContext(ctx, &openbao.TokenCreateRequest{
-		Policies:    tokenPolicies(flags.role, name),
-		EntityAlias: name,
-		DisplayName: name,
-		Metadata:    map[string]string{"identity": name},
-	}, flags.role)
-	if err != nil {
-		return fmt.Errorf("mint Named Token: %w", err)
-	}
-
-	if secret == nil || secret.Auth == nil || secret.Auth.ClientToken == "" {
-		return errors.New("mint Named Token: empty response")
-	}
-
-	progress := newProgress(stderr, flags.quiet)
-	previous, _, _ := tokens().loadNamed(name)
-	store, err := tokens().saveNamed(name, secret.Auth.ClientToken, flags.store, newProgress(stderr, false))
-	if err != nil {
-		_ = revokeToken(ctx, secret.Auth.ClientToken)
-		return err
-	}
-
-	progress(fmt.Sprintf("stored the Named Token for %q in the %s store", name, store))
-	if previous != "" && previous != secret.Auth.ClientToken {
-		// Revoking it revokes its session tokens too; sessions mint new ones
-		// from the new token and keep their Grants.
-		reportRevocation(revokeToken(ctx, previous), "the previous Named Token", progress, newProgress(stderr, false))
-		if deleteErr := tokens().deleteSessions(name); deleteErr != nil {
-			newProgress(stderr, false)("warning: " + deleteErr.Error())
-		}
-	}
-
-	client.SetToken(secret.Auth.ClientToken)
+	client.SetToken(token)
 	status, err := lookupStatus(ctx, client, name, store)
 	if err != nil {
 		return err
 	}
 
 	return writeIndentedJSON(stdout, status)
+}
+
+// loginClient returns an OpenBao client with the bao login token, renewed so
+// that a periodic login lives on while it keeps minting. A failed renewal is
+// ignored: minting reports an unusable login.
+func loginClient(ctx context.Context) (*openbao.Client, error) {
+	login, err := loginToken()
+	if err != nil {
+		return nil, err
+	}
+
+	client, err := newOpenBaoClient(login)
+	if err != nil {
+		return nil, err
+	}
+
+	_, _ = client.Auth().Token().RenewSelfWithContext(ctx, 0)
+	return client, nil
+}
+
+// mintNamedToken mints a Named Token for name through role with the login
+// token of client, stores it, and revokes the token it replaces. It returns
+// the token and the store that holds it.
+func mintNamedToken(
+	ctx context.Context, client *openbao.Client, name, role, store string, progress, warn progressFunc,
+) (string, string, error) {
+	secret, err := client.Auth().Token().CreateWithRoleWithContext(ctx, &openbao.TokenCreateRequest{
+		Policies:    tokenPolicies(role, name),
+		EntityAlias: name,
+		DisplayName: name,
+		Metadata:    map[string]string{"identity": name},
+	}, role)
+	if err != nil {
+		return "", "", fmt.Errorf("mint Named Token: %w", err)
+	}
+
+	if secret == nil || secret.Auth == nil || secret.Auth.ClientToken == "" {
+		return "", "", errors.New("mint Named Token: empty response")
+	}
+
+	previous, _, _ := tokens().loadNamed(name)
+	store, err = tokens().saveNamed(name, secret.Auth.ClientToken, store, warn)
+	if err != nil {
+		_ = revokeToken(ctx, secret.Auth.ClientToken)
+		return "", "", err
+	}
+
+	progress(fmt.Sprintf("stored the Named Token for %q in the %s store", name, store))
+	if previous != "" && previous != secret.Auth.ClientToken {
+		// Revoking it revokes its session tokens too; sessions mint new ones
+		// from the new token and keep their Grants.
+		reportRevocation(revokeToken(ctx, previous), "the previous Named Token", progress, warn)
+		if deleteErr := tokens().deleteSessions(name); deleteErr != nil {
+			warn("warning: " + deleteErr.Error())
+		}
+	}
+
+	return secret.Auth.ClientToken, store, nil
+}
+
+// namedToken returns name's stored Named Token and renews it, so a token in
+// use never expires. When the token is invalid, or gone from its store, and
+// this machine minted name before, it mints a new one with the bao login
+// token. That is safe because the name comes from the caller's own selection
+// or identity file, never from a checkout. A token OpenBao can't be asked
+// about, such as while it is unreachable, is returned as it is.
+func namedToken(ctx context.Context, name string, progress progressFunc) (string, error) {
+	token, store, err := tokens().loadNamed(name)
+	if err == nil {
+		client, clientErr := newOpenBaoClient(token)
+		if clientErr != nil {
+			return "", clientErr
+		}
+
+		renewErr := renewNamedToken(ctx, client)
+		if !isPermissionDenied(renewErr) {
+			return token, nil
+		}
+
+		err = invalidTokenError(name, renewErr)
+	} else if !errors.Is(err, errNoNamedToken) {
+		return "", err
+	}
+
+	index, indexErr := readIndex()
+	if indexErr != nil {
+		return "", indexErr
+	}
+
+	known, minted := index.Named[name]
+	if !minted {
+		return "", err
+	}
+
+	if store == "" {
+		store = known
+	}
+
+	client, loginErr := loginClient(ctx)
+	if loginErr != nil {
+		return "", fmt.Errorf("the Named Token for %q is invalid or missing, and there is no bao login to mint a new one: run bao login, then retry: %w", name, loginErr)
+	}
+
+	token, _, err = mintNamedToken(ctx, client, name, defaultIdentityRole, store, progress, progress)
+	if err != nil {
+		return "", fmt.Errorf("the Named Token for %q is invalid or missing; minting a new one failed (run bao login, then retry): %w", name, err)
+	}
+
+	return token, nil
 }
 
 // revokeToken revokes token with itself.

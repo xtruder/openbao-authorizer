@@ -11,7 +11,7 @@ export BAO_ADDR=https://openbao.example.com
 export BAO_AUTHORIZER_ADDR=https://authorizer.example.com
 bao login                                  # your own login, which may mint Named Tokens
 bao-cred auth example                      # mint and store the Named Token
-export BAO_IDENTITY=example                # in a project: bao-cred init writes .bao-identity instead
+export BAO_IDENTITY=example                # in a project: bao-cred init names it in .git/bao-identity instead
 
 # 1. Get a Grant: secretspec only reads, it never files Grant Requests.
 bao-cred request --reason "try secretspec" --item github/token/project-authorizer=read

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -13,10 +14,15 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// projectFileName names the file that selects the Named Identity for its
-// directory tree, so no environment variable is needed: committed at a
-// project's git root, or in a parent directory such as the home directory.
-const projectFileName = ".bao-identity"
+const (
+	// repositoryFileName names the identity file inside a repository's common
+	// git directory, which every worktree shares and git never transfers, so
+	// no clone can bring one along.
+	repositoryFileName = "bao-identity"
+	// directoryFileName names the identity file of a directory outside any
+	// repository, such as the home directory; it covers the tree below it.
+	directoryFileName = ".bao-identity"
+)
 
 // gitRoot returns the nearest directory at or above start that contains a
 // .git entry: a directory in a clone, a file in a worktree or submodule.
@@ -36,11 +42,60 @@ func gitRoot(start string) (string, bool) {
 	}
 }
 
-// projectIdentity returns the name in the nearest .bao-identity at or above
-// the working directory, or "". The search goes past git roots, so a file in
-// a parent directory such as the home directory covers everything below it
-// that has no closer file. The name is returned unvalidated so callers report
-// a malformed file.
+// gitRepository returns the nearest worktree root at or above start and the
+// repository's common git directory, which all its worktrees share: .git in
+// a clone, or the directory that the commondir file in a linked worktree's
+// gitdir names. A submodule's gitdir has no commondir and is its own common
+// directory. common is empty when .git is unreadable or malformed.
+func gitRepository(start string) (root, common string, ok bool) {
+	root, ok = gitRoot(start)
+	if !ok {
+		return "", "", false
+	}
+
+	gitDir := filepath.Join(root, ".git")
+	info, err := os.Stat(gitDir)
+	if err != nil {
+		return root, "", true
+	}
+
+	if !info.IsDir() {
+		contents, readErr := os.ReadFile(gitDir) // #nosec G304 -- the .git file of a worktree.
+		path, found := strings.CutPrefix(strings.TrimSpace(string(contents)), "gitdir:")
+		if readErr != nil || !found || strings.TrimSpace(path) == "" {
+			return root, "", true
+		}
+
+		gitDir = resolvePath(root, strings.TrimSpace(path))
+	}
+
+	common = gitDir
+	// #nosec G304,G703 -- the commondir file of the gitdir that .git names.
+	if contents, err := os.ReadFile(filepath.Join(gitDir, "commondir")); err == nil {
+		if path := strings.TrimSpace(string(contents)); path != "" {
+			common = resolvePath(gitDir, path)
+		}
+	}
+
+	return root, common, true
+}
+
+func resolvePath(base, path string) string {
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path)
+	}
+
+	return filepath.Join(base, path)
+}
+
+// projectIdentity returns the Named Identity selected for the working
+// directory, or "". Inside a repository only the bao-identity file in its
+// common git directory counts, so every worktree shares it; a .bao-identity
+// in the working tree is ignored, because it may have come with a clone.
+// Outside repositories the nearest .bao-identity counts. Without a file the
+// search continues above the repository, so ~/.bao-identity covers
+// repositories that have none. The name is returned unvalidated so callers
+// report a malformed file.
 func projectIdentity() (string, error) {
 	directory, err := os.Getwd()
 	if err != nil {
@@ -48,18 +103,30 @@ func projectIdentity() (string, error) {
 	}
 
 	for {
-		path := filepath.Join(directory, projectFileName)
-		contents, readErr := os.ReadFile(path) // #nosec G304 -- fixed name in the working directory or a parent.
-		switch {
-		case readErr == nil:
-			name := parseProjectFile(string(contents))
-			if name == "" {
+		path := filepath.Join(directory, directoryFileName)
+		root, common, inRepository := gitRepository(directory)
+		if inRepository {
+			path = ""
+			if common != "" {
+				path = filepath.Join(common, repositoryFileName)
+			}
+
+			directory = root
+		}
+
+		if path != "" {
+			name, found, err := readIdentityFile(path)
+			if err != nil {
+				return "", err
+			}
+
+			if found && name == "" {
 				return "", fmt.Errorf("%s names no identity", path)
 			}
 
-			return name, nil
-		case !errors.Is(readErr, fs.ErrNotExist):
-			return "", fmt.Errorf("read %s: %w", path, readErr)
+			if found {
+				return name, nil
+			}
 		}
 
 		parent := filepath.Dir(directory)
@@ -69,6 +136,21 @@ func projectIdentity() (string, error) {
 
 		directory = parent
 	}
+}
+
+// readIdentityFile returns the name in an identity file, empty when the file
+// names none, and whether the file exists.
+func readIdentityFile(path string) (string, bool, error) {
+	contents, err := os.ReadFile(path) // #nosec G304 -- an identity file at a fixed name.
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", false, nil
+	}
+
+	if err != nil {
+		return "", false, fmt.Errorf("read %s: %w", path, err)
+	}
+
+	return parseProjectFile(string(contents)), true, nil
 }
 
 // parseProjectFile returns the first line that is neither blank nor a comment.
@@ -112,16 +194,23 @@ func newInitCommand() *cobra.Command {
 	var flags initFlags
 	command := &cobra.Command{
 		Use:   "init [name]",
-		Short: "Select a Named Identity for this git project and mint its token",
-		Long: `Writes ` + projectFileName + ` at the git root of the current directory, naming the
-project's Named Identity (default: the root directory's name), then mints its
-Named Token as bao-cred auth does, unless a valid one is already stored.
+		Short: "Create a Named Identity for this repository or directory and mint its token",
+		Long: `Creates a Named Identity for the current repository, or for the current
+directory outside repositories, and mints its Named Token as bao-cred auth
+does, unless a valid one is already stored.
 
-Commit the file. Inside the project, bao-cred then uses that identity's token
-without BAO_IDENTITY, and never falls back to your ~/.vault-token. BAO_TOKEN,
-VAULT_TOKEN, --identity and BAO_IDENTITY still take precedence.`,
+The name defaults to the repository's or directory's name plus a random
+suffix, such as my-app-k7q2xm, so no other checkout can name the same
+identity. Inside a repository it is written to bao-identity in the common git
+directory (.git/bao-identity in a clone), which all worktrees share and git
+never commits or transfers. Outside repositories it is written to
+.bao-identity in the current directory and covers everything below it without
+a closer identity, so init in your home directory creates a personal identity.
+
+Rerunning init keeps the identity and a valid token. BAO_TOKEN, VAULT_TOKEN,
+--identity and BAO_IDENTITY take precedence over the files.`,
 		Example: `  bao-cred init
-  bao-cred init myproject`,
+  cd ~ && bao-cred init`,
 		RunE: func(command *cobra.Command, arguments []string) error {
 			if len(arguments) > 1 {
 				return usageError(errors.New("init accepts at most one identity name"))
@@ -134,9 +223,47 @@ VAULT_TOKEN, --identity and BAO_IDENTITY still take precedence.`,
 	set := command.Flags()
 	set.StringVar(&flags.store, "store", storeAuto, "where to store the token: auto (keyring, else file), keyring, or file")
 	set.StringVar(&flags.role, "role", defaultIdentityRole, "token role that mints Named Tokens")
-	set.BoolVar(&flags.force, "force", false, "replace a "+projectFileName+" that names another identity")
+	set.BoolVar(&flags.force, "force", false, "replace an identity file that names another identity")
 	set.BoolVar(&flags.quiet, "quiet", false, "suppress progress messages")
 	return command
+}
+
+// identityFileFor returns where init writes the identity of directory and
+// the name the default identity name starts with.
+func identityFileFor(directory string) (string, string, error) {
+	_, common, inRepository := gitRepository(directory)
+	if !inRepository {
+		return filepath.Join(directory, directoryFileName), filepath.Base(directory), nil
+	}
+
+	if common == "" {
+		return "", "", fmt.Errorf("cannot find the git directory of the repository at or above %s", directory)
+	}
+
+	// A clone's common directory is its .git; a bare repository's is the
+	// repository itself, often named like name.git.
+	name := common
+	if filepath.Base(common) == ".git" {
+		name = filepath.Dir(common)
+	}
+
+	return filepath.Join(common, repositoryFileName), strings.TrimSuffix(filepath.Base(name), ".git"), nil
+}
+
+// generatedIdentityName is base made valid plus a random suffix, so no other
+// checkout or machine names the same identity by accident or on purpose.
+func generatedIdentityName(base string) string {
+	suffix := strings.ToLower(rand.Text()[:6])
+	prefix := defaultIdentityName(base)
+	if limit := 63 - len(suffix) - 1; len(prefix) > limit {
+		prefix = strings.TrimSuffix(prefix[:limit], "-")
+	}
+
+	if prefix == "" {
+		prefix = "identity"
+	}
+
+	return prefix + "-" + suffix
 }
 
 func runInit(ctx context.Context, arguments []string, flags initFlags, stdout, stderr io.Writer) error {
@@ -145,14 +272,22 @@ func runInit(ctx context.Context, arguments []string, flags initFlags, stdout, s
 		return fmt.Errorf("locate working directory: %w", err)
 	}
 
-	root, ok := gitRoot(working)
-	if !ok {
-		return errors.New("not inside a git repository; run bao-cred init from a project, or use bao-cred auth")
+	path, base, err := identityFileFor(working)
+	if err != nil {
+		return err
 	}
 
-	name := defaultIdentityName(root)
-	if len(arguments) == 1 {
+	existing, _, err := readIdentityFile(path)
+	if err != nil {
+		return err
+	}
+
+	name := existing
+	switch {
+	case len(arguments) == 1:
 		name = strings.TrimSpace(arguments[0])
+	case existing == "":
+		name = generatedIdentityName(base)
 	}
 
 	if err = validateIdentityName(name); err != nil {
@@ -160,21 +295,17 @@ func runInit(ctx context.Context, arguments []string, flags initFlags, stdout, s
 	}
 
 	progress := newProgress(stderr, flags.quiet)
-	path := filepath.Join(root, projectFileName)
-	contents, err := os.ReadFile(path) // #nosec G304 -- fixed name at the git root.
-	switch existing := parseProjectFile(string(contents)); {
-	case err == nil && existing == name:
-	case err == nil && existing != "" && !flags.force:
+	switch {
+	case existing == name:
+	case existing != "" && !flags.force:
 		return fmt.Errorf("%s already names %q; pass --force to replace it", path, existing)
-	case err != nil && !errors.Is(err, fs.ErrNotExist):
-		return fmt.Errorf("read %s: %w", projectFileName, err)
 	default:
-		body := "# Named Identity of this project for bao-cred; see bao-cred init --help.\n" + name + "\n"
-		if err := os.WriteFile(path, []byte(body), 0o644); err != nil { // #nosec G306 -- committed, not secret.
-			return fmt.Errorf("write %s: %w", projectFileName, err)
+		body := "# Named Identity for bao-cred; see bao-cred init --help.\n" + name + "\n"
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			return fmt.Errorf("write %s: %w", path, err)
 		}
 
-		progress(fmt.Sprintf("wrote %s naming %q; commit it", path, name))
+		progress(fmt.Sprintf("wrote %s naming %q", path, name))
 	}
 
 	// A valid stored token is kept, so init can be rerun safely; bao-cred auth

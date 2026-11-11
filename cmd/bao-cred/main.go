@@ -23,7 +23,7 @@ import (
 
 const rootLong = `Reads and writes credentials in OpenBao with the Requester's token from BAO_TOKEN,
 VAULT_TOKEN, the stored Named Token of --identity, BAO_IDENTITY or the
-nearest .bao-identity file in the working directory or a parent, or else the token file
+identity file of the working directory (see bao-cred init --help), or else the token file
 ~/.vault-token written by bao login (skipped when BAO_NO_TOKEN_FILE is set). When the token lacks access, bao-cred can file a Grant Request with
 the authorizer at BAO_AUTHORIZER_ADDR and wait for an Approver to decide it;
 bao-cred grantable lists the paths that may be requested.
@@ -606,7 +606,7 @@ func identityToken(ctx context.Context, name string, progress progressFunc) (str
 		return token, session, sessionErr
 	}
 
-	token, _, err := tokens().loadNamed(name)
+	token, err := namedToken(ctx, name, progress)
 	return token, "", err
 }
 
@@ -639,7 +639,8 @@ func requesterToken(ctx context.Context, identity string) (string, error) {
 			return "", err
 		}
 
-		token, _, err := identityToken(ctx, identity, func(string) {})
+		// Re-minting an invalid Named Token reports itself on stderr.
+		token, _, err := identityToken(ctx, identity, newProgress(os.Stderr, false))
 		return token, err
 	}
 

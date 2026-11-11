@@ -86,7 +86,7 @@ func sessionToken(ctx context.Context, project, session string, progress progres
 		return "", err
 	}
 
-	projectToken, _, err := tokens().loadNamed(project)
+	projectToken, err := namedToken(ctx, project, progress)
 	if err != nil {
 		return "", err
 	}

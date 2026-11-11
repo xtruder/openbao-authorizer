@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -741,10 +742,11 @@ grantable "e2e-ssh" {
 
 	t.Log("bao-cred logout revoked and deleted the Named Token")
 
-	// bao-cred init names the identity in a committed file at the git root;
-	// commands anywhere in the project then need no environment variables.
-	// The developer's own token gets NOT_REQUESTER from GrantService, so a
-	// working `grants` proves the Named Token was used.
+	// bao-cred init creates an identity with a random suffix and names it in
+	// the repository's .git/bao-identity, which every worktree shares and
+	// git never transfers; commands anywhere in the project then need no
+	// environment variables. The developer's own token gets NOT_REQUESTER
+	// from GrantService, so a working `grants` proves the Named Token was used.
 	project := filepath.Join(runtimeDirectory, "e2e-project-c")
 	for _, directory := range []string{filepath.Join(project, ".git"), filepath.Join(project, "src")} {
 		if mkdirErr := os.MkdirAll(directory, 0o755); mkdirErr != nil {
@@ -752,8 +754,17 @@ grantable "e2e-ssh" {
 		}
 	}
 
-	if initialized := cred.runIn(ctx, t, project, nil, "init", "--store", "file"); initialized.exitCode != 0 || !strings.Contains(initialized.stdout, `"identity": "e2e-project-c"`) {
+	initialized := cred.runIn(ctx, t, project, nil, "init", "--store", "file")
+	var created struct {
+		Identity string `json:"identity"`
+	}
+	if initialized.exitCode != 0 || json.Unmarshal([]byte(initialized.stdout), &created) != nil ||
+		!regexp.MustCompile(`^e2e-project-c-[a-z2-7]{6}$`).MatchString(created.Identity) {
 		t.Fatalf("bao-cred init = %+v", initialized)
+	}
+
+	if contents, readErr := os.ReadFile(filepath.Join(project, ".git", "bao-identity")); readErr != nil || !strings.Contains(string(contents), created.Identity) {
+		t.Fatalf(".git/bao-identity = %q, %v", contents, readErr)
 	}
 
 	// Its only Grant is the global one approved earlier.
@@ -762,7 +773,47 @@ grantable "e2e-ssh" {
 		t.Fatalf("bao-cred grants inside the project = %+v", listed)
 	}
 
-	t.Log("bao-cred init wrote .bao-identity; bao-cred inside the project used its Named Token without environment variables")
+	// A linked worktree, laid out as git worktree add does, shares it.
+	worktree := filepath.Join(runtimeDirectory, "e2e-project-c-feature")
+	worktreeGitDir := filepath.Join(project, ".git", "worktrees", "feature")
+	for _, directory := range []string{worktree, worktreeGitDir} {
+		if mkdirErr := os.MkdirAll(directory, 0o755); mkdirErr != nil {
+			t.Fatalf("create worktree: %v", mkdirErr)
+		}
+	}
+
+	writeSecretFile(t, filepath.Join(worktreeGitDir, "commondir"), "../..\n")
+	writeSecretFile(t, filepath.Join(worktree, ".git"), "gitdir: "+worktreeGitDir+"\n")
+	if status := cred.runIn(ctx, t, worktree, nil, "status"); status.exitCode != 0 || !strings.Contains(status.stdout, created.Identity) {
+		t.Fatalf("bao-cred status in the worktree = %+v", status)
+	}
+
+	// A clone can't choose an identity: a committed .bao-identity naming
+	// project A's identity is ignored, so nothing selects one.
+	cloned := filepath.Join(runtimeDirectory, "e2e-cloned")
+	if mkdirErr := os.MkdirAll(filepath.Join(cloned, ".git"), 0o755); mkdirErr != nil {
+		t.Fatalf("create clone: %v", mkdirErr)
+	}
+
+	writeSecretFile(t, filepath.Join(cloned, ".bao-identity"), "e2e-project-a\n")
+	if hijacked := cred.runIn(ctx, t, cloned, []string{"BAO_NO_TOKEN_FILE=1"}, "grants"); hijacked.exitCode == 0 || strings.Contains(hijacked.stdout, "kv/data/e2e/alpha") {
+		t.Fatalf("bao-cred grants in a clone carrying .bao-identity = %+v", hijacked)
+	}
+
+	// A revoked Named Token is minted again with the bao login token on the
+	// next command, keeping the identity and its Grants.
+	revokedToken, readErr := os.ReadFile(filepath.Join(processPaths.home, ".local", "state", "bao-cred", created.Identity+".token"))
+	if readErr != nil {
+		t.Fatalf("read the Named Token: %v", readErr)
+	}
+
+	mustCall(t, ctx, bao, strings.TrimSpace(string(revokedToken)), http.MethodPost, "auth/token/revoke-self", nil, http.StatusNoContent)
+	reminted := cred.runIn(ctx, t, project, nil, "grants")
+	if reminted.exitCode != 0 || !strings.Contains(reminted.stdout, "kv/data/e2e/kappa") || !strings.Contains(reminted.stderr, "already invalid") {
+		t.Fatalf("bao-cred grants after revoking the Named Token = %+v", reminted)
+	}
+
+	t.Log("bao-cred init wrote .git/bao-identity; the project and its worktree used the Named Token, a committed .bao-identity was ignored, and a revoked token was minted again")
 	t.Log("real OpenBao Named Identity grant workflow passed")
 }
 
