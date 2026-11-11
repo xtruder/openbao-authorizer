@@ -180,6 +180,44 @@ func TestTokenHelperSetup(t *testing.T) {
 	}
 }
 
+func TestTokenHelperSetupKeepsAPackageManagersLink(t *testing.T) {
+	// Homebrew links bin/bao-cred and bin/bao-cred-token-helper to the
+	// versioned files in its Cellar.
+	prefix := t.TempDir()
+	cellar := filepath.Join(prefix, "Cellar", "openbao-authorizer", "1.0.0", "bin")
+	bin := filepath.Join(prefix, "bin")
+	for _, directory := range []string{cellar, bin} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeTestFile(t, filepath.Join(cellar, "bao-cred"), "#!/bin/sh\n")
+	for _, link := range [][2]string{
+		{filepath.Join(cellar, tokenHelperName), "bao-cred"},
+		{filepath.Join(bin, "bao-cred"), "../Cellar/openbao-authorizer/1.0.0/bin/bao-cred"},
+		{filepath.Join(bin, tokenHelperName), "../Cellar/openbao-authorizer/1.0.0/bin/" + tokenHelperName},
+	} {
+		if err := os.Symlink(link[1], link[0]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	config := filepath.Join(t.TempDir(), ".bao")
+	if err := setupTokenHelper(filepath.Join(bin, "bao-cred"), config, false, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+
+	if target, err := os.Readlink(filepath.Join(bin, tokenHelperName)); err != nil || !strings.HasPrefix(target, "../Cellar/") {
+		t.Fatalf("setup replaced Homebrew's link with %q, %v", target, err)
+	}
+
+	// The config names the stable prefix path, which upgrades relink.
+	if contents, err := os.ReadFile(config); err != nil || !strings.Contains(string(contents), filepath.Join(bin, tokenHelperName)) {
+		t.Fatalf("config = %q, %v", contents, err)
+	}
+}
+
 func TestTokenHelperSetupUsageErrors(t *testing.T) {
 	for _, arguments := range [][]string{{"token-helper", "--setup", "get"}, {"token-helper", "--force", "get"}} {
 		if err := run(arguments, &bytes.Buffer{}, &bytes.Buffer{}); exitCode(err) != exitUsage {

@@ -119,6 +119,12 @@ func invokedExecutable() (string, error) {
 	return filepath.Abs(path)
 }
 
+func sameFile(first, second string) bool {
+	firstResolved, firstErr := filepath.EvalSymlinks(first)
+	secondResolved, secondErr := filepath.EvalSymlinks(second)
+	return firstErr == nil && secondErr == nil && firstResolved == secondResolved
+}
+
 // baoConfigPath is the bao CLI's config file: $BAO_CONFIG_PATH, else ~/.bao.
 func baoConfigPath() (string, error) {
 	if path := os.Getenv("BAO_CONFIG_PATH"); path != "" {
@@ -135,14 +141,15 @@ func baoConfigPath() (string, error) {
 
 // setupTokenHelper links tokenHelperName to executable in its directory and
 // writes config naming the link as the bao CLI's token_helper. It leaves a
-// link or config that is already right alone and replaces different ones
-// only with force.
+// link or config that is already right alone, including a link a release
+// archive or package manager made, which resolves to the same file, and
+// replaces different ones only with force.
 func setupTokenHelper(executable, config string, force bool, progress progressFunc) error {
 	link := filepath.Join(filepath.Dir(executable), tokenHelperName)
 	// A relative target keeps working when the directory moves.
 	target := filepath.Base(executable)
 	switch current, err := os.Readlink(link); {
-	case err == nil && current == target:
+	case err == nil && (current == target || sameFile(link, executable)):
 	case err != nil && errors.Is(err, fs.ErrNotExist):
 		if err := os.Symlink(target, link); err != nil {
 			return fmt.Errorf("link %s: %w", link, err)
