@@ -23,7 +23,7 @@ import (
 
 const rootLong = `Reads and writes credentials in OpenBao with the Requester's token from BAO_TOKEN,
 VAULT_TOKEN, the stored Named Token of --identity, BAO_IDENTITY or the
-project's .bao-identity file at its git root, or else the token file
+nearest .bao-identity file in the working directory or a parent, or else the token file
 ~/.vault-token written by bao login (skipped when BAO_NO_TOKEN_FILE is set). When the token lacks access, bao-cred can file a Grant Request with
 the authorizer at BAO_AUTHORIZER_ADDR and wait for an Approver to decide it;
 bao-cred grantable lists the paths that may be requested.

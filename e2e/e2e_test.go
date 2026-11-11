@@ -300,7 +300,13 @@ grantable "e2e-ssh" {
 	// into the isolated HOME that bao-cred auth reads.
 	developerToken := responseAuthToken(t, mustCall(t, ctx, bao, "", http.MethodPost, "auth/userpass/login/dev", map[string]string{"password": developerPass}, http.StatusOK))
 	writeSecretFile(t, filepath.Join(isolatedHome, ".vault-token"), developerToken)
-	cred := baoCred{binary: baoCredBinary, paths: processPaths, address: baoAddress, authorizer: application.baseURL}
+	workdir, err := os.MkdirTemp("", "bao-cred-e2e-") //nolint:usetesting // Must be outside the repository, where t.TempDir may not be.
+	if err != nil {
+		t.Fatalf("create bao-cred working directory: %v", err)
+	}
+
+	t.Cleanup(func() { _ = os.RemoveAll(workdir) })
+	cred := baoCred{binary: baoCredBinary, paths: processPaths, address: baoAddress, authorizer: application.baseURL, workdir: workdir}
 	identityA := cred.auth(ctx, t, "e2e-project-a")
 	if identityA.EntityID == "" || identityA.Store != "file" || identityA.TTL < 700*time.Hour {
 		t.Fatalf("Named Identity A = %+v", identityA)
@@ -787,6 +793,10 @@ type baoCred struct {
 	paths      isolatedProcessPaths
 	address    string
 	authorizer string
+	// workdir is outside the repository: bao-cred reads .bao-identity from
+	// the working directory and every parent, and the checkout or its parents
+	// may hold one.
+	workdir string
 }
 
 // environment adds the OpenBao and authorizer addresses to requester, the
@@ -797,7 +807,7 @@ func (c baoCred) environment(requester []string) []string {
 
 func (c baoCred) run(ctx context.Context, t *testing.T, requester []string, arguments ...string) processResult {
 	t.Helper()
-	return runProcess(ctx, c.environment(requester), c.binary, arguments...)
+	return runProcessIn(ctx, c.workdir, c.environment(requester), c.binary, arguments...)
 }
 
 func (c baoCred) runIn(ctx context.Context, t *testing.T, directory string, requester []string, arguments ...string) processResult {
@@ -807,7 +817,7 @@ func (c baoCred) runIn(ctx context.Context, t *testing.T, directory string, requ
 
 func (c baoCred) start(ctx context.Context, requester []string, arguments ...string) *backgroundProcess {
 	done := make(chan processResult, 1)
-	go func() { done <- runProcess(ctx, c.environment(requester), c.binary, arguments...) }()
+	go func() { done <- runProcessIn(ctx, c.workdir, c.environment(requester), c.binary, arguments...) }()
 	return &backgroundProcess{done: done}
 }
 
@@ -882,10 +892,6 @@ func (p *backgroundProcess) wait(t *testing.T) processResult {
 		t.Fatal("background process did not finish")
 		return processResult{}
 	}
-}
-
-func runProcess(ctx context.Context, environment []string, binary string, arguments ...string) processResult {
-	return runProcessIn(ctx, "", environment, binary, arguments...)
 }
 
 func runProcessIn(ctx context.Context, directory string, environment []string, binary string, arguments ...string) processResult {

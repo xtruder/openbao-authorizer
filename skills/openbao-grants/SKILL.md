@@ -5,7 +5,7 @@ description: Use when a task needs a secret or credential from OpenBao/Vault (AP
 
 # OpenBao grants
 
-The project works as a **Named Identity**: a `.bao-identity` file at its git root (or `BAO_IDENTITY`) names it. Your conversation is an **Agent Session** of it: bao-cred reads the session ID from `OPENCODE_SESSION_ID` (or `BAO_SESSION_ID`) and mints this session's own token from the project's on first use. A subagent is a session of its own. Leave these variables and `.bao-identity` as they are.
+The project works as a **Named Identity**: the nearest `.bao-identity` file in the working directory or a parent (or `BAO_IDENTITY`) names it. Your conversation is an **Agent Session** of it: bao-cred reads the session ID from `OPENCODE_SESSION_ID` (or `BAO_SESSION_ID`) and mints this session's own token from the project's on first use. A subagent is a session of its own. Leave these variables and `.bao-identity` as they are.
 
 The token starts with almost no access. You gain access through **Grants**: a human Approver approves each requested path and capability, and the Grant then applies to this same token until it expires. Each Grant has a scope, which the Approver decides: **session** (this conversation only), **project** (every session of the project) or **global** (every project).
 

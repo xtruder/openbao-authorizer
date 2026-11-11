@@ -220,7 +220,7 @@ Requester needs more access. `read`, `write`, `ssh`, `request`, `grants`, `revok
 
 | Setting | Source |
 |---|---|
-| Token | `BAO_TOKEN`, then `VAULT_TOKEN`, then the token of the Named Identity selected by `--identity`, `BAO_IDENTITY` or the project's `.bao-identity`: its Session Token inside an Agent Session, else its Named Token. Then `~/.vault-token` as written by `bao login` (only the default token helper; skipped when `BAO_NO_TOKEN_FILE` is set). A selected identity without a stored token is an error, never a fall back to `~/.vault-token` |
+| Token | `BAO_TOKEN`, then `VAULT_TOKEN`, then the token of the Named Identity selected by `--identity`, `BAO_IDENTITY` or the nearest `.bao-identity` in the working directory or a parent: its Session Token inside an Agent Session, else its Named Token. Then `~/.vault-token` as written by `bao login` (only the default token helper; skipped when `BAO_NO_TOKEN_FILE` is set). A selected identity without a stored token is an error, never a fall back to `~/.vault-token` |
 | Agent session | `BAO_SESSION_ID`, then opencode's `OPENCODE_SESSION_ID`; `BAO_NO_SESSION` turns sessions off. `BAO_SESSION_ROLE` overrides the `agent-session` role |
 | OpenBao client | Standard client variables such as `BAO_ADDR`, `BAO_NAMESPACE`, and `BAO_CACERT` |
 | Authorizer URL | `--authorizer`, then `BAO_AUTHORIZER_ADDR`; needed only for `request`, `grants`, `grantable`, `ssh config`, and when `read`, `write` or `ssh cert` request access. Give the bare origin; bao-cred calls the `GrantService` RPCs under `/api`. It must be HTTPS unless the host is loopback (`localhost`, `127.0.0.0/8`, `::1`), because the token is sent with every call; redirects to plain HTTP are refused |
@@ -254,7 +254,14 @@ valid one is already stored. Commit the file: it holds only the name. Anywhere
 in the project, bao-cred then uses that identity's token without
 `BAO_IDENTITY`, and never falls back to `~/.vault-token`, so
 `BAO_NO_TOKEN_FILE` isn't needed. `--identity` and `BAO_IDENTITY` still
-override it, for example outside a git project.
+override it.
+
+bao-cred reads the nearest `.bao-identity` in the working directory or any
+parent, past git roots. A file written by hand in a parent directory selects
+an identity for everything below it without a closer file: for example
+`~/.bao-identity` naming a personal identity minted with
+`bao-cred auth <name>`, for your own ssh and tools outside projects. A project
+without its own file then uses that identity too, including its agents.
 
 `bao-cred auth [name]` mints a Named Token through the `named-identity` token
 role (`--role`) with your `~/.vault-token`, ignoring `BAO_TOKEN`, which may
@@ -448,7 +455,10 @@ Match originalhost jarvis,jarvis.* user core exec "/usr/local/bin/bao-cred ssh c
 
 ssh passes its environment and working directory to the helper, so it uses the
 same token as other bao-cred commands: inside a project or Agent Session, that
-identity's token.
+identity's token. For your own ssh outside projects, select an identity
+explicitly: `BAO_IDENTITY`, or a `.bao-identity` in a parent directory such as
+`~/.bao-identity`. The `bao login` token in `~/.vault-token` usually can't file
+Grant Requests.
 
 ### Requesting Grants
 

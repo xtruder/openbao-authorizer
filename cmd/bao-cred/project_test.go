@@ -106,6 +106,45 @@ func TestInitRequiresGitProject(t *testing.T) {
 	}
 }
 
+func TestProjectFileInParentDirectorySelectsIdentity(t *testing.T) {
+	bao := newFakeTokenStore(t)
+	setupIdentityEnvironment(t, bao.URL)
+	ring := useKeyring(t, nil)
+	ring.entries[keyringService+"/personal"] = "named-personal"
+	ring.entries[keyringService+"/app"] = "named-app"
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, projectFileName), []byte("personal\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A file above the working directory applies, past a git root without one.
+	for _, directory := range []string{home, filepath.Join(home, "notes", "2026"), filepath.Join(home, "code", "tool", "cmd")} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := os.Mkdir(filepath.Join(home, "code", "tool", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, directory := range []string{home, filepath.Join(home, "notes", "2026"), filepath.Join(home, "code", "tool", "cmd")} {
+		t.Chdir(directory)
+		if got, err := requesterToken(t.Context(), ""); err != nil || got != "named-personal" {
+			t.Fatalf("%s: token %q, %v; want the parent's identity", directory, got, err)
+		}
+	}
+
+	// The nearest file wins.
+	if err := os.WriteFile(filepath.Join(home, "code", "tool", projectFileName), []byte("app\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, err := requesterToken(t.Context(), ""); err != nil || got != "named-app" {
+		t.Fatalf("token %q, %v; want the nearest identity", got, err)
+	}
+}
+
 func TestProjectFileSelectsIdentity(t *testing.T) {
 	bao := newFakeTokenStore(t)
 	setupIdentityEnvironment(t, bao.URL)

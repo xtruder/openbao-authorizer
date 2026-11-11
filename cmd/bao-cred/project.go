@@ -13,8 +13,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// projectFileName names the committed file at a git root that selects the
-// project's Named Identity, so no environment variable is needed.
+// projectFileName names the file that selects the Named Identity for its
+// directory tree, so no environment variable is needed: committed at a
+// project's git root, or in a parent directory such as the home directory.
 const projectFileName = ".bao-identity"
 
 // gitRoot returns the nearest directory at or above start that contains a
@@ -35,34 +36,39 @@ func gitRoot(start string) (string, bool) {
 	}
 }
 
-// projectIdentity returns the name in the git root's .bao-identity, or "".
-// The name is returned unvalidated so callers report a malformed file.
+// projectIdentity returns the name in the nearest .bao-identity at or above
+// the working directory, or "". The search goes past git roots, so a file in
+// a parent directory such as the home directory covers everything below it
+// that has no closer file. The name is returned unvalidated so callers report
+// a malformed file.
 func projectIdentity() (string, error) {
-	working, err := os.Getwd()
+	directory, err := os.Getwd()
 	if err != nil {
 		return "", nil //nolint:nilerr // No working directory means no project.
 	}
 
-	root, ok := gitRoot(working)
-	if !ok {
-		return "", nil
-	}
+	for {
+		path := filepath.Join(directory, projectFileName)
+		contents, readErr := os.ReadFile(path) // #nosec G304 -- fixed name in the working directory or a parent.
+		switch {
+		case readErr == nil:
+			name := parseProjectFile(string(contents))
+			if name == "" {
+				return "", fmt.Errorf("%s names no identity", path)
+			}
 
-	contents, err := os.ReadFile(filepath.Join(root, projectFileName)) // #nosec G304 -- fixed name at the git root.
-	if errors.Is(err, fs.ErrNotExist) {
-		return "", nil
-	}
+			return name, nil
+		case !errors.Is(readErr, fs.ErrNotExist):
+			return "", fmt.Errorf("read %s: %w", path, readErr)
+		}
 
-	if err != nil {
-		return "", fmt.Errorf("read %s: %w", projectFileName, err)
-	}
+		parent := filepath.Dir(directory)
+		if parent == directory {
+			return "", nil
+		}
 
-	name := parseProjectFile(string(contents))
-	if name == "" {
-		return "", fmt.Errorf("%s at %s names no identity", projectFileName, root)
+		directory = parent
 	}
-
-	return name, nil
 }
 
 // parseProjectFile returns the first line that is neither blank nor a comment.
