@@ -610,6 +610,36 @@ grantable "e2e-ssh" {
 
 	t.Log("bao-cred write --reason requested update on ssh/sign/e2e-node and wrote a certificate for core@e2e-node only")
 
+	// bao-cred ssh cert, the ssh credential helper, signs with the same
+	// Grant: it derives the role <host>-<user>, e2e-node from
+	// node@e2e.example.ts.net, then reuses the pair.
+	helperKey := filepath.Join(runtimeDirectory, "helper", "e2e-node")
+	helper := cred.run(ctx, t, identityB.env(), "ssh", "cert", "--timeout", "30s", "--key", helperKey, "node@e2e.example.ts.net")
+	if helper.exitCode != 0 || helper.stdout != "" {
+		t.Fatalf("bao-cred ssh cert = %+v", helper)
+	}
+
+	helperCertificate, err := os.ReadFile(helperKey + "-cert.pub")
+	if err != nil {
+		t.Fatalf("read helper certificate: %v", err)
+	}
+
+	parsedKey, _, _, _, err = ssh.ParseAuthorizedKey(helperCertificate)
+	certificate, isCertificate = parsedKey.(*ssh.Certificate)
+	if err != nil || !isCertificate || !slices.Equal(certificate.ValidPrincipals, []string{"core@e2e-node"}) {
+		t.Fatalf("helper certificate = %+v, %v", parsedKey, err)
+	}
+
+	if again := cred.run(ctx, t, identityB.env(), "ssh", "cert", "--timeout", "30s", "--key", helperKey, "node@e2e"); again.exitCode != 0 {
+		t.Fatalf("second bao-cred ssh cert = %+v", again)
+	}
+
+	if reused, readErr := os.ReadFile(helperKey + "-cert.pub"); readErr != nil || !bytes.Equal(reused, helperCertificate) {
+		t.Fatalf("second bao-cred ssh cert replaced a valid certificate: %v", readErr)
+	}
+
+	t.Log("bao-cred ssh cert signed a certificate for the derived role e2e-node and reused it on the next run")
+
 	// Only tokens matching a Requester Rule may request Grants.
 	humanToken := responseAuthToken(t, mustCall(t, ctx, bao, "", http.MethodPost, "auth/userpass/login/approver", map[string]string{"password": approverPassword}, http.StatusOK))
 	grantAPI := authorizerv1connect.NewGrantServiceClient(application.rpcHTTPClient(), application.baseURL+"/api")

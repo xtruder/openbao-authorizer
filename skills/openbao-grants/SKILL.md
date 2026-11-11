@@ -1,6 +1,6 @@
 ---
 name: openbao-grants
-description: Use when a task needs a secret or credential from OpenBao/Vault (API tokens, database passwords, cloud keys, `bao`/`vault` CLI, secretspec `openbao://`), when an OpenBao read or secretspec fails with permission denied, when signing an SSH key or calling another OpenBao endpoint that takes parameters, or when you must ask a human to grant access with bao-cred.
+description: Use when a task needs a secret or credential from OpenBao/Vault (API tokens, database passwords, cloud keys, `bao`/`vault` CLI, secretspec `openbao://`), when an OpenBao read or secretspec fails with permission denied, when connecting with ssh/scp/rsync to a node through OpenBao SSH certificates, when signing an SSH key or calling another OpenBao endpoint that takes parameters, or when you must ask a human to grant access with bao-cred.
 ---
 
 # OpenBao grants
@@ -52,6 +52,16 @@ bao-cred write --reason "Deploy the app to jarvis as the user asked" --field sig
 - `bao-cred write [flags] <path> [key=value ...] [-- command ...]` writes the pairs and delivers the response like `read`. `key=@file` reads a value from a file, `key=-` from stdin.
 - With `--reason`, a permission-denied write files a Grant Request for `PATH=update` (`--capabilities create,update` for a path that may not exist yet), waits, then retries once.
 - Pick an existing role from `bao-cred grantable`; the role, not your parameters, decides what you get.
+
+## SSH to a node
+
+When the user's ssh config uses bao-cred as its credential helper (`bao-cred ssh config` blocks), plain `ssh`, `scp`, `rsync` and `git` get a certificate through the Grant flow. Set the reason the Approver sees:
+
+```sh
+BAO_SSH_REASON="Restart the api stack on jarvis as the user asked" ssh core@jarvis 'systemctl --user restart api'
+```
+
+Without an ssh config block, ask for the certificate yourself: `bao-cred ssh cert --reason "..." core@jarvis` writes a key and certificate to `$XDG_RUNTIME_DIR/bao-cred/ssh/jarvis-core` (the role is `<host>-<user>`), then `ssh -i "$XDG_RUNTIME_DIR/bao-cred/ssh/jarvis-core" core@jarvis`. Wait while ssh pauses for approval; don't retry in parallel.
 
 ## Request several paths at once
 

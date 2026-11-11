@@ -63,6 +63,7 @@ All credentials, OpenBao state and application state are disposable. The harness
   - Revoking a Grant through the approver API takes effect at once and leaves other Grants intact.
 - **Request on denial:** `bao-cred read --reason … <path>` files a request when a read is denied, waits, and prints the secret after approval. Without `--reason` it fails with a hint.
 - **Write on denial:** `bao-cred write --reason … ssh/sign/e2e-node public_key=@…` files an `update` request when the write is denied, waits, and after approval writes the signed certificate to `--output`. The certificate is a user certificate for the public key sent, with the role's only principal `core@e2e-node`, the role's key ID format and its 5m TTL.
+- **SSH credential helper:** `bao-cred ssh cert --key … node@e2e.example.ts.net` derives the role `e2e-node` (`<host>-<user>`), signs with the same Grant and writes a certificate for `core@e2e-node`; a second run leaves the valid certificate in place.
 - **Grant listing:** `bao-cred grants` lists only the identity's active Grants.
 - **Catalog:** `bao-cred grantable` shows the `e2e-kv` rule with the concrete paths discovered under `kv/metadata/e2e`, without the folder key. Reading one of them with `--reason` works after approval.
 - **Requester Rules:** an approver's userpass token gets `NOT_REQUESTER` from `GrantService`. A `ci` AppRole token matches the `ci` rule, files a request, and reads the path once it is approved; identity A can't.

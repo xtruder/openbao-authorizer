@@ -49,7 +49,8 @@ const rootExample = `  bao-cred init
   bao-cred request --reason "migrate app schema" --item database/creds/app=read --item kv/data/app=read,update
   bao-cred read --format dotenv --map DB_USER=username --map DB_PASSWORD=password database/creds/app
   bao-cred read --map GH_TOKEN=token github/token/project-example -- gh repo view org/repo
-  bao-cred write --reason "ssh to jarvis" --field signed_key --output key-cert.pub ssh/sign/jarvis-core public_key=@key.pub`
+  bao-cred write --reason "ssh to jarvis" --field signed_key --output key-cert.pub ssh/sign/jarvis-core public_key=@key.pub
+  bao-cred ssh --reason "check disk usage on jarvis" core@jarvis df -h`
 
 const (
 	exitFailure    = 1
@@ -79,6 +80,9 @@ type options struct {
 	quiet        bool
 	mappings     []mapping
 	command      []string
+	// beforeRequest, if set, runs before a Grant Request is filed on
+	// permission denied, and its error stops the request.
+	beforeRequest func(ctx context.Context, authorizer *authorizerClient) error
 }
 
 // exitError carries a specific exit status. A nil err means the status came
@@ -162,7 +166,7 @@ func newRootCommand(run credentialsFunc) *cobra.Command {
 	root.SetFlagErrorFunc(flagError)
 	root.PersistentFlags().String("identity", "", "Named Identity whose stored token to use (default $BAO_IDENTITY)")
 	root.AddCommand(
-		newReadCommand(run), newWriteCommand(run), newRequestCommand(), newGrantsCommand(), newRevokeCommand(), newGrantableCommand(),
+		newReadCommand(run), newWriteCommand(run), newSSHCommand(), newRequestCommand(), newGrantsCommand(), newRevokeCommand(), newGrantableCommand(),
 		newInitCommand(), newAuthCommand(), newStatusCommand(), newEnvCommand(), newLogoutCommand(), newRunCommand(),
 	)
 	return root
@@ -282,45 +286,7 @@ func addCredentialFlags(flags *pflag.FlagSet, opts *options, rawMappings *[]stri
 }
 
 func runCredentials(ctx context.Context, opts options, stdout, stderr io.Writer) error {
-	token, err := requesterToken(ctx, opts.identity)
-	if err != nil {
-		return err
-	}
-
-	client, err := newOpenBaoClient(token)
-	if err != nil {
-		return err
-	}
-
-	// A denied write changed nothing, so retrying it after approval is safe.
-	access := func() (map[string]any, error) {
-		if opts.write {
-			return writeCredentials(ctx, client, opts.path, opts.data)
-		}
-
-		return readCredentials(ctx, client, opts.path)
-	}
-
-	progress := newProgress(stderr, opts.quiet)
-	item := opts.path + "=" + strings.Join(opts.capabilities, ",")
-	data, err := access()
-	if isPermissionDenied(err) {
-		if opts.reason == "" {
-			return fmt.Errorf(
-				"%w\nhint: rerun with --reason TEXT to request access, or file a Grant Request with "+
-					"bao-cred request --reason TEXT --item %s",
-				err, item,
-			)
-		}
-
-		err = requestAccess(ctx, opts, token, progress)
-		if err != nil {
-			return err
-		}
-
-		data, err = access()
-	}
-
+	data, err := credentials(ctx, opts, stderr)
 	if err != nil {
 		return err
 	}
@@ -342,11 +308,61 @@ func runCredentials(ctx context.Context, opts options, stdout, stderr io.Writer)
 	return err
 }
 
+// credentials reads or writes opts.path with the Requester's token. On
+// permission denied with a reason, it requests access and retries once.
+func credentials(ctx context.Context, opts options, stderr io.Writer) (map[string]any, error) {
+	token, err := requesterToken(ctx, opts.identity)
+	if err != nil {
+		return nil, err
+	}
+
+	client, err := newOpenBaoClient(token)
+	if err != nil {
+		return nil, err
+	}
+
+	// A denied write changed nothing, so retrying it after approval is safe.
+	access := func() (map[string]any, error) {
+		if opts.write {
+			return writeCredentials(ctx, client, opts.path, opts.data)
+		}
+
+		return readCredentials(ctx, client, opts.path)
+	}
+
+	progress := newProgress(stderr, opts.quiet)
+	item := opts.path + "=" + strings.Join(opts.capabilities, ",")
+	data, err := access()
+	if isPermissionDenied(err) {
+		if opts.reason == "" {
+			return nil, fmt.Errorf(
+				"%w\nhint: rerun with --reason TEXT to request access, or file a Grant Request with "+
+					"bao-cred request --reason TEXT --item %s",
+				err, item,
+			)
+		}
+
+		if err = requestAccess(ctx, opts, token, progress); err != nil {
+			return nil, err
+		}
+
+		data, err = access()
+	}
+
+	return data, err
+}
+
 func requestAccess(ctx context.Context, opts options, token string, progress progressFunc) error {
 	item := opts.path + "=" + strings.Join(opts.capabilities, ",")
 	authorizer, err := newAuthorizerClient(opts.authorizer, token)
 	if err != nil {
 		return fmt.Errorf("request %s: %w", item, err)
+	}
+
+	if opts.beforeRequest != nil {
+		if err = opts.beforeRequest(ctx, authorizer); err != nil {
+			return err
+		}
 	}
 
 	scope, err := parseScope(opts.scope)
