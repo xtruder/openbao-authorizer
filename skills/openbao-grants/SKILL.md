@@ -101,7 +101,7 @@ It ends only Grants this session filed, including project or global ones it aske
 
 ## secretspec
 
-secretspec, the `bao` CLI and other tools that read the token from the environment get your session's token through `bao-cred run`:
+When the user set bao-cred up as the `bao` CLI's token helper (`token_helper` in `~/.bao` names `bao-cred-token-helper`), plain `bao` commands already use your session's token. Otherwise, secretspec, the `bao` CLI and other tools that read the token from the environment get it through `bao-cred run`:
 
 ```sh
 bao-cred run -- secretspec run -- make test

@@ -39,18 +39,28 @@ func selectedIdentity(flag string) string {
 // Tokens. It ignores BAO_TOKEN, VAULT_TOKEN and BAO_NO_TOKEN_FILE because a
 // project's .envrc sets those to the Named Token itself.
 func loginToken() (string, error) {
-	home, err := os.UserHomeDir()
+	path, err := loginTokenPath()
 	if err != nil {
-		return "", fmt.Errorf("locate home directory: %w", err)
+		return "", err
 	}
 
-	// `bao login` stores the token here with the default token helper.
-	contents, err := os.ReadFile(filepath.Join(home, ".vault-token")) // #nosec G304 -- fixed file in the user's home.
+	contents, err := os.ReadFile(path) // #nosec G304 -- fixed file in the user's home.
 	if token := strings.TrimSpace(string(contents)); err == nil && token != "" {
 		return token, nil
 	}
 
 	return "", errors.New("no login token: run bao login first; bao-cred auth mints with the token in ~/.vault-token")
+}
+
+// loginTokenPath is where bao login stores the token, with the CLI's
+// built-in token helper or with bao-cred's.
+func loginTokenPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("locate home directory: %w", err)
+	}
+
+	return filepath.Join(home, ".vault-token"), nil
 }
 
 type identityStatus struct {

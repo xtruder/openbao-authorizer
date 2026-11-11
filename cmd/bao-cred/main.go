@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -105,7 +104,7 @@ func (e *exitError) Unwrap() error { return e.err }
 func usageError(err error) error { return &exitError{code: exitUsage, err: err} }
 
 func main() {
-	err := run(os.Args[1:], os.Stdout, os.Stderr)
+	err := run(commandArguments(os.Args), os.Stdout, os.Stderr)
 	if err == nil {
 		return
 	}
@@ -168,6 +167,7 @@ func newRootCommand(run credentialsFunc) *cobra.Command {
 	root.AddCommand(
 		newReadCommand(run), newWriteCommand(run), newSSHCommand(), newRequestCommand(), newGrantsCommand(), newRevokeCommand(), newGrantableCommand(),
 		newInitCommand(), newAuthCommand(), newStatusCommand(), newEnvCommand(), newLogoutCommand(), newRunCommand(),
+		newTokenHelperCommand(),
 	)
 	return root
 }
@@ -627,18 +627,12 @@ func requesterToken(ctx context.Context, identity string) (string, error) {
 		return token, nil
 	}
 
-	if identity == "" {
-		var err error
-		if identity, err = projectIdentity(); err != nil {
-			return "", err
-		}
+	identity, err := selectIdentity(identity)
+	if err != nil {
+		return "", err
 	}
 
 	if identity != "" {
-		if err := validateIdentityName(identity); err != nil {
-			return "", err
-		}
-
 		// Re-minting an invalid Named Token reports itself on stderr.
 		token, _, err := identityToken(ctx, identity, newProgress(os.Stderr, false))
 		return token, err
@@ -650,16 +644,28 @@ func requesterToken(ctx context.Context, identity string) (string, error) {
 		return "", errors.New("no token: run bao-cred init in the project, or set BAO_IDENTITY or BAO_TOKEN (or VAULT_TOKEN); the bao login token file is disabled by BAO_NO_TOKEN_FILE")
 	}
 
-	home, err := os.UserHomeDir()
-	if err == nil {
-		// `bao login` stores the token here with the default token helper.
-		contents, readErr := os.ReadFile(filepath.Join(home, ".vault-token")) // #nosec G304 -- fixed file in the user's home.
-		if token := strings.TrimSpace(string(contents)); readErr == nil && token != "" {
-			return token, nil
-		}
+	if token, err := loginToken(); err == nil {
+		return token, nil
 	}
 
 	return "", errors.New("no token: run bao-cred init in the project, set BAO_IDENTITY or BAO_TOKEN (or VAULT_TOKEN), or run bao login")
+}
+
+// selectIdentity returns the selected Named Identity, validated: identity,
+// else the working directory's identity file, else "".
+func selectIdentity(identity string) (string, error) {
+	if identity == "" {
+		var err error
+		if identity, err = projectIdentity(); err != nil {
+			return "", err
+		}
+	}
+
+	if identity == "" {
+		return "", nil
+	}
+
+	return identity, validateIdentityName(identity)
 }
 
 func newOpenBaoClient(token string) (*openbao.Client, error) {

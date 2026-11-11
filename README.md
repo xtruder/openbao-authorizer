@@ -216,7 +216,7 @@ usually an **Agent Session**'s **Session Token** or a **Named Identity**'s
 **Named Token**, and files **Grant Requests** with the authorizer when the
 Requester needs more access. `read`, `write`, `ssh`, `request`, `grants`, `revoke`,
 `grantable` and `run` work with the Requester's token; `init`, `auth`, `env`, `status` and
-`logout` manage tokens. Run `bao-cred <command> --help` for details.
+`logout` manage tokens; `token-helper` serves the `bao` CLI. Run `bao-cred <command> --help` for details.
 
 | Setting | Source |
 |---|---|
@@ -324,6 +324,33 @@ to your own token, and exits 1. `bao-cred status [name]` renews the token and
 prints its store, entity ID and TTL (inside a session, the Session Token's);
 `bao-cred logout [name]` revokes the Named Token, and so its sessions, and
 deletes them from every store.
+
+### bao CLI token helper
+
+bao-cred can be the `bao` CLI's token helper, so plain `bao` commands use the
+token bao-cred would: in a project with an identity, its Named Token (its
+Session Token inside an Agent Session); elsewhere, your `bao login` token. The
+CLI's `token_helper` must name an existing file, so link bao-cred under the
+name `bao-cred-token-helper`, which makes it act as `bao-cred token-helper`:
+
+```sh
+ln -s bao-cred ~/.local/bin/bao-cred-token-helper
+echo "token_helper = \"$HOME/.local/bin/bao-cred-token-helper\"" > ~/.bao   # or $BAO_CONFIG_PATH
+
+cd ~/src/myproject && bao kv get -mount=kv app/config   # as the project's identity
+```
+
+- `get` prints the token, renewing, re-minting and minting Session Tokens as
+  every bao-cred command does. A selected identity without a token is an
+  error, never your login token.
+- `store`, called by `bao login`, writes the token to `~/.vault-token`, where
+  bao-cred mints Named Tokens from, just like the built-in helper.
+- `erase`, called by `bao logout` and `bao token revoke -self`, deletes
+  `~/.vault-token`, except in a directory with an identity: the token revoked
+  there was the identity's, which bao-cred mints again on next use.
+
+`BAO_TOKEN` and `VAULT_TOKEN` bypass the helper, so inside a project
+`BAO_TOKEN=$(cat ~/.vault-token) bao ...` runs a command as yourself.
 
 Named Tokens are periodic: each renewal extends one 32-day period, so a token
 in use never expires. bao-cred renews the Named Token whenever it uses it,
