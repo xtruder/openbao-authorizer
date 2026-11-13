@@ -61,7 +61,7 @@ Connect with `bao-cred ssh`, which signs an SSH certificate for your session (th
 bao-cred ssh --reason "Restart the api stack on jarvis as the user asked" core@jarvis 'systemctl --user restart api'
 ```
 
-- bao-cred flags come before the destination; ssh options go after `--`: `bao-cred ssh -- -L 8080:localhost:80 core@jarvis`.
+- bao-cred's flags (`--reason`, `--role`) come first; ssh options and the command follow as with plain ssh: `bao-cred ssh -L 8080:localhost:80 core@jarvis`.
 - For git and file copies: `GIT_SSH_COMMAND='bao-cred ssh' git push`, `rsync -e 'bao-cred ssh' file core@jarvis:dir/`. Plain `ssh`, `scp` and `sftp` don't get a certificate.
 - The certificate lasts as long as the role says (typically 1h) and is reused; one approval covers the task. Wait while it asks for approval; don't retry in parallel.
 

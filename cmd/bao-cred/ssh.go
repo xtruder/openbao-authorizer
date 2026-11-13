@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -45,7 +46,7 @@ func newSSHCommand() *cobra.Command {
 	var opts sshCertOptions
 
 	command := &cobra.Command{
-		Use:   "ssh [flags] [--] [ssh options] user@host [command [args...]]",
+		Use:   "ssh [--flags] [ssh options] destination [command [args...]]",
 		Short: "Run ssh with an OpenBao-signed certificate of the Requester",
 		Long: `Runs ssh with a key and certificate that OpenBao signs for the current
 Requester: in a project, its Named Identity, or its Agent Session inside one.
@@ -62,17 +63,30 @@ permission denied it files a Grant Request for <mount>/sign/<role>=update
 with the reason from --reason, else $BAO_REASON, else "ssh user@host", and
 waits for a decision.
 
-bao-cred flags come before the destination; put ssh's own options after --.
-Alias ssh to it in your shell (alias ssh='bao-cred ssh'), and use it for other
+bao-cred's flags are the leading --name or --name=value arguments; ssh has
+no long options, so everything from the first other argument on, including
+ssh options such as -L and a bare --, goes to ssh unchanged. Alias ssh to it
+in your shell (alias ssh='bao-cred ssh'), and use it for other
 tools: GIT_SSH_COMMAND='bao-cred ssh' or rsync -e 'bao-cred ssh'.
 bao-cred ssh cert only ensures the key and certificate, for tools that need
 the files.`,
 		Example: `  bao-cred ssh --reason "check disk usage on jarvis" core@jarvis df -h
   bao-cred ssh jarvis
-  bao-cred ssh --role jarvis-core -- -L 8080:localhost:80 core@100.126.6.34
+  bao-cred ssh --role jarvis-core -L 8080:localhost:80 core@100.126.6.34
   GIT_SSH_COMMAND='bao-cred ssh' git fetch`,
 		Args: cobra.ArbitraryArgs,
+		// Its flags are parsed by hand, so that ssh's own options pass through.
+		DisableFlagParsing: true,
 		RunE: func(command *cobra.Command, arguments []string) error {
+			arguments, err := parseSSHFlags(command, arguments)
+			if errors.Is(err, pflag.ErrHelp) {
+				return command.Help()
+			}
+
+			if err != nil {
+				return usageError(err)
+			}
+
 			if len(arguments) == 0 {
 				return usageError(errors.New("an ssh destination is required, or the subcommand cert"))
 			}
@@ -82,9 +96,6 @@ the files.`,
 		},
 	}
 
-	// Everything from the destination on belongs to ssh, including options
-	// of the remote command.
-	command.Flags().SetInterspersed(false)
 	flags := command.Flags()
 	flags.StringVar(&opts.role, "role", "", "SSH role to sign with (default <host>-<user> of the destination)")
 	flags.StringVar(&opts.mount, "mount", "ssh", "path of the OpenBao SSH secrets engine")
@@ -96,6 +107,44 @@ the files.`,
 	flags.BoolVar(&opts.credentials.quiet, "quiet", false, "suppress progress messages")
 	command.AddCommand(newSSHCertCommand())
 	return command
+}
+
+// parseSSHFlags parses the leading --name and --name=value arguments as
+// bao-cred's flags, including the inherited --identity, and returns the rest
+// for ssh, which has only single-dash options. A bare -- is ssh's too.
+func parseSSHFlags(command *cobra.Command, arguments []string) ([]string, error) {
+	flags := pflag.NewFlagSet(command.Name(), pflag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	flags.AddFlagSet(command.Flags())
+	// Command.Flags already holds cobra's --help.
+	flags.AddFlagSet(command.InheritedFlags())
+	end := 0
+	for end < len(arguments) && strings.HasPrefix(arguments[end], "--") && arguments[end] != "--" {
+		name, _, hasValue := strings.Cut(strings.TrimPrefix(arguments[end], "--"), "=")
+		end++
+		flag := flags.Lookup(name)
+		if flag == nil {
+			return nil, fmt.Errorf("unknown flag --%s; ssh has no long options, so bao-cred ssh takes every leading --name as its own", name)
+		}
+
+		if !hasValue && flag.Value.Type() != "bool" {
+			if end == len(arguments) {
+				return nil, fmt.Errorf("flag --%s needs a value", name)
+			}
+
+			end++
+		}
+	}
+
+	if err := flags.Parse(arguments[:end]); err != nil {
+		return nil, err
+	}
+
+	if help, _ := flags.GetBool("help"); help {
+		return nil, pflag.ErrHelp
+	}
+
+	return arguments[end:], nil
 }
 
 func runSSH(

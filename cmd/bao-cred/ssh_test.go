@@ -408,7 +408,7 @@ func TestSSHRunsSSHWithTheRequestersCertificate(t *testing.T) {
 	runs := fakeSSH(t, 0)
 
 	for range 2 {
-		if err := run([]string{"ssh", "--", "-p", "2222", "core@jarvis", "uptime", "-p"}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		if err := run([]string{"ssh", "-p", "2222", "core@jarvis", "uptime", "-p"}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -453,6 +453,33 @@ func TestSSHKeepsEachRequestersCertificateApart(t *testing.T) {
 	}
 }
 
+func TestSSHPassesSSHArgumentsThrough(t *testing.T) {
+	signer := newFakeSSHSigner(t, time.Hour, func() bool { return true })
+	setupEnvironment(t, "", signer.URL)
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	runs := fakeSSH(t, 0)
+
+	// Leading --name arguments are bao-cred's, before or after a global
+	// --identity; the rest, including a bare --, is ssh's.
+	for _, test := range []struct {
+		arguments []string
+		suffix    string
+	}{
+		{[]string{"ssh", "--reason=check the logs", "--quiet", "-L", "8080:localhost:80", "core@jarvis"}, " -L 8080:localhost:80 core@jarvis"},
+		{[]string{"ssh", "--role", "jarvis-core", "--", "core@jarvis", "ls", "--all"}, " -- core@jarvis ls --all"},
+		{[]string{"--identity", "app", "ssh", "--timeout", "1m", "core@jarvis"}, " core@jarvis"},
+	} {
+		if err := run(test.arguments, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+			t.Fatalf("%v: %v", test.arguments, err)
+		}
+
+		got := runs()
+		if !strings.HasSuffix(got[len(got)-1], test.suffix) || !strings.Contains(got[len(got)-1], "/jarvis-core -o CertificateFile=") {
+			t.Errorf("%v: ssh ran with %q, want it to end in %q", test.arguments, got[len(got)-1], test.suffix)
+		}
+	}
+}
+
 func TestSSHResolvesAliasesWithTheSSHConfig(t *testing.T) {
 	signer := newFakeSSHSigner(t, time.Hour, func() bool { return true })
 	setupEnvironment(t, "", signer.URL)
@@ -488,8 +515,11 @@ func TestSSHUsageErrors(t *testing.T) {
 	for _, arguments := range [][]string{
 		{"ssh"},
 		{"ssh", "core@100.126.6.34"},
-		{"ssh", "--", "-p"},
+		{"ssh", "-p"},
 		{"ssh", "--role", "a/b", "core@jarvis"},
+		{"ssh", "--bogus", "core@jarvis"},
+		{"ssh", "--reason"},
+		{"ssh", "--timeout", "soon", "core@jarvis"},
 	} {
 		if err := run(arguments, &bytes.Buffer{}, &bytes.Buffer{}); exitCode(err) != exitUsage {
 			t.Errorf("%v: error = %v (exit %d)", arguments, err, exitCode(err))

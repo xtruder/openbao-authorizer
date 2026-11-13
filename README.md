@@ -473,7 +473,8 @@ alias ssh='bao-cred ssh'          # in your shell profile
 ssh core@jarvis                   # role jarvis-core
 ssh jarvis uptime                 # alias with User offlinehq: role jarvis-offlinehq
 bao-cred ssh --reason "restart the api" core@jarvis 'systemctl --user restart api'
-bao-cred ssh --role jarvis-core -- -L 8080:localhost:80 core@100.126.6.34
+ssh -L 8080:localhost:80 jarvis   # ssh options pass through
+bao-cred ssh --role jarvis-core core@100.126.6.34
 GIT_SSH_COMMAND='bao-cred ssh' git fetch   # rsync: rsync -e 'bao-cred ssh' …
 ```
 
@@ -491,8 +492,10 @@ GIT_SSH_COMMAND='bao-cred ssh' git fetch   # rsync: rsync -e 'bao-cred ssh' …
 - **Access:** on permission denied it files a Grant Request for
   `ssh/sign/<role>=update` with the reason from `--reason`, else `BAO_REASON`,
   else `ssh user@host`, and waits for a decision.
-- **Arguments:** bao-cred flags come before the destination; put ssh's own
-  options after `--`. ssh gets `-i`, `-o CertificateFile` and
+- **Arguments:** bao-cred's flags are the leading `--name` or `--name=value`
+  arguments; ssh has no long options, so everything from the first other
+  argument on, including options such as `-L` and a bare `--`, goes to ssh
+  unchanged. ssh gets `-i`, `-o CertificateFile` and
   `-o IdentitiesOnly=yes` plus your arguments, and bao-cred exits with its
   status.
 
