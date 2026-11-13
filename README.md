@@ -532,6 +532,34 @@ account as a **signing key**. The operator creates the key with
 `transit/keys/<key> type=ed25519` and reads the public key from
 `transit/keys/<key>` (`keys.1.public_key`, base64 of the raw key).
 
+### Git credentials
+
+`bao-cred git-credential` is a git credential helper: for HTTPS fetches and
+pushes, git asks it for a password, and it reads one from OpenBao, such as a
+GitHub App installation token from `github/token/project-<name>`, through the
+usual Grant flow. Nothing is stored; tokens come with `password_expiry_utc`,
+so git never reuses an expired one.
+
+```ini
+# ~/.config/git/config: the path depends on the organization or repository.
+[credential "https://github.com"]
+    useHttpPath = true
+[credential "https://github.com/example-org"]
+    helper = "!bao-cred git-credential github/token/project-example"
+[credential "https://github.com/example-org/app"]
+    helper = "!bao-cred git-credential github/token/project-app"
+```
+
+Git passes the operation (`get`, `store`, `erase`) after the helper's
+arguments and uses the most specific matching section; `useHttpPath` lets
+sections match on the repository path. `get` answers with username
+`x-access-token` and the `token` field as the password (`--field` names
+another). On permission denied it files a Grant Request for the path with the
+reason from `BAO_REASON`, else `git access to <url>`. Remotes must use HTTPS:
+`url."https://github.com/".insteadOf = git@github.com:` switches existing SSH
+remotes. GitHub records pushes as made by the App; commits keep their author
+and signature.
+
 ### Requesting Grants
 
 ```sh

@@ -935,6 +935,20 @@ grantable "e2e-git-sign" {
 	}
 
 	t.Log("git signed a commit through bao-cred-ssh-keygen with the transit key after approval, and git verify-commit accepted it")
+
+	// As git's credential helper, bao-cred answers git credential fill with a
+	// credential from OpenBao: here identity B's approved kv/data/e2e/theta.
+	fill := exec.CommandContext(ctx, "git", "-c",
+		"credential.helper=!"+baoCredBinary+" git-credential --field data.value kv/data/e2e/theta", "credential", "fill")
+	fill.Dir = runtimeDirectory
+	fill.Env = cred.environment(append(identityB.env(), "PATH="+os.Getenv("PATH"), "GIT_TERMINAL_PROMPT=0"))
+	fill.Stdin = strings.NewReader("protocol=https\nhost=git.example.com\npath=org/repo.git\n\n")
+	filled, fillErr := fill.CombinedOutput()
+	if fillErr != nil || !strings.Contains(string(filled), "username=x-access-token\n") || !strings.Contains(string(filled), "password=secret-theta\n") {
+		t.Fatalf("git credential fill = %q, %v", filled, fillErr)
+	}
+
+	t.Log("git credential fill got its password from bao-cred git-credential, read from OpenBao with identity B's Grant")
 	t.Log("real OpenBao Named Identity grant workflow passed")
 }
 

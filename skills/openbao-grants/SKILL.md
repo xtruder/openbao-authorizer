@@ -75,6 +75,14 @@ BAO_REASON="Commit the parser fix the user asked for" git commit -m "Fix the par
 
 One approval usually covers an hour of commits. If signing is rejected or times out, the commit fails: tell the user rather than committing unsigned.
 
+## git push and fetch over HTTPS
+
+When the user's git uses `bao-cred git-credential` as its credential helper, `git push`/`git fetch` over HTTPS asks for a Grant on the configured `github/token/project-<name>` path and waits. Set `BAO_REASON` for the Approver, and `GIT_TERMINAL_PROMPT=0` so a refused credential fails instead of prompting:
+
+```sh
+BAO_REASON="Push the parser fix branch as the user asked" GIT_TERMINAL_PROMPT=0 git push origin fix/parser
+```
+
 ## Request several paths at once
 
 When you know up front what the task needs, ask for everything in one request so the human approves it in one pass:
