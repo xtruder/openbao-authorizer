@@ -587,6 +587,14 @@ func lockFile(path string) (func(), error) {
 // list, so a mistyped host never reaches an Approver. Without discovered
 // paths under the sign endpoint there is nothing to check against.
 func checkSSHRole(ctx context.Context, authorizer *authorizerClient, path string) error {
+	return checkCatalog(ctx, authorizer, path, "no SSH role at %s; pass --role with one of: %s")
+}
+
+// checkCatalog refuses a derived path that the catalog's discovered paths
+// next to it don't include, so a request nobody should approve is never
+// filed. message gets the path and the known names. Without discovered
+// paths there is nothing to check against.
+func checkCatalog(ctx context.Context, authorizer *authorizerClient, path, message string) error {
 	grantables, err := authorizer.grantables(ctx)
 	if err != nil {
 		return err
@@ -598,7 +606,7 @@ func checkSSHRole(ctx context.Context, authorizer *authorizerClient, path string
 		return nil
 	}
 
-	return fmt.Errorf("no SSH role at %s; pass --role with one of: %s", path, strings.Join(known, ", "))
+	return fmt.Errorf(message, path, strings.Join(known, ", "))
 }
 
 // sshRoles returns the sorted role names that the catalog discovered under

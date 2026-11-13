@@ -27,15 +27,18 @@ nothing, and every get reads OpenBao again.
 On permission denied it files a Grant Request for <openbao-path>=read with the
 reason from BAO_REASON, else "git access to <url>", and waits for a decision.
 
-git passes the operation after the arguments in the helper's command, and
-picks the most specific credential section for a URL, so the path can follow
-the organization or repository:
+{owner} and {repo} in the path become the first two segments of the URL's
+path, lowercased and without .git, so one helper serves every repository; git
+sends the path only with useHttpPath. A repository whose path the catalog
+doesn't list is refused before a request is filed. git passes the operation
+after the arguments in the helper's command:
 
-  [credential "https://github.com/example-org"]
-      helper = "!bao-cred git-credential github/token/project-example"
-      useHttpPath = true`,
-		Example: `  git config --global credential.https://github.com/example-org.helper \
-    '!bao-cred git-credential github/token/project-example'`,
+  [credential "https://github.com"]
+      useHttpPath = true
+      helper = "!bao-cred git-credential github/token/project-{owner}-{repo}"`,
+		Example: `  git config --global credential.https://github.com.useHttpPath true
+  git config --global credential.https://github.com.helper \
+    '!bao-cred git-credential github/token/project-{owner}-{repo}'`,
 		Args: func(_ *cobra.Command, arguments []string) error {
 			if len(arguments) != 2 {
 				return usageError(errors.New("git-credential needs an OpenBao path and an operation: get, store, or erase"))
@@ -68,15 +71,29 @@ func runGitCredentialGet(ctx context.Context, identity, path, field string, stdi
 		return err
 	}
 
+	templated := strings.Contains(path, "{owner}") || strings.Contains(path, "{repo}")
+	if templated {
+		if path, err = expandGitCredentialPath(path, request["path"]); err != nil {
+			return err
+		}
+	}
+
 	reason := grantReason("")
 	if reason == "" {
 		reason = "git access to " + gitCredentialURL(request)
 	}
 
-	data, err := credentials(ctx, options{
+	opts := options{
 		identity: identity, path: path, reason: reason,
 		capabilities: []string{"read"}, timeout: defaultApprovalTimeout,
-	}, stderr)
+	}
+	if templated {
+		opts.beforeRequest = func(ctx context.Context, authorizer *authorizerClient) error {
+			return checkCatalog(ctx, authorizer, opts.path, "%s isn't in the catalog, so this repository has no credential; known: %s")
+		}
+	}
+
+	data, err := credentials(ctx, opts, stderr)
 	if err != nil {
 		return err
 	}
@@ -100,6 +117,32 @@ func runGitCredentialGet(ctx context.Context, identity, path, field string, stdi
 
 	_, err = io.WriteString(stdout, answer)
 	return err
+}
+
+// expandGitCredentialPath fills {owner} and {repo} in path from the first
+// two segments of the requested URL's path, lowercased, without .git.
+func expandGitCredentialPath(path, urlPath string) (string, error) {
+	segments := strings.Split(strings.Trim(urlPath, "/"), "/")
+	if len(segments) < 2 || segments[0] == "" || segments[1] == "" {
+		return "", errors.New("git sent no owner/repo path; set credential.useHttpPath = true for this host")
+	}
+
+	owner := strings.ToLower(segments[0])
+	repo := strings.ToLower(strings.TrimSuffix(segments[1], ".git"))
+	for _, value := range []string{owner, repo} {
+		if !gitPathSegment(value) {
+			return "", fmt.Errorf("unsupported owner or repository name %q", value)
+		}
+	}
+
+	return strings.NewReplacer("{owner}", owner, "{repo}", repo).Replace(path), nil
+}
+
+// gitPathSegment allows the characters GitHub allows in owner and
+// repository names, so nothing else reaches the OpenBao path.
+func gitPathSegment(value string) bool {
+	return value != "" && value != "." && value != ".." &&
+		strings.Trim(value, "abcdefghijklmnopqrstuvwxyz0123456789-_.") == ""
 }
 
 // readGitCredentialRequest reads git's key=value lines up to a blank line.

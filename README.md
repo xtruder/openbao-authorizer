@@ -541,22 +541,27 @@ usual Grant flow. Nothing is stored; tokens come with `password_expiry_utc`,
 so git never reuses an expired one.
 
 ```ini
-# ~/.config/git/config: the path depends on the organization or repository.
+# ~/.config/git/config: one helper for every GitHub repository.
 [credential "https://github.com"]
     useHttpPath = true
-[credential "https://github.com/example-org"]
-    helper = "!bao-cred git-credential github/token/project-example"
-[credential "https://github.com/example-org/app.git"]
-    helper = "!bao-cred git-credential github/token/project-app"
+    helper = "!bao-cred git-credential github/token/project-{owner}-{repo}"
 ```
 
+`{owner}` and `{repo}` become the first two segments of the URL's path,
+lowercased and without `.git`, so `https://github.com/xtruder/homelab.git`
+reads `github/token/project-xtruder-homelab`: one permission set per
+repository, each requested and approved on its own. git sends the path only
+with `useHttpPath`. A repository whose path the catalog doesn't list is
+refused before any request is filed. Without placeholders, git's per-URL
+credential sections pick the path instead; they match the remote URL at whole
+path segments, so a section for one repository must include `.git` when the
+remote does.
+
 Git passes the operation (`get`, `store`, `erase`) after the helper's
-arguments and uses the most specific matching section; `useHttpPath` lets
-sections match on the repository path, at whole path segments: a section for a
-repository must match the remote URL as written, `.git` included. `get` answers with username
-`x-access-token` and the `token` field as the password (`--field` names
-another). On permission denied it files a Grant Request for the path with the
-reason from `BAO_REASON`, else `git access to <url>`. Remotes must use HTTPS:
+arguments. `get` answers with username `x-access-token` and the `token` field
+as the password (`--field` names another). On permission denied it files a
+Grant Request for the path with the reason from `BAO_REASON`, else
+`git access to <url>`. Remotes must use HTTPS:
 `url."https://github.com/".insteadOf = git@github.com:` switches existing SSH
 remotes. GitHub records pushes as made by the App; commits keep their author
 and signature.
