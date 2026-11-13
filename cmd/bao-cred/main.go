@@ -167,7 +167,7 @@ func newRootCommand(run credentialsFunc) *cobra.Command {
 	root.AddCommand(
 		newReadCommand(run), newWriteCommand(run), newSSHCommand(), newRequestCommand(), newGrantsCommand(), newRevokeCommand(), newGrantableCommand(),
 		newInitCommand(), newAuthCommand(), newStatusCommand(), newEnvCommand(), newLogoutCommand(), newRunCommand(),
-		newTokenHelperCommand(),
+		newTokenHelperCommand(), newSSHKeygenCommand(),
 	)
 	return root
 }

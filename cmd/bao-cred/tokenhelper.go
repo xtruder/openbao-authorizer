@@ -20,11 +20,16 @@ import (
 // symlink to bao-cred with this name works instead.
 const tokenHelperName = "bao-cred-token-helper" // #nosec G101 -- a program name, not a credential.
 
-// commandArguments maps a run under the token helper's name to the
-// token-helper subcommand.
+// commandArguments maps a run under the token helper's or ssh-keygen's name
+// to its subcommand: the bao and git programs that run them can't pass one.
 func commandArguments(argv []string) []string {
-	if len(argv) > 0 && filepath.Base(argv[0]) == tokenHelperName {
-		return append([]string{"token-helper"}, argv[1:]...)
+	if len(argv) > 0 {
+		switch filepath.Base(argv[0]) {
+		case tokenHelperName:
+			return append([]string{"token-helper"}, argv[1:]...)
+		case sshKeygenName:
+			return append([]string{"ssh-keygen"}, argv[1:]...)
+		}
 	}
 
 	return argv[1:]

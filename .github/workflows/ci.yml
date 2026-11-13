@@ -177,10 +177,10 @@ jobs:
           asset_name: openbao-authorizer-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}
           compress_assets: auto
           multi_binaries: true
-          # A symlink to bao-cred: the name bao-cred runs under as the bao
-          # CLI's token helper (bao-cred token-helper --help). cp -r and tar
-          # keep it a symlink.
-          extra_files: deploy/release/bao-cred-token-helper
+          # Symlinks to bao-cred: the names it runs under as the bao CLI's
+          # token helper and as git's gpg.ssh.program (bao-cred token-helper
+          # --help, bao-cred ssh-keygen --help). cp -r and tar keep them links.
+          extra_files: deploy/release/bao-cred-token-helper deploy/release/bao-cred-ssh-keygen
 
       # sha256sum format ("<hash>  <file>"): Renovate maps the file name to the
       # next release's archive. A bare hash makes it hash the .sha256 file

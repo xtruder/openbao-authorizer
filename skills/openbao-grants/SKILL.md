@@ -65,6 +65,16 @@ bao-cred ssh --reason "Restart the api stack on jarvis as the user asked" core@j
 - For git and file copies: `GIT_SSH_COMMAND='bao-cred ssh' git push`, `rsync -e 'bao-cred ssh' file core@jarvis:dir/`. Plain `ssh`, `scp` and `sftp` don't get a certificate.
 - The certificate lasts as long as the role says (typically 1h) and is reused; one approval covers the task. Wait while it asks for approval; don't retry in parallel.
 
+## Signed commits
+
+When the user's git signs commits through bao-cred (`gpg.ssh.program = bao-cred-ssh-keygen`), `git commit` asks the Approver for `update` on `transit/sign/<key>` the first time and waits. Set the reason they see, and commit as usual:
+
+```sh
+BAO_REASON="Commit the parser fix the user asked for" git commit -m "Fix the parser"
+```
+
+One approval usually covers an hour of commits. If signing is rejected or times out, the commit fails: tell the user rather than committing unsigned.
+
 ## Request several paths at once
 
 When you know up front what the task needs, ask for everything in one request so the human approves it in one pass:

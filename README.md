@@ -88,7 +88,8 @@ ghcr.io/xtruder/openbao-authorizer:sha-<commit>
 
 Version tags publish one archive per supported platform containing both static
 `openbao-authorizer` and `bao-cred` binaries and the `bao-cred-token-helper`
-symlink to `bao-cred` ([bao CLI token helper](#bao-cli-token-helper)), plus a
+and `bao-cred-ssh-keygen` symlinks to `bao-cred` ([bao CLI token
+helper](#bao-cli-token-helper), [Signing git commits](#signing-git-commits)), plus a
 SHA-256 checksum. Extract them into one directory, such as `~/.local/bin`.
 Linux and macOS are available on amd64 and arm64.
 
@@ -503,6 +504,33 @@ GIT_SSH_COMMAND='bao-cred ssh' git fetch   # rsync: rsync -e 'bao-cred ssh' …
 the alias; `bao-cred help ssh` describes bao-cred's flags. `bao-cred ssh cert
 [destination]` only ensures the pair, for tools that need the files; `--key`
 picks another path.
+
+### Signing git commits
+
+bao-cred can sign git commits with an OpenBao **transit** key, an `ed25519`
+key that never leaves OpenBao. Git's SSH signing runs `gpg.ssh.program` with
+`ssh-keygen`'s arguments; `bao-cred-ssh-keygen`, a link to bao-cred shipped
+with releases, takes that place. For a public key whose comment is
+`openbao:<mount>/<key>`, `ssh-keygen -Y sign` builds the standard SSH signature
+and has OpenBao sign it at `<mount>/sign/<key>`; every other call, such as
+verifying signatures, runs the real `ssh-keygen`.
+
+```sh
+git config --global gpg.format ssh
+git config --global gpg.ssh.program bao-cred-ssh-keygen
+git config --global user.signingkey 'key::ssh-ed25519 AAAA… openbao:transit/git-me'
+git config --global commit.gpgsign true
+```
+
+Signing needs `update` on `transit/sign/<key>`, so on permission denied
+bao-cred files a Grant Request (reason from `BAO_REASON`, else
+`sign with <key> in <directory>`) and git waits for the decision. A Grant for
+an hour covers a working session; revoking it stops signing at once. bao-cred
+checks every signature against the configured public key before git stores
+it. To have GitHub show commits as verified, add the public key to your
+account as a **signing key**. The operator creates the key with
+`transit/keys/<key> type=ed25519` and reads the public key from
+`transit/keys/<key>` (`keys.1.public_key`, base64 of the raw key).
 
 ### Requesting Grants
 

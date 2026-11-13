@@ -146,6 +146,10 @@ func TestNamedIdentityGrantWorkflow(t *testing.T) {
 		"key_id_format": "{{role_name}}-{{token_display_name}}",
 	}, http.StatusOK, http.StatusNoContent)
 
+	// A transit key that signs git commits; it never leaves OpenBao.
+	mustCall(t, ctx, bao, rootToken, http.MethodPost, "sys/mounts/transit", map[string]string{"type": "transit"}, http.StatusOK, http.StatusNoContent)
+	mustCall(t, ctx, bao, rootToken, http.MethodPost, "transit/keys/git-e2e", map[string]any{"type": "ed25519"}, http.StatusOK, http.StatusNoContent)
+
 	// The e2e-kv rule discovers its paths by listing kv/metadata/e2e.
 	writePolicy(ctx, t, bao, authorizerPolicy, readRepositoryFile(t, repositoryRoot, "config/authorizer-policy.hcl")+
 		"path \"kv/metadata/e2e\" {\n  capabilities = [\"list\"]\n}\n")
@@ -242,6 +246,12 @@ grantable "e2e-ssh" {
   capabilities = ["update"]
   max_ttl      = "1h"
   description  = "SSH certificates"
+}
+grantable "e2e-git-sign" {
+  path         = "transit/sign/git-*"
+  capabilities = ["update"]
+  max_ttl      = "1h"
+  description  = "Git commit signing"
 }
 `, staticDirectory, filepath.Join(runtimeDirectory, "app.db"), encryptionKeyFile, baoAddress, authorizerTokenFile, approverPolicy, baoAddress, tokenRole, sessionRole)
 	writeSecretFile(t, appConfig, configuration)
@@ -557,7 +567,7 @@ grantable "e2e-ssh" {
 		Paths         []string `json:"paths"`
 		DiscoverError string   `json:"discover_error"`
 	}
-	if catalog.exitCode != 0 || json.Unmarshal([]byte(catalog.stdout), &grantables) != nil || len(grantables) != 2 || grantables[1].Name != "e2e-ssh" {
+	if catalog.exitCode != 0 || json.Unmarshal([]byte(catalog.stdout), &grantables) != nil || len(grantables) != 3 || grantables[1].Name != "e2e-ssh" || grantables[2].Name != "e2e-git-sign" {
 		t.Fatalf("bao-cred grantable = %+v", catalog)
 	}
 
@@ -866,6 +876,65 @@ grantable "e2e-ssh" {
 	}
 
 	t.Log("as the bao CLI's token helper, bao-cred gave bao the project's Named Token in the project and the developer's login elsewhere, and stored bao login's token")
+
+	// git signs through bao-cred-ssh-keygen with the transit key, after an
+	// Approver grants update on transit/sign/git-e2e; the signature verifies
+	// against the key's public half.
+	var transitKey struct {
+		Data struct {
+			Keys map[string]struct {
+				PublicKey string `json:"public_key"`
+			} `json:"keys"`
+		} `json:"data"`
+	}
+	if decodeErr := json.Unmarshal(mustCall(t, ctx, bao, rootToken, http.MethodGet, "transit/keys/git-e2e", nil, http.StatusOK), &transitKey); decodeErr != nil {
+		t.Fatalf("decode transit key: %v", decodeErr)
+	}
+
+	rawPublicKey, decodeErr := base64.StdEncoding.DecodeString(transitKey.Data.Keys["1"].PublicKey)
+	if decodeErr != nil {
+		t.Fatalf("decode transit public key: %v", decodeErr)
+	}
+
+	gitPublicKey, keyErr := ssh.NewPublicKey(ed25519.PublicKey(rawPublicKey))
+	if keyErr != nil {
+		t.Fatalf("transit public key: %v", keyErr)
+	}
+
+	signingKey := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(gitPublicKey))) + " openbao:transit/git-e2e"
+	keygen := filepath.Join(filepath.Dir(baoCredCopy), "bao-cred-ssh-keygen")
+	if linkErr := os.Symlink(baoCredBinary, keygen); linkErr != nil {
+		t.Fatalf("link bao-cred-ssh-keygen: %v", linkErr)
+	}
+
+	repository := filepath.Join(runtimeDirectory, "e2e-signed")
+	gitEnvironment := cred.environment(append(identityB.env(), "PATH="+os.Getenv("PATH"), "BAO_REASON=e2e: sign a commit"))
+	gitConfig := []string{
+		"-c", "user.name=E2E", "-c", "user.email=e2e@example.com", "-c", "gpg.format=ssh",
+		"-c", "gpg.ssh.program=" + keygen, "-c", "user.signingkey=key::" + signingKey,
+	}
+	if initialized := runProcessIn(ctx, runtimeDirectory, gitEnvironment, "git", "init", "-q", repository); initialized.exitCode != 0 {
+		t.Fatalf("git init = %+v", initialized)
+	}
+
+	signedCommit := make(chan processResult, 1)
+	go func() {
+		signedCommit <- runProcessIn(ctx, repository, gitEnvironment, "git", append(gitConfig, "commit", "-q", "-S", "--allow-empty", "-m", "signed by OpenBao")...)
+	}()
+	gitSignRequest := approver.waitForPending(ctx, t, "transit/sign/git-e2e")
+	approver.decide(ctx, t, gitSignRequest, map[string]authorizerv1.Decision{"transit/sign/git-e2e": authorizerv1.Decision_DECISION_APPROVE}, nil)
+	if committed := (&backgroundProcess{done: signedCommit}).wait(t); committed.exitCode != 0 {
+		t.Fatalf("git commit -S = %+v", committed)
+	}
+
+	allowedSigners := filepath.Join(runtimeDirectory, "allowed_signers")
+	writeSecretFile(t, allowedSigners, "e2e@example.com "+signingKey+"\n")
+	verified := runProcessIn(ctx, repository, gitEnvironment, "git", append(gitConfig, "-c", "gpg.ssh.allowedSignersFile="+allowedSigners, "verify-commit", "HEAD")...)
+	if verified.exitCode != 0 || !strings.Contains(verified.stderr, `Good "git" signature for e2e@example.com`) {
+		t.Fatalf("git verify-commit = %+v", verified)
+	}
+
+	t.Log("git signed a commit through bao-cred-ssh-keygen with the transit key after approval, and git verify-commit accepted it")
 	t.Log("real OpenBao Named Identity grant workflow passed")
 }
 
