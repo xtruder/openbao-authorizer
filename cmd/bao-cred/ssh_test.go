@@ -536,15 +536,15 @@ func TestSSHUsageErrors(t *testing.T) {
 	}
 }
 
-func TestSSHHelpShowsSSHsOptionsToo(t *testing.T) {
+func TestSSHHelpIsSSHsUsage(t *testing.T) {
 	fakeSSH(t, 0)
 	var stdout bytes.Buffer
-	if err := run([]string{"ssh", "--help"}, &stdout, &bytes.Buffer{}); err != nil {
-		t.Fatal(err)
+	if err := run([]string{"ssh", "--help"}, &stdout, &bytes.Buffer{}); err != nil || stdout.String() != "usage: ssh [-46] destination\n" {
+		t.Fatalf("ssh --help = %q, %v", stdout.String(), err)
 	}
 
-	if out := stdout.String(); !strings.Contains(out, "--reason") || !strings.Contains(out, "ssh's own options") ||
-		!strings.Contains(out, "usage: ssh [-46] destination") {
-		t.Fatalf("help = %q", out)
+	stdout.Reset()
+	if err := run([]string{"help", "ssh"}, &stdout, &bytes.Buffer{}); err != nil || !strings.Contains(stdout.String(), "--reason") {
+		t.Fatalf("help ssh = %q, %v", stdout.String(), err)
 	}
 }

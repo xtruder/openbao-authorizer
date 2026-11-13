@@ -67,7 +67,8 @@ bao-cred's flags are the leading --name or --name=value arguments; ssh has
 no long options, so everything from the first other argument on, including
 ssh options such as -L and a bare --, goes to ssh unchanged. Alias ssh to it
 in your shell (alias ssh='bao-cred ssh'), and use it for other
-tools: GIT_SSH_COMMAND='bao-cred ssh' or rsync -e 'bao-cred ssh'.
+tools: GIT_SSH_COMMAND='bao-cred ssh' or rsync -e 'bao-cred ssh'. bao-cred ssh
+--help prints ssh's own usage; bao-cred help ssh prints this.
 bao-cred ssh cert only ensures the key and certificate, for tools that need
 the files.`,
 		Example: `  bao-cred ssh --reason "check disk usage on jarvis" core@jarvis df -h
@@ -147,21 +148,13 @@ func parseSSHFlags(command *cobra.Command, arguments []string) ([]string, error)
 	return arguments[end:], nil
 }
 
-// sshHelp prints bao-cred ssh's help followed by ssh's own usage summary,
-// which ssh prints when run without arguments: through alias ssh='bao-cred
-// ssh', ssh --help should still show ssh's options.
+// sshHelp prints ssh's own usage summary, which ssh prints when run without
+// arguments: through alias ssh='bao-cred ssh', ssh --help should describe
+// ssh. bao-cred help ssh describes bao-cred's flags.
 func sshHelp(command *cobra.Command) error {
-	if err := command.Help(); err != nil {
-		return err
-	}
-
 	// #nosec G204 -- a fixed command.
 	usage, _ := exec.CommandContext(command.Context(), "ssh").CombinedOutput()
-	if len(usage) == 0 {
-		return nil
-	}
-
-	_, err := fmt.Fprintf(command.OutOrStdout(), "\nssh's own options (see man ssh):\n%s", usage)
+	_, err := command.OutOrStdout().Write(usage)
 	return err
 }
 

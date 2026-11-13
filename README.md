@@ -499,8 +499,10 @@ GIT_SSH_COMMAND='bao-cred ssh' git fetch   # rsync: rsync -e 'bao-cred ssh' …
   `-o IdentitiesOnly=yes` plus your arguments, and bao-cred exits with its
   status.
 
-`bao-cred ssh cert [destination]` only ensures the pair, for tools that need
-the files; `--key` picks another path.
+`bao-cred ssh --help` prints ssh's own usage, as `ssh --help` should through
+the alias; `bao-cred help ssh` describes bao-cred's flags. `bao-cred ssh cert
+[destination]` only ensures the pair, for tools that need the files; `--key`
+picks another path.
 
 ### Requesting Grants
 
