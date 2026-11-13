@@ -205,16 +205,10 @@ func runSSH(
 }
 
 // requesterKeyDirectory is where bao-cred ssh keeps the current Requester's
-// keys.
+// keys: per Named Identity and Agent Session, or per token when BAO_TOKEN or
+// VAULT_TOKEN names one directly.
 func requesterKeyDirectory(identity string) (string, error) {
-	return requesterDirectory("ssh", identity)
-}
-
-// requesterDirectory is runtimeDirectory(kind) per Requester: per Named
-// Identity and Agent Session, or per token when BAO_TOKEN or VAULT_TOKEN
-// names one directly.
-func requesterDirectory(kind, identity string) (string, error) {
-	base, err := runtimeDirectory(kind)
+	base, err := sshKeyDirectory()
 	if err != nil {
 		return "", err
 	}
@@ -446,13 +440,11 @@ func validateSSHRole(role string) error {
 	return nil
 }
 
-// runtimeDirectory is bao-cred's directory for short-lived files of kind,
-// such as SSH keys and cached git credentials: in $XDG_RUNTIME_DIR, a
-// per-user tmpfs, so they never reach a disk where it exists, else in the
-// state directory.
-func runtimeDirectory(kind string) (string, error) {
+// sshKeyDirectory prefers the per-user tmpfs of $XDG_RUNTIME_DIR, so keys
+// never reach a disk where it exists.
+func sshKeyDirectory() (string, error) {
 	if runtime := os.Getenv("XDG_RUNTIME_DIR"); filepath.IsAbs(runtime) {
-		return filepath.Join(runtime, "bao-cred", kind), nil
+		return filepath.Join(runtime, "bao-cred", "ssh"), nil
 	}
 
 	directory, err := stateDir()
@@ -460,7 +452,7 @@ func runtimeDirectory(kind string) (string, error) {
 		return "", err
 	}
 
-	return filepath.Join(directory, kind), nil
+	return filepath.Join(directory, "ssh"), nil
 }
 
 func runSSHCert(ctx context.Context, opts sshCertOptions, stderr io.Writer) error {

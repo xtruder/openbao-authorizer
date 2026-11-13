@@ -502,8 +502,8 @@ func setupEnvironment(t *testing.T, authorizerURL, openBaoURL string) {
 	t.Setenv("BAO_CACERT_BYTES", "")
 	t.Setenv("BAO_CAPATH", "")
 	t.Setenv("BAO_AUTHORIZER_ADDR", authorizerURL)
-	// SSH keys and cached git credentials stay out of the real runtime
-	// directory and don't leak between tests.
+	// SSH keys stay out of the real runtime directory and don't leak between
+	// tests.
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 }
 
