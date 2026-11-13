@@ -80,7 +80,7 @@ the files.`,
 		RunE: func(command *cobra.Command, arguments []string) error {
 			arguments, err := parseSSHFlags(command, arguments)
 			if errors.Is(err, pflag.ErrHelp) {
-				return command.Help()
+				return sshHelp(command)
 			}
 
 			if err != nil {
@@ -145,6 +145,24 @@ func parseSSHFlags(command *cobra.Command, arguments []string) ([]string, error)
 	}
 
 	return arguments[end:], nil
+}
+
+// sshHelp prints bao-cred ssh's help followed by ssh's own usage summary,
+// which ssh prints when run without arguments: through alias ssh='bao-cred
+// ssh', ssh --help should still show ssh's options.
+func sshHelp(command *cobra.Command) error {
+	if err := command.Help(); err != nil {
+		return err
+	}
+
+	// #nosec G204 -- a fixed command.
+	usage, _ := exec.CommandContext(command.Context(), "ssh").CombinedOutput()
+	if len(usage) == 0 {
+		return nil
+	}
+
+	_, err := fmt.Fprintf(command.OutOrStdout(), "\nssh's own options (see man ssh):\n%s", usage)
+	return err
 }
 
 func runSSH(

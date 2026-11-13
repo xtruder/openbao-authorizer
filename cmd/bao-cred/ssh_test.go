@@ -365,7 +365,8 @@ func readCertificate(t *testing.T, key string) *ssh.Certificate {
 	return certificate
 }
 
-// fakeSSH puts an ssh on PATH that answers -G for a user@host destination,
+// fakeSSH puts an ssh on PATH that prints a usage summary without arguments,
+// answers -G for a user@host destination,
 // or a bare host with user offlinehq, and otherwise records its arguments in
 // a file and exits with status. It returns a reader of the recorded runs.
 func fakeSSH(t *testing.T, status int) func() []string {
@@ -373,6 +374,10 @@ func fakeSSH(t *testing.T, status int) func() []string {
 	bin := t.TempDir()
 	record := filepath.Join(bin, "runs")
 	script := fmt.Sprintf(`#!/bin/sh
+if [ $# -eq 0 ]; then
+  echo "usage: ssh [-46] destination" >&2
+  exit 255
+fi
 if [ "$1" = "-G" ]; then
   for argument; do last=$argument; done
   case "$last" in
@@ -528,5 +533,18 @@ func TestSSHUsageErrors(t *testing.T) {
 
 	if len(runs()) != 0 {
 		t.Fatal("usage errors ran ssh")
+	}
+}
+
+func TestSSHHelpShowsSSHsOptionsToo(t *testing.T) {
+	fakeSSH(t, 0)
+	var stdout bytes.Buffer
+	if err := run([]string{"ssh", "--help"}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if out := stdout.String(); !strings.Contains(out, "--reason") || !strings.Contains(out, "ssh's own options") ||
+		!strings.Contains(out, "usage: ssh [-46] destination") {
+		t.Fatalf("help = %q", out)
 	}
 }
