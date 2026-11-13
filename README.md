@@ -537,8 +537,13 @@ account as a **signing key**. The operator creates the key with
 `bao-cred git-credential` is a git credential helper: for HTTPS fetches and
 pushes, git asks it for a password, and it reads one from OpenBao, such as a
 GitHub App installation token from `github/token/project-<name>`, through the
-usual Grant flow. Nothing is stored; tokens come with `password_expiry_utc`,
-so git never reuses an expired one.
+usual Grant flow. A credential with an `expires_at`, as GitHub tokens have, is
+cached per Requester (identity and Agent Session) and path in
+`$XDG_RUNTIME_DIR/bao-cred/git` (mode 0600) and reused while it has more than
+5 minutes left, so not every git command creates a token; `erase`, which git
+calls when the server rejects a credential, drops the copy, and `--no-cache`
+turns caching off. Like an issued SSH certificate, a cached token keeps working
+after its Grant is revoked, until it expires.
 
 ```ini
 # ~/.config/git/config: one helper for every GitHub repository.
