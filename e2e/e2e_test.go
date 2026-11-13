@@ -617,11 +617,13 @@ grantable "e2e-ssh" {
 
 	t.Log("bao-cred write --reason requested update on ssh/sign/e2e-node and wrote a certificate for core@e2e-node only")
 
-	// bao-cred ssh cert, the ssh credential helper, signs with the same
-	// Grant: it derives the role <host>-<user>, e2e-node from
-	// node@e2e.example.ts.net, then reuses the pair.
+	// bao-cred ssh cert signs with the same Grant: it resolves the
+	// destination with the real ssh -G and derives the role <host>-<user>,
+	// e2e-node from node@e2e.example.ts.net, then reuses the pair. ssh comes
+	// from the test's PATH.
+	sshEnvironment := append(identityB.env(), "PATH="+os.Getenv("PATH"))
 	helperKey := filepath.Join(runtimeDirectory, "helper", "e2e-node")
-	helper := cred.run(ctx, t, identityB.env(), "ssh", "cert", "--timeout", "30s", "--key", helperKey, "node@e2e.example.ts.net")
+	helper := cred.run(ctx, t, sshEnvironment, "ssh", "cert", "--timeout", "30s", "--key", helperKey, "node@e2e.example.ts.net")
 	if helper.exitCode != 0 || helper.stdout != "" {
 		t.Fatalf("bao-cred ssh cert = %+v", helper)
 	}
@@ -637,7 +639,7 @@ grantable "e2e-ssh" {
 		t.Fatalf("helper certificate = %+v, %v", parsedKey, err)
 	}
 
-	if again := cred.run(ctx, t, identityB.env(), "ssh", "cert", "--timeout", "30s", "--key", helperKey, "node@e2e"); again.exitCode != 0 {
+	if again := cred.run(ctx, t, sshEnvironment, "ssh", "cert", "--timeout", "30s", "--key", helperKey, "node@e2e"); again.exitCode != 0 {
 		t.Fatalf("second bao-cred ssh cert = %+v", again)
 	}
 

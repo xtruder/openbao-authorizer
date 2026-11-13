@@ -675,7 +675,7 @@ request as JSON on stdout.`,
 	}
 
 	set := command.Flags()
-	set.StringVar(&flags.reason, "reason", "", "why the Requester needs access (required)")
+	set.StringVar(&flags.reason, "reason", "", "why the Requester needs access (required; default $BAO_REASON)")
 	// StringArray, unlike StringSlice, keeps the commas between capabilities.
 	set.StringArrayVar(&flags.items, "item", nil,
 		"Permission Item PATH=CAP[,CAP]; CAP is create, read, update, patch, delete, or list; repeatable")
@@ -704,13 +704,17 @@ func runRequest(ctx context.Context, flags requestFlags, stdout, stderr io.Write
 
 	input := &authorizerv1.CreateGrantRequestRequest{Reason: strings.TrimSpace(flags.reason)}
 	id := strings.TrimSpace(flags.waitID)
+	if id == "" {
+		input.Reason = grantReason(flags.reason)
+	}
+
 	if id != "" {
 		if input.Reason != "" || len(flags.items) > 0 || flags.ttl != 0 || flags.scope != "" || flags.noWait {
 			return usageError(errors.New("--wait cannot be combined with --reason, --item, --ttl, --scope, or --no-wait"))
 		}
 	} else {
 		if input.Reason == "" {
-			return usageError(errors.New("--reason is required"))
+			return usageError(errors.New("--reason (or BAO_REASON) is required"))
 		}
 
 		if len(flags.items) == 0 {

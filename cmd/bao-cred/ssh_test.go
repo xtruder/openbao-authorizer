@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -20,52 +21,52 @@ import (
 	authorizerv1 "github.com/xtruder/openbao-authorizer/gen/go/openbao/authorizer/v1"
 )
 
-func TestDeriveSSHRole(t *testing.T) {
-	for destination, want := range map[string]string{
-		"core@jarvis":                   "jarvis-core",
-		"core@jarvis.example.ts.net":    "jarvis-core",
-		"deploy@build-01.lan":           "build-01-deploy",
-		"core@100.126.6.34":             "",
-		"core@[fd7a:115c:a1e0::3a01]":   "",
-		"jarvis":                        "",
-		"@jarvis":                       "",
-		"core@":                         "",
-		"core@fd7a:115c:a1e0::3a01:62b": "",
+func TestSSHRoleFor(t *testing.T) {
+	for _, test := range []struct{ host, user, want string }{
+		{"jarvis", "core", "jarvis-core"},
+		{"jarvis.example.ts.net", "core", "jarvis-core"},
+		{"build-01.lan", "deploy", "build-01-deploy"},
+		{"100.126.6.34", "core", ""},
+		{"[fd7a:115c:a1e0::3a01]", "core", ""},
+		{"fd7a:115c:a1e0::3a01:62b", "core", ""},
+		{"", "core", ""},
+		{"jarvis", "", ""},
 	} {
-		got, err := deriveSSHRole(destination)
-		if want == "" {
+		got, err := sshRoleFor(test.host, test.user)
+		if test.want == "" {
 			if err == nil {
-				t.Errorf("%s: role %q, want an error", destination, got)
+				t.Errorf("%s/%s: role %q, want an error", test.host, test.user, got)
 			}
 
 			continue
 		}
 
-		if err != nil || got != want {
-			t.Errorf("%s: role %q, %v; want %q", destination, got, err, want)
+		if err != nil || got != test.want {
+			t.Errorf("%s/%s: role %q, %v; want %q", test.host, test.user, got, err, test.want)
 		}
 	}
 }
 
 func TestResolveSSHCertOptionsDefaults(t *testing.T) {
+	setupEnvironment(t, "", "http://127.0.0.1:1")
+	t.Setenv("BAO_TOKEN", "")
 	runtimeDir := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	t.Setenv("BAO_SSH_REASON", "")
-	opts := sshCertOptions{mount: "/ssh/", destination: "core@jarvis", credentials: options{timeout: time.Minute}}
+	opts := sshCertOptions{mount: "/ssh/", role: "jarvis-core", destination: "core@jarvis", credentials: options{timeout: time.Minute}}
 
 	resolved, err := resolveSSHCertOptions(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if resolved.role != "jarvis-core" || resolved.mount != "ssh" || resolved.credentials.reason != "ssh core@jarvis" ||
-		resolved.key != filepath.Join(runtimeDir, "bao-cred", "ssh", "jarvis-core") {
+	if resolved.mount != "ssh" || resolved.credentials.reason != "ssh core@jarvis" ||
+		resolved.key != filepath.Join(runtimeDir, "bao-cred", "ssh", "_login", "_named", "jarvis-core") {
 		t.Fatalf("resolved %+v", resolved)
 	}
 
-	t.Setenv("BAO_SSH_REASON", " deploy the app ")
+	t.Setenv("BAO_REASON", " deploy the app ")
 	if resolved, err = resolveSSHCertOptions(opts); err != nil || resolved.credentials.reason != "deploy the app" {
-		t.Fatalf("BAO_SSH_REASON: reason %q, %v", resolved.credentials.reason, err)
+		t.Fatalf("BAO_REASON: reason %q, %v", resolved.credentials.reason, err)
 	}
 
 	opts.credentials.reason = "from the flag"
@@ -73,19 +74,23 @@ func TestResolveSSHCertOptionsDefaults(t *testing.T) {
 		t.Fatalf("--reason: reason %q, %v", resolved.credentials.reason, err)
 	}
 
-	t.Setenv("BAO_SSH_REASON", "")
+	t.Setenv("BAO_REASON", "")
 	opts = sshCertOptions{mount: "ssh", role: "jarvis-core", credentials: options{timeout: time.Minute}}
 	if resolved, err = resolveSSHCertOptions(opts); err != nil || resolved.credentials.reason != "ssh with role jarvis-core" {
 		t.Fatalf("role only: reason %q, %v", resolved.credentials.reason, err)
 	}
+
+	if _, err = resolveSSHCertOptions(sshCertOptions{mount: "ssh", credentials: options{timeout: time.Minute}}); err == nil {
+		t.Fatal("resolved without a role")
+	}
 }
 
 func TestSSHCertUsageErrors(t *testing.T) {
+	fakeSSH(t, 0)
 	for _, arguments := range [][]string{
 		{"ssh"},
 		{"ssh", "cert"},
 		{"ssh", "cert", "core@100.126.6.34"},
-		{"ssh", "cert", "jarvis"},
 		{"ssh", "cert", "--role", "a/b"},
 		{"ssh", "cert", "--role", "jarvis-core", "--mount", "/"},
 		{"ssh", "cert", "--role", "jarvis-core", "--scope", "planet"},
@@ -99,6 +104,7 @@ func TestSSHCertUsageErrors(t *testing.T) {
 }
 
 func TestSSHCertSignsOnceAndReusesTheCertificate(t *testing.T) {
+	fakeSSH(t, 0)
 	signer := newFakeSSHSigner(t, time.Hour, func() bool { return true })
 	setupEnvironment(t, "", signer.URL)
 	key := filepath.Join(t.TempDir(), "keys", "jarvis-core")
@@ -171,6 +177,7 @@ func TestSSHCertReplacesAMismatchedPair(t *testing.T) {
 }
 
 func TestSSHCertRequestsAccessWithTheDefaultReason(t *testing.T) {
+	fakeSSH(t, 0)
 	authorizer := newFakeAuthorizer(t)
 	authorizer.grantables = []*authorizerv1.Grantable{{Name: "ssh-cert", Path: "ssh/sign/*", Paths: []string{"ssh/sign/jarvis-core"}}}
 	authorizer.created = testRequest(item("item-1", "ssh/sign/jarvis-core", pending))
@@ -179,7 +186,7 @@ func TestSSHCertRequestsAccessWithTheDefaultReason(t *testing.T) {
 	}}}
 	signer := newFakeSSHSigner(t, time.Hour, func() bool { return authorizer.watchCount() > 0 })
 	setupEnvironment(t, authorizer.url, signer.URL)
-	t.Setenv("BAO_SSH_REASON", "")
+	t.Setenv("BAO_REASON", "")
 	key := filepath.Join(t.TempDir(), "jarvis-core")
 
 	var stdout, stderr bytes.Buffer
@@ -195,13 +202,14 @@ func TestSSHCertRequestsAccessWithTheDefaultReason(t *testing.T) {
 		t.Fatalf("filed %v, want %v", got, want)
 	}
 
-	// ssh shows a Match exec command's stdout, so progress goes to stderr only.
+	// stdout belongs to the commands bao-cred runs, so progress goes to stderr only.
 	if stdout.Len() != 0 || !strings.Contains(stderr.String(), "approved") {
 		t.Fatalf("stdout %q, stderr %q", stdout.String(), stderr.String())
 	}
 }
 
 func TestSSHCertRefusesARoleMissingFromTheCatalog(t *testing.T) {
+	fakeSSH(t, 0)
 	authorizer := newFakeAuthorizer(t)
 	authorizer.grantables = []*authorizerv1.Grantable{{
 		Name: "ssh-cert", Path: "ssh/sign/*", Paths: []string{"ssh/sign/jarvis-core", "ssh/sign/build-deploy"},
@@ -217,50 +225,6 @@ func TestSSHCertRefusesARoleMissingFromTheCatalog(t *testing.T) {
 
 	if len(authorizer.inputs()) != 0 {
 		t.Fatal("filed a Grant Request for a role the catalog doesn't list")
-	}
-}
-
-func TestSSHConfigBlocks(t *testing.T) {
-	authorizer := newFakeAuthorizer(t)
-	authorizer.grantables = []*authorizerv1.Grantable{
-		{Name: "github-token", Path: "github/token/project-*", Paths: []string{"github/token/project-a"}},
-		{Name: "ssh-cert", Path: "ssh/sign/*", Paths: []string{"ssh/sign/jarvis-core", "ssh/sign/build-01-deploy", "ssh/sign/nouser"}},
-	}
-	setupEnvironment(t, authorizer.url, "http://127.0.0.1:1")
-	runtimeDir := t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-
-	var stdout bytes.Buffer
-	if err := run([]string{"ssh", "config", "--alias", "core-jarvis=jarvis-core"}, &stdout, &bytes.Buffer{}); err != nil {
-		t.Fatal(err)
-	}
-
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	keys := filepath.Join(runtimeDir, "bao-cred", "ssh")
-	output := stdout.String()
-	for _, want := range []string{
-		fmt.Sprintf("Match originalhost core-jarvis exec \"%s ssh cert --mount ssh --role jarvis-core %%r@%%n\"\n  IdentityFile %s/jarvis-core\n  CertificateFile %s/jarvis-core-cert.pub\n",
-			shellQuote(executable), keys, keys),
-		"Match originalhost jarvis,jarvis.* user core exec",
-		"Match originalhost build-01,build-01.* user deploy exec",
-	} {
-		if !strings.Contains(output, want) {
-			t.Errorf("output lacks %q:\n%s", want, output)
-		}
-	}
-
-	if strings.Contains(output, "project-a") || strings.Contains(output, "nouser") {
-		t.Errorf("output has blocks for other paths:\n%s", output)
-	}
-
-	for _, alias := range []string{"core-jarvis", "=jarvis-core", "core-jarvis=", "a b=jarvis-core", "core-jarvis=a/b"} {
-		if err := run([]string{"ssh", "config", "--alias", alias}, &bytes.Buffer{}, &bytes.Buffer{}); exitCode(err) != exitUsage {
-			t.Errorf("--alias %q: error = %v", alias, err)
-		}
 	}
 }
 
@@ -325,18 +289,6 @@ func signedTestPair(t *testing.T, lifetime, left time.Duration) (string, string)
 	}
 
 	return key, key + "-cert.pub"
-}
-
-func TestShellQuote(t *testing.T) {
-	for value, want := range map[string]string{
-		"/usr/local/bin/bao-cred": "/usr/local/bin/bao-cred",
-		"/Users/me/My Tools/bao":  "'/Users/me/My Tools/bao'",
-		"/tmp/it's":               `'/tmp/it'\''s'`,
-	} {
-		if got := shellQuote(value); got != want {
-			t.Errorf("shellQuote(%q) = %q, want %q", value, got, want)
-		}
-	}
 }
 
 // newFakeSSHSigner serves ssh/sign/<role> like OpenBao's SSH engine, signing
@@ -411,4 +363,140 @@ func readCertificate(t *testing.T, key string) *ssh.Certificate {
 	}
 
 	return certificate
+}
+
+// fakeSSH puts an ssh on PATH that answers -G for a user@host destination,
+// or a bare host with user offlinehq, and otherwise records its arguments in
+// a file and exits with status. It returns a reader of the recorded runs.
+func fakeSSH(t *testing.T, status int) func() []string {
+	t.Helper()
+	bin := t.TempDir()
+	record := filepath.Join(bin, "runs")
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "-G" ]; then
+  for argument; do last=$argument; done
+  case "$last" in
+    *@*) user=${last%%%%@*}; host=${last#*@} ;;
+    *) user=offlinehq; host=$last ;;
+  esac
+  printf 'host %%s\nuser %%s\nhostname 192.0.2.1\n' "$host" "$user"
+  exit 0
+fi
+printf '%%s\n' "$*" >> %q
+exit %d
+`, record, status)
+	if err := os.WriteFile(filepath.Join(bin, "ssh"), []byte(script), 0o700); err != nil { // #nosec G306 -- an executable test script.
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return func() []string {
+		contents, err := os.ReadFile(record)
+		if err != nil {
+			return nil
+		}
+
+		return strings.Split(strings.TrimSpace(string(contents)), "\n")
+	}
+}
+
+func TestSSHRunsSSHWithTheRequestersCertificate(t *testing.T) {
+	signer := newFakeSSHSigner(t, time.Hour, func() bool { return true })
+	setupEnvironment(t, "", signer.URL)
+	runtimeDir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	runs := fakeSSH(t, 0)
+
+	for range 2 {
+		if err := run([]string{"ssh", "--", "-p", "2222", "core@jarvis", "uptime", "-p"}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// BAO_TOKEN names the Requester here, so the pair is kept per token.
+	key := filepath.Join(runtimeDir, "bao-cred", "ssh", "tokens", fmt.Sprintf("%x", sha256.Sum256([]byte(testToken)))[:16], "jarvis-core")
+	want := "-i " + key + " -o CertificateFile=" + key + "-cert.pub -o IdentitiesOnly=yes -p 2222 core@jarvis uptime -p"
+	if got := runs(); len(got) != 2 || got[0] != want {
+		t.Fatalf("ssh ran with %q, want %q", got, want)
+	}
+
+	if signer.reads() != 1 || !validSSHCertificate(key, key+"-cert.pub", time.Now()) {
+		t.Fatalf("signed %d times, want once and a valid pair at %s", signer.reads(), key)
+	}
+}
+
+func TestSSHKeepsEachRequestersCertificateApart(t *testing.T) {
+	bao := newFakeTokenStore(t)
+	setupIdentityEnvironment(t, bao.URL)
+	ring := useKeyring(t, nil)
+	runtimeDir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	ring.entries[keyringService+"/app-k7q2xm"] = "named-app"
+	bao.valid["named-app"] = true
+	root := newProject(t, "app", "")
+	writeTestFile(t, filepath.Join(root, ".git", repositoryFileName), "app-k7q2xm\n")
+
+	for session, want := range map[string]string{
+		"":      filepath.Join(runtimeDir, "bao-cred", "ssh", "app-k7q2xm", "_named"),
+		"ses-1": filepath.Join(runtimeDir, "bao-cred", "ssh", "app-k7q2xm", "ses-1"),
+	} {
+		t.Setenv("BAO_SESSION_ID", session)
+		if got, err := requesterKeyDirectory(""); err != nil || got != want {
+			t.Errorf("session %q: directory %q, %v; want %q", session, got, err, want)
+		}
+	}
+
+	t.Setenv("BAO_SESSION_ID", "")
+	t.Chdir(t.TempDir())
+	if got, err := requesterKeyDirectory(""); err != nil || got != filepath.Join(runtimeDir, "bao-cred", "ssh", "_login", "_named") {
+		t.Errorf("outside projects: directory %q, %v", got, err)
+	}
+}
+
+func TestSSHResolvesAliasesWithTheSSHConfig(t *testing.T) {
+	signer := newFakeSSHSigner(t, time.Hour, func() bool { return true })
+	setupEnvironment(t, "", signer.URL)
+	runtimeDir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	runs := fakeSSH(t, 0)
+
+	// ssh -G reports user offlinehq for the alias, so the role is jarvis-offlinehq.
+	if err := run([]string{"ssh", "jarvis", "true"}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := runs(); len(got) != 1 || !strings.Contains(got[0], "/jarvis-offlinehq -o CertificateFile=") || !strings.HasSuffix(got[0], " jarvis true") {
+		t.Fatalf("ssh ran with %q", got)
+	}
+}
+
+func TestSSHReturnsTheExitStatusOfSSH(t *testing.T) {
+	signer := newFakeSSHSigner(t, time.Hour, func() bool { return true })
+	setupEnvironment(t, "", signer.URL)
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	fakeSSH(t, 7)
+
+	if err := run([]string{"ssh", "core@jarvis", "false"}, &bytes.Buffer{}, &bytes.Buffer{}); exitCode(err) != 7 {
+		t.Fatalf("error = %v (exit %d), want 7", err, exitCode(err))
+	}
+}
+
+func TestSSHUsageErrors(t *testing.T) {
+	setupEnvironment(t, "", "http://127.0.0.1:1")
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	runs := fakeSSH(t, 0)
+	for _, arguments := range [][]string{
+		{"ssh"},
+		{"ssh", "core@100.126.6.34"},
+		{"ssh", "--", "-p"},
+		{"ssh", "--role", "a/b", "core@jarvis"},
+	} {
+		if err := run(arguments, &bytes.Buffer{}, &bytes.Buffer{}); exitCode(err) != exitUsage {
+			t.Errorf("%v: error = %v (exit %d)", arguments, err, exitCode(err))
+		}
+	}
+
+	if len(runs()) != 0 {
+		t.Fatal("usage errors ran ssh")
+	}
 }

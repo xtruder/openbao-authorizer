@@ -8,7 +8,7 @@ import (
 // TestMain clears the agent session variables of the shell running the tests,
 // such as opencode's OPENCODE_SESSION_ID; tests that need a session set them.
 func TestMain(m *testing.M) {
-	for _, name := range []string{"BAO_SESSION_ID", "OPENCODE_SESSION_ID", "BAO_NO_SESSION", "BAO_SESSION_ROLE", "BAO_IDENTITY"} {
+	for _, name := range []string{"BAO_SESSION_ID", "OPENCODE_SESSION_ID", "BAO_NO_SESSION", "BAO_SESSION_ROLE", "BAO_IDENTITY", "BAO_REASON", "BAO_SSH_WRAPPED"} {
 		_ = os.Unsetenv(name)
 	}
 

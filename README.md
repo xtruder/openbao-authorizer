@@ -225,7 +225,8 @@ Requester needs more access. `read`, `write`, `ssh`, `request`, `grants`, `revok
 | Token | `BAO_TOKEN`, then `VAULT_TOKEN`, then the token of the Named Identity selected by `--identity`, `BAO_IDENTITY` or the identity file of the working directory (see [Named Identities](#named-identities)): its Session Token inside an Agent Session, else its Named Token. Then `~/.vault-token` as written by `bao login` (only the default token helper; skipped when `BAO_NO_TOKEN_FILE` is set). A selected identity without a stored token is an error, never a fall back to `~/.vault-token` |
 | Agent session | `BAO_SESSION_ID`, then opencode's `OPENCODE_SESSION_ID`; `BAO_NO_SESSION` turns sessions off. `BAO_SESSION_ROLE` overrides the `agent-session` role |
 | OpenBao client | Standard client variables such as `BAO_ADDR`, `BAO_NAMESPACE`, and `BAO_CACERT` |
-| Authorizer URL | `--authorizer`, then `BAO_AUTHORIZER_ADDR`; needed only for `request`, `grants`, `grantable`, `ssh config`, and when `read`, `write` or `ssh cert` request access. Give the bare origin; bao-cred calls the `GrantService` RPCs under `/api`. It must be HTTPS unless the host is loopback (`localhost`, `127.0.0.0/8`, `::1`), because the token is sent with every call; redirects to plain HTTP are refused |
+| Authorizer URL | `--authorizer`, then `BAO_AUTHORIZER_ADDR`; needed only for `request`, `grants`, `grantable`, and when `read`, `write` or `ssh` request access. Give the bare origin; bao-cred calls the `GrantService` RPCs under `/api`. It must be HTTPS unless the host is loopback (`localhost`, `127.0.0.0/8`, `::1`), because the token is sent with every call; redirects to plain HTTP are refused |
+| Grant Request reason | `--reason`, then `BAO_REASON`; with either set, a denied `read`, `write` or `ssh` requests access and waits |
 | Authorizer TLS | System roots plus any CA from `BAO_CACERT`, `BAO_CACERT_BYTES`, or `BAO_CAPATH`; `BAO_SKIP_VERIFY` is ignored for the authorizer |
 
 A project's `.envrc` can set the addresses, so agents pass no token or address
@@ -458,54 +459,45 @@ what a write can do. For SSH, define one role per node and user (or per
 application) whose `allowed_users`, `default_user`, TTL and extensions are
 fixed; a Grant on `ssh/sign/<role>` then means exactly that login.
 
-### SSH credential helper
+### SSH
 
-bao-cred works as a credential helper for ssh: a `Match exec` block in
-`~/.ssh/config` runs `bao-cred ssh cert`, which keeps a key and an
-OpenBao-signed certificate for the destination's role, and ssh logs in with
-them. Plain `ssh`, `scp`, `rsync` and `git` all use it.
+`bao-cred ssh` runs ssh with a key and certificate that OpenBao signs for the
+current Requester: your identity in your shell, a project's identity in that
+project, and each Agent Session separately. Every Requester keeps its own pair
+in `$XDG_RUNTIME_DIR/bao-cred/ssh/<identity>/<session>/<role>` (a per-user
+tmpfs on Linux), so each login carries the Requester's own Grant and shows up
+under its name in the server's log.
 
 ```sh
-# One block per <host>-<user> role in the catalog, plus aliases; add them
-# after your Host blocks.
-bao-cred ssh config --alias core-jarvis=jarvis-core >> ~/.ssh/config
-ssh core@jarvis            # role jarvis-core
-ssh core-jarvis            # the alias, same role
-BAO_SSH_REASON="deploy the app" ssh core@jarvis
+alias ssh='bao-cred ssh'          # in your shell profile
+ssh core@jarvis                   # role jarvis-core
+ssh jarvis uptime                 # alias with User offlinehq: role jarvis-offlinehq
+bao-cred ssh --reason "restart the api" core@jarvis 'systemctl --user restart api'
+bao-cred ssh --role jarvis-core -- -L 8080:localhost:80 core@100.126.6.34
+GIT_SSH_COMMAND='bao-cred ssh' git fetch   # rsync: rsync -e 'bao-cred ssh' …
 ```
 
-The generated blocks look like this:
+- **Role:** `<host>-<user>` of what ssh would connect to. bao-cred resolves
+  the destination with `ssh -G`, which applies your ssh config without
+  connecting, and takes the first DNS label of the host as given (or of the
+  `Host` alias) and the login user. `--role` names it for addresses and
+  aliases not named after their host. A derived role that the catalog doesn't
+  list is refused before any request is filed, so a typo never reaches an
+  Approver.
+- **Reuse:** the pair is reused while the certificate stays valid for at least
+  5 more minutes (a fifth of its lifetime for shorter ones), without contacting
+  OpenBao. Otherwise bao-cred generates a new Ed25519 key and has OpenBao sign
+  it, under a lock against concurrent ssh processes.
+- **Access:** on permission denied it files a Grant Request for
+  `ssh/sign/<role>=update` with the reason from `--reason`, else `BAO_REASON`,
+  else `ssh user@host`, and waits for a decision.
+- **Arguments:** bao-cred flags come before the destination; put ssh's own
+  options after `--`. ssh gets `-i`, `-o CertificateFile` and
+  `-o IdentitiesOnly=yes` plus your arguments, and bao-cred exits with its
+  status.
 
-```sshconfig
-Match originalhost jarvis,jarvis.* user core exec "/usr/local/bin/bao-cred ssh cert --mount ssh --role jarvis-core %r@%n"
-  IdentityFile /run/user/1000/bao-cred/ssh/jarvis-core
-  CertificateFile /run/user/1000/bao-cred/ssh/jarvis-core-cert.pub
-```
-
-`bao-cred ssh cert [user@host]`:
-
-- Derives the role `<host>-<user>` from the first DNS label of the host
-  (`core@jarvis.example.ts.net` uses `jarvis-core`), unless `--role` names it.
-  A derived role that the catalog doesn't list is refused before any request
-  is filed, so a typo never reaches an Approver.
-- Reuses the cached pair while the certificate stays valid for at least 5
-  more minutes (a fifth of its lifetime for shorter ones), without contacting
-  OpenBao; ssh runs the helper on every
-  connection to a matching host. Otherwise it generates a new Ed25519 key and
-  has OpenBao sign it.
-- Keeps keys in `$XDG_RUNTIME_DIR/bao-cred/ssh` (a per-user tmpfs on Linux), or
-  in the state directory without it, with mode 0600 and a lock against
-  concurrent ssh processes. `--key` picks another path.
-- On permission denied, files a Grant Request for `ssh/sign/<role>=update`
-  with the reason from `--reason`, `BAO_SSH_REASON`, or else `ssh user@host`,
-  and waits for a decision; progress shows on stderr in the ssh session. When
-  it fails, ssh skips the block and falls back to its other keys.
-
-ssh passes its environment and working directory to the helper, so it uses the
-same token as other bao-cred commands: inside a project or Agent Session, that
-identity's token. For your own ssh outside projects, run `bao-cred init` in
-your home directory once; the `bao login` token in `~/.vault-token` usually
-can't file Grant Requests.
+`bao-cred ssh cert [destination]` only ensures the pair, for tools that need
+the files; `--key` picks another path.
 
 ### Requesting Grants
 

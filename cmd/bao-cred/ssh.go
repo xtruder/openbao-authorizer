@@ -1,15 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -34,61 +37,223 @@ type sshCertOptions struct {
 	destination string
 }
 
+// sshOptionsWithArgument are the ssh options that take an argument, as in
+// OpenSSH 10's getopt string; the destination is the first other argument.
+const sshOptionsWithArgument = "BbcDEeFIiJLlmOoPpQRSWw"
+
 func newSSHCommand() *cobra.Command {
+	var opts sshCertOptions
+
 	command := &cobra.Command{
-		Use:   "ssh",
-		Short: "Keep OpenBao-signed SSH certificates for ssh to use",
-		Long: `bao-cred acts as an ssh credential helper: a Match exec block in the ssh
-config runs bao-cred ssh cert, which keeps a key and an OpenBao-signed
-certificate for the destination's SSH role, and ssh logs in with them. Plain
-ssh, scp, rsync and git all use it. bao-cred ssh config prints the blocks.`,
-		Args: noPositionalArgs,
-		RunE: func(*cobra.Command, []string) error {
-			return usageError(errors.New("a subcommand is required: cert or config"))
+		Use:   "ssh [flags] [--] [ssh options] user@host [command [args...]]",
+		Short: "Run ssh with an OpenBao-signed certificate of the Requester",
+		Long: `Runs ssh with a key and certificate that OpenBao signs for the current
+Requester: in a project, its Named Identity, or its Agent Session inside one.
+Each Requester keeps its own pair in $XDG_RUNTIME_DIR/bao-cred/ssh/<identity>/
+<session>/<role>, reused while it stays valid, so a login always carries the
+Requester's own Grant and shows up under its name in the server's log.
+
+The role defaults to <host>-<user> of what ssh would connect to, as ssh -G
+resolves the destination with the ssh config: the first DNS label of the host
+as given, or of the Host alias, and the login user. core@jarvis.example.ts.net
+uses jarvis-core; an alias jarvis with User offlinehq uses jarvis-offlinehq.
+Pass --role for addresses and aliases not named after their host. On
+permission denied it files a Grant Request for <mount>/sign/<role>=update
+with the reason from --reason, else $BAO_REASON, else "ssh user@host", and
+waits for a decision.
+
+bao-cred flags come before the destination; put ssh's own options after --.
+Alias ssh to it in your shell (alias ssh='bao-cred ssh'), and use it for other
+tools: GIT_SSH_COMMAND='bao-cred ssh' or rsync -e 'bao-cred ssh'.
+bao-cred ssh cert only ensures the key and certificate, for tools that need
+the files.`,
+		Example: `  bao-cred ssh --reason "check disk usage on jarvis" core@jarvis df -h
+  bao-cred ssh jarvis
+  bao-cred ssh --role jarvis-core -- -L 8080:localhost:80 core@100.126.6.34
+  GIT_SSH_COMMAND='bao-cred ssh' git fetch`,
+		Args: cobra.ArbitraryArgs,
+		RunE: func(command *cobra.Command, arguments []string) error {
+			if len(arguments) == 0 {
+				return usageError(errors.New("an ssh destination is required, or the subcommand cert"))
+			}
+
+			return runSSH(command.Context(), opts, identityFlag(command), arguments,
+				command.InOrStdin(), command.OutOrStdout(), command.ErrOrStderr())
 		},
 	}
 
-	command.AddCommand(newSSHCertCommand(), newSSHConfigCommand())
+	// Everything from the destination on belongs to ssh, including options
+	// of the remote command.
+	command.Flags().SetInterspersed(false)
+	flags := command.Flags()
+	flags.StringVar(&opts.role, "role", "", "SSH role to sign with (default <host>-<user> of the destination)")
+	flags.StringVar(&opts.mount, "mount", "ssh", "path of the OpenBao SSH secrets engine")
+	flags.StringVar(&opts.credentials.reason, "reason", "",
+		"reason of a Grant Request on permission denied (default $BAO_REASON, else \"ssh user@host\")")
+	flags.StringVar(&opts.credentials.scope, "scope", "", "suggested Grant scope: session, project, or global")
+	flags.StringVar(&opts.credentials.authorizer, "authorizer", "", "authorizer base URL (default $BAO_AUTHORIZER_ADDR)")
+	flags.DurationVar(&opts.credentials.timeout, "timeout", 15*time.Minute, "approval wait timeout")
+	flags.BoolVar(&opts.credentials.quiet, "quiet", false, "suppress progress messages")
+	command.AddCommand(newSSHCertCommand())
 	return command
+}
+
+func runSSH(
+	ctx context.Context, opts sshCertOptions, identity string, arguments []string, stdin io.Reader, stdout, stderr io.Writer,
+) error {
+	destination, err := sshDestination(arguments)
+	if err != nil {
+		return usageError(err)
+	}
+
+	opts.credentials.identity = identity
+	opts.destination = arguments[destination]
+	if opts.role == "" {
+		if opts.role, opts.destination, err = sshRole(ctx, arguments[:destination+1]); err != nil {
+			return err
+		}
+	}
+
+	resolved, err := resolveSSHCertOptions(opts)
+	if err != nil {
+		return usageError(err)
+	}
+
+	if err := runSSHCert(ctx, resolved, stderr); err != nil {
+		return err
+	}
+
+	sshArguments := append([]string{
+		"-i", resolved.key, "-o", "CertificateFile=" + resolved.key + "-cert.pub", "-o", "IdentitiesOnly=yes",
+	}, arguments...)
+	// Not cancelled with ctx: ssh handles Ctrl-C itself, for the remote side.
+	// #nosec G204 -- running ssh with the caller's arguments is the purpose of this command.
+	command := exec.CommandContext(context.WithoutCancel(ctx), "ssh", sshArguments...)
+	command.Env = mergeEnvironment(os.Environ(), nil)
+	command.Stdin = stdin
+	command.Stdout = stdout
+	command.Stderr = stderr
+	if err := command.Run(); err != nil {
+		if processExit, ok := errors.AsType[*exec.ExitError](err); ok {
+			return &exitError{code: commandExitCode(processExit)}
+		}
+
+		return fmt.Errorf("run ssh: %w", err)
+	}
+
+	return nil
+}
+
+// requesterKeyDirectory is where bao-cred ssh keeps the current Requester's
+// keys: per Named Identity and Agent Session, or per token when BAO_TOKEN or
+// VAULT_TOKEN names one directly.
+func requesterKeyDirectory(identity string) (string, error) {
+	base, err := sshKeyDirectory()
+	if err != nil {
+		return "", err
+	}
+
+	if token := environmentToken(); token != "" {
+		return filepath.Join(base, "tokens", fmt.Sprintf("%x", sha256.Sum256([]byte(token)))[:16]), nil
+	}
+
+	identity, err = selectIdentity(identity)
+	if err != nil {
+		return "", err
+	}
+
+	session, err := agentSession()
+	if err != nil {
+		return "", err
+	}
+
+	if identity == "" {
+		identity = "_login"
+	}
+
+	if session == "" {
+		session = "_named"
+	}
+
+	return filepath.Join(base, identity, session), nil
+}
+
+// sshDestination returns the index of the destination in ssh's arguments,
+// skipping options and their arguments as ssh's getopt does.
+func sshDestination(arguments []string) (int, error) {
+	for index := 0; index < len(arguments); index++ {
+		argument := arguments[index]
+		if argument == "--" {
+			if index+1 < len(arguments) {
+				return index + 1, nil
+			}
+
+			break
+		}
+
+		if len(argument) < 2 || argument[0] != '-' {
+			return index, nil
+		}
+
+		for position := 1; position < len(argument); position++ {
+			if strings.IndexByte(sshOptionsWithArgument, argument[position]) < 0 {
+				continue
+			}
+
+			if position == len(argument)-1 {
+				index++
+				if index == len(arguments) {
+					return 0, fmt.Errorf("ssh option -%c needs an argument", argument[position])
+				}
+			}
+
+			break
+		}
+	}
+
+	return 0, errors.New("an ssh destination is required")
 }
 
 func newSSHCertCommand() *cobra.Command {
 	var opts sshCertOptions
 
 	command := &cobra.Command{
-		Use:   "cert [flags] [user@host]",
+		Use:   "cert [flags] [destination]",
 		Short: "Ensure a valid SSH certificate for a role, signing a new one if needed",
 		Long: `Ensures that KEY and KEY-cert.pub hold a private key and an OpenBao-signed
-certificate for the SSH role that stays valid for at least 5 more minutes, or
-a fifth of its lifetime when that is shorter. A valid cached pair is reused
-without contacting OpenBao; otherwise a new
-Ed25519 key is generated and signed at <mount>/sign/<role>.
+certificate of the current Requester for the SSH role, valid for at least 5
+more minutes, or a fifth of its lifetime when that is shorter. A valid cached
+pair is reused without contacting OpenBao; otherwise a new Ed25519 key is
+generated and signed at <mount>/sign/<role>. Use it for tools that need the
+files; bao-cred ssh runs ssh with them.
 
-The role defaults to <host>-<user> of the destination, using the first DNS
-label of the host: core@jarvis.example.ts.net uses jarvis-core. KEY defaults to
-<role> in $XDG_RUNTIME_DIR/bao-cred/ssh, or else in the bao-cred state
-directory.
-
-On permission denied it files a Grant Request for <mount>/sign/<role>=update
-with the reason from --reason, else $BAO_SSH_REASON, else "ssh user@host", and
-waits for a decision. Progress goes to stderr; nothing goes to stdout. Run it
-from a Match exec block (see bao-cred ssh config): on failure ssh skips the
-block and falls back to its other keys.`,
+The role defaults to <host>-<user> of the destination, as for bao-cred ssh.
+KEY defaults to the Requester's pair, $XDG_RUNTIME_DIR/bao-cred/ssh/<identity>/
+<session>/<role>. On permission denied it files a Grant Request for
+<mount>/sign/<role>=update with the reason from --reason, else $BAO_REASON,
+else "ssh user@host", and waits for a decision. Progress goes to stderr;
+nothing goes to stdout.`,
 		Example: `  bao-cred ssh cert core@jarvis
-  bao-cred ssh cert --role jarvis-core --reason "deploy the app on jarvis"`,
+  bao-cred ssh cert --role jarvis-core --key ./id --reason "deploy the app on jarvis"`,
 		Args: func(_ *cobra.Command, arguments []string) error {
 			if len(arguments) > 1 {
-				return usageError(errors.New("at most one user@host destination is allowed"))
+				return usageError(errors.New("at most one destination is allowed"))
 			}
 
 			return nil
 		},
 		RunE: func(command *cobra.Command, arguments []string) error {
+			opts.credentials.identity = identityFlag(command)
 			if len(arguments) == 1 {
 				opts.destination = arguments[0]
+				if opts.role == "" {
+					var err error
+					if opts.role, opts.destination, err = sshRole(command.Context(), arguments); err != nil {
+						return err
+					}
+				}
 			}
 
-			opts.credentials.identity = identityFlag(command)
 			resolved, err := resolveSSHCertOptions(opts)
 			if err != nil {
 				return usageError(err)
@@ -103,7 +268,7 @@ block and falls back to its other keys.`,
 	flags.StringVar(&opts.mount, "mount", "ssh", "path of the OpenBao SSH secrets engine")
 	flags.StringVar(&opts.key, "key", "", "private key path; the certificate goes to KEY-cert.pub")
 	flags.StringVar(&opts.credentials.reason, "reason", "",
-		"reason of a Grant Request on permission denied (default $BAO_SSH_REASON, else \"ssh user@host\")")
+		"reason of a Grant Request on permission denied (default $BAO_REASON, else \"ssh user@host\")")
 	flags.StringVar(&opts.credentials.scope, "scope", "", "suggested Grant scope: session, project, or global")
 	flags.StringVar(&opts.credentials.authorizer, "authorizer", "", "authorizer base URL (default $BAO_AUTHORIZER_ADDR)")
 	flags.DurationVar(&opts.credentials.timeout, "timeout", 15*time.Minute, "approval wait timeout")
@@ -126,16 +291,7 @@ func resolveSSHCertOptions(opts sshCertOptions) (sshCertOptions, error) {
 	}
 
 	if opts.role == "" {
-		if opts.destination == "" {
-			return opts, errors.New("a user@host destination or --role is required")
-		}
-
-		role, err := deriveSSHRole(opts.destination)
-		if err != nil {
-			return opts, err
-		}
-
-		opts.role = role
+		return opts, errors.New("a destination or --role is required")
 	}
 
 	if err := validateSSHRole(opts.role); err != nil {
@@ -143,7 +299,7 @@ func resolveSSHCertOptions(opts sshCertOptions) (sshCertOptions, error) {
 	}
 
 	if opts.key == "" {
-		directory, err := sshKeyDirectory()
+		directory, err := requesterKeyDirectory(opts.credentials.identity)
 		if err != nil {
 			return opts, err
 		}
@@ -151,10 +307,7 @@ func resolveSSHCertOptions(opts sshCertOptions) (sshCertOptions, error) {
 		opts.key = filepath.Join(directory, opts.role)
 	}
 
-	opts.credentials.reason = strings.TrimSpace(opts.credentials.reason)
-	if opts.credentials.reason == "" {
-		opts.credentials.reason = strings.TrimSpace(os.Getenv("BAO_SSH_REASON"))
-	}
+	opts.credentials.reason = grantReason(opts.credentials.reason)
 
 	if opts.credentials.reason == "" {
 		target := opts.destination
@@ -168,11 +321,42 @@ func resolveSSHCertOptions(opts sshCertOptions) (sshCertOptions, error) {
 	return opts, nil
 }
 
-// deriveSSHRole names the role <host>-<user> after a user@host destination.
-func deriveSSHRole(destination string) (string, error) {
-	user, host, ok := strings.Cut(destination, "@")
-	if !ok || user == "" || host == "" {
-		return "", fmt.Errorf("destination %q must be user@host, or pass --role", destination)
+// sshRole names the role <host>-<user> after what ssh would connect to,
+// resolving the options and destination in arguments with ssh -G, which
+// applies the ssh config. It also returns user@host for the reason.
+func sshRole(ctx context.Context, arguments []string) (string, string, error) {
+	// #nosec G204 -- the caller's own ssh arguments, only resolved.
+	command := exec.CommandContext(ctx, "ssh", append([]string{"-G"}, arguments...)...)
+	var errorOutput bytes.Buffer
+	command.Stderr = &errorOutput
+	output, err := command.Output()
+	if err != nil {
+		return "", "", fmt.Errorf("resolve the ssh destination with ssh -G: %w: %s", err, strings.TrimSpace(errorOutput.String()))
+	}
+
+	var host, user string
+	for line := range strings.SplitSeq(string(output), "\n") {
+		key, value, _ := strings.Cut(strings.TrimSpace(line), " ")
+		switch key {
+		case "host":
+			host = value
+		case "user":
+			user = value
+		}
+	}
+
+	role, err := sshRoleFor(host, user)
+	if err != nil {
+		return "", "", usageError(err)
+	}
+
+	return role, user + "@" + host, nil
+}
+
+// sshRoleFor is the role <host>-<user>, from the first DNS label of host.
+func sshRoleFor(host, user string) (string, error) {
+	if host == "" || user == "" {
+		return "", errors.New("ssh -G reported no host or user; pass --role")
 	}
 
 	if net.ParseIP(strings.Trim(host, "[]")) != nil {
@@ -180,7 +364,12 @@ func deriveSSHRole(destination string) (string, error) {
 	}
 
 	label, _, _ := strings.Cut(host, ".")
-	return label + "-" + user, nil
+	role := label + "-" + user
+	if err := validateSSHRole(role); err != nil {
+		return "", fmt.Errorf("%w; pass --role", err)
+	}
+
+	return role, nil
 }
 
 func validateSSHRole(role string) error {
@@ -366,116 +555,4 @@ func sshRoles(grantables []grantableOutput, prefix string) []string {
 
 	slices.Sort(roles)
 	return roles
-}
-
-func newSSHConfigCommand() *cobra.Command {
-	var (
-		mount, authorizerURL string
-		aliases              []string
-	)
-
-	command := &cobra.Command{
-		Use:   "config [flags]",
-		Short: "Print ssh config blocks that use bao-cred ssh cert",
-		Long: `Prints one Match block for each SSH role in the catalog that is named
-<host>-<user>: it applies when ssh logs in as <user> to <host> or <host>.*, as
-given on the command line. --alias NAME=ROLE adds a block for an ssh Host alias
-not named after the host. Add the output to ~/.ssh/config; Match blocks apply
-after the Host blocks above them, so put it after those.`,
-		Example: `  bao-cred ssh config >> ~/.ssh/config
-  bao-cred ssh config --alias core-jarvis=jarvis-core`,
-		Args: noPositionalArgs,
-		RunE: func(command *cobra.Command, _ []string) error {
-			return runSSHConfig(command.Context(), strings.Trim(mount, "/"), authorizerURL, identityFlag(command), aliases, command.OutOrStdout())
-		},
-	}
-
-	flags := command.Flags()
-	flags.StringVar(&mount, "mount", "ssh", "path of the OpenBao SSH secrets engine")
-	flags.StringVar(&authorizerURL, "authorizer", "", "authorizer base URL (default $BAO_AUTHORIZER_ADDR)")
-	flags.StringArrayVar(&aliases, "alias", nil, "NAME=ROLE: an ssh Host alias that logs in with ROLE; repeatable")
-	return command
-}
-
-func runSSHConfig(ctx context.Context, mount, authorizerURL, identity string, aliases []string, stdout io.Writer) error {
-	executable, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("locate bao-cred: %w", err)
-	}
-
-	directory, err := sshKeyDirectory()
-	if err != nil {
-		return err
-	}
-
-	client, err := requesterAuthorizerClient(ctx, authorizerURL, identity)
-	if err != nil {
-		return err
-	}
-
-	grantables, err := client.grantables(ctx)
-	if err != nil {
-		return err
-	}
-
-	roles := sshRoles(grantables, mount+"/sign/")
-	var blocks []string
-	for _, alias := range aliases {
-		name, role, ok := strings.Cut(alias, "=")
-		if !ok || name == "" || strings.ContainsAny(name, " \t\",") || validateSSHRole(role) != nil {
-			return usageError(fmt.Errorf("--alias must be NAME=ROLE: %q", alias))
-		}
-
-		blocks = append(blocks, sshConfigBlock(executable, mount, directory, role, "originalhost "+name))
-	}
-
-	for _, role := range roles {
-		host, user, ok := cutLast(role, "-")
-		if !ok {
-			continue
-		}
-
-		blocks = append(blocks, sshConfigBlock(executable, mount, directory, role,
-			fmt.Sprintf("originalhost %s,%s.* user %s", host, host, user)))
-	}
-
-	if len(blocks) == 0 {
-		return errors.New("the catalog lists no SSH roles named <host>-<user>; pass --alias NAME=ROLE")
-	}
-
-	_, err = fmt.Fprintf(stdout, "# OpenBao SSH certificates, from bao-cred ssh config.\n%s", strings.Join(blocks, "\n"))
-	return err
-}
-
-func sshConfigBlock(executable, mount, directory, role, criteria string) string {
-	key := filepath.Join(directory, role)
-	command := fmt.Sprintf("%s ssh cert --mount %s --role %s %%r@%%n", shellQuote(executable), mount, role)
-	return fmt.Sprintf("Match %s exec %q\n  IdentityFile %s\n  CertificateFile %s-cert.pub\n",
-		criteria, command, sshConfigPath(key), sshConfigPath(key))
-}
-
-// sshConfigPath quotes a path for ssh_config when it contains spaces.
-func sshConfigPath(path string) string {
-	if strings.ContainsAny(path, " \t") {
-		return fmt.Sprintf("%q", path)
-	}
-
-	return path
-}
-
-func shellQuote(value string) string {
-	if value != "" && strings.Trim(value, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-") == "" {
-		return value
-	}
-
-	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
-}
-
-func cutLast(value, separator string) (string, string, bool) {
-	index := strings.LastIndex(value, separator)
-	if index <= 0 || index == len(value)-len(separator) {
-		return "", "", false
-	}
-
-	return value[:index], value[index+len(separator):], true
 }

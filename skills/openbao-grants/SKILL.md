@@ -1,6 +1,6 @@
 ---
 name: openbao-grants
-description: Use when a task needs a secret or credential from OpenBao/Vault (API tokens, database passwords, cloud keys, `bao`/`vault` CLI, secretspec `openbao://`), when an OpenBao read or secretspec fails with permission denied, when connecting with ssh/scp/rsync to a node through OpenBao SSH certificates, when signing an SSH key or calling another OpenBao endpoint that takes parameters, or when you must ask a human to grant access with bao-cred.
+description: Use when a task needs a secret or credential from OpenBao/Vault (API tokens, database passwords, cloud keys, `bao`/`vault` CLI, secretspec `openbao://`), when an OpenBao read or secretspec fails with permission denied, when connecting to a node with ssh through OpenBao SSH certificates (bao-cred ssh), when signing an SSH key or calling another OpenBao endpoint that takes parameters, or when you must ask a human to grant access with bao-cred.
 ---
 
 # OpenBao grants
@@ -55,13 +55,15 @@ bao-cred write --reason "Deploy the app to jarvis as the user asked" --field sig
 
 ## SSH to a node
 
-When the user's ssh config uses bao-cred as its credential helper (`bao-cred ssh config` blocks), plain `ssh`, `scp`, `rsync` and `git` get a certificate through the Grant flow. Set the reason the Approver sees:
+Connect with `bao-cred ssh`, which signs an SSH certificate for your session (the role is `<host>-<user>`, as `bao-cred grantable` lists under `ssh/sign/`) and runs ssh with it:
 
 ```sh
-BAO_SSH_REASON="Restart the api stack on jarvis as the user asked" ssh core@jarvis 'systemctl --user restart api'
+bao-cred ssh --reason "Restart the api stack on jarvis as the user asked" core@jarvis 'systemctl --user restart api'
 ```
 
-Without an ssh config block, ask for the certificate yourself: `bao-cred ssh cert --reason "..." core@jarvis` writes a key and certificate to `$XDG_RUNTIME_DIR/bao-cred/ssh/jarvis-core` (the role is `<host>-<user>`), then `ssh -i "$XDG_RUNTIME_DIR/bao-cred/ssh/jarvis-core" core@jarvis`. Wait while ssh pauses for approval; don't retry in parallel.
+- bao-cred flags come before the destination; ssh options go after `--`: `bao-cred ssh -- -L 8080:localhost:80 core@jarvis`.
+- For git and file copies: `GIT_SSH_COMMAND='bao-cred ssh' git push`, `rsync -e 'bao-cred ssh' file core@jarvis:dir/`. Plain `ssh`, `scp` and `sftp` don't get a certificate.
+- The certificate lasts as long as the role says (typically 1h) and is reused; one approval covers the task. Wait while it asks for approval; don't retry in parallel.
 
 ## Request several paths at once
 

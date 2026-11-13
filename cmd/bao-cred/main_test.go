@@ -515,3 +515,41 @@ func exitCode(err error) int {
 
 	return exitFailure
 }
+
+func TestReasonFromTheEnvironment(t *testing.T) {
+	authorizer := newFakeAuthorizer(t)
+	authorizer.created = testRequest(item("item-1", "secret/app", pending))
+	authorizer.watches = []watchScript{{messages: []*authorizerv1.WatchGrantRequestResponse{
+		snapshot(item("item-1", "secret/app", approved)),
+	}}}
+	openBao := fakeOpenBao(t, func() bool { return authorizer.watchCount() > 0 })
+	setupEnvironment(t, authorizer.url, openBao.URL)
+	t.Setenv("BAO_REASON", " deploy the app ")
+
+	// A denied read requests access with BAO_REASON, as with --reason.
+	var stdout bytes.Buffer
+	if err := run([]string{"read", "--quiet", "--field", "token", "secret/app"}, &stdout, &bytes.Buffer{}); err != nil || stdout.String() != "secret-value" {
+		t.Fatalf("read = %q, %v", stdout.String(), err)
+	}
+
+	if got := authorizer.inputs(); len(got) != 1 || got[0].GetReason() != "deploy the app" {
+		t.Fatalf("filed %v", got)
+	}
+
+	// --reason wins, and request accepts the variable instead of the flag.
+	if parsed, err := parseRead(t, "--reason", "from the flag", "secret/app"); err != nil || parsed.reason != "from the flag" {
+		t.Fatalf("--reason: %q, %v", parsed.reason, err)
+	}
+
+	authorizer.created = testRequest(item("item-2", "secret/other", pending))
+	authorizer.watches = []watchScript{{messages: []*authorizerv1.WatchGrantRequestResponse{
+		snapshot(item("item-2", "secret/other", approved)),
+	}}}
+	if err := run([]string{"request", "--quiet", "--item", "secret/other=read"}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := authorizer.inputs(); len(got) != 2 || got[1].GetReason() != "deploy the app" {
+		t.Fatalf("filed %v", got)
+	}
+}

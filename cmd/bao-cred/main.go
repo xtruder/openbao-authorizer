@@ -199,8 +199,8 @@ func newReadCommand(run credentialsFunc) *cobra.Command {
 mapped fields in its environment.
 
 On permission denied, --reason files a Grant Request for PATH=read, waits for
-a decision, and retries the read once. Without --reason the read fails with a
-hint.`,
+a decision, and retries the read once. BAO_REASON stands in for --reason.
+Without either the read fails with a hint.`,
 		Example: `  bao-cred read --field token github/token/project-example
   bao-cred read --reason "open a PR in org/repo" --field token github/token/project-example
   bao-cred read --map GH_TOKEN=token github/token/project-example -- gh repo view org/repo`,
@@ -238,7 +238,8 @@ key=- from stdin.
 
 On permission denied, --reason files a Grant Request for PATH with
 --capabilities (default update), waits for a decision, and retries the write
-once. Without --reason the write fails with a hint.`,
+once. BAO_REASON stands in for --reason. Without either the write fails with
+a hint.`,
 		Example: `  bao-cred write --reason "ssh to jarvis" --field signed_key --output key-cert.pub \
     ssh/sign/jarvis-core public_key=@key.pub
   bao-cred write --reason "rotate the webhook secret" --capabilities create,update \
@@ -278,7 +279,7 @@ func addCredentialFlags(flags *pflag.FlagSet, opts *options, rawMappings *[]stri
 		"NAME=path mapping for dotenv, shell, or command execution; repeatable")
 	flags.StringVar(&opts.output, "output", "", "atomically overwrite this file with mode 0600 instead of stdout")
 	flags.StringVar(&opts.reason, "reason", "",
-		fmt.Sprintf("on permission denied, request %s access with this reason and retry once", verb))
+		fmt.Sprintf("on permission denied, request %s access with this reason and retry once (default $BAO_REASON)", verb))
 	flags.StringVar(&opts.scope, "scope", "", "with --reason, the suggested scope: session, project, or global")
 	flags.StringVar(&opts.authorizer, "authorizer", "", "authorizer base URL (default $BAO_AUTHORIZER_ADDR)")
 	flags.DurationVar(&opts.timeout, "timeout", 15*time.Minute, "approval wait timeout")
@@ -408,7 +409,7 @@ func parseOptions(opts options, rawMappings, arguments []string, dash int) (opti
 
 	opts.path = arguments[0]
 	opts.fields = arguments[1:dash]
-	opts.reason = strings.TrimSpace(opts.reason)
+	opts.reason = grantReason(opts.reason)
 	if opts.timeout <= 0 {
 		return options{}, usageError(errors.New("timeout must be positive"))
 	}
@@ -428,6 +429,16 @@ func parseOptions(opts options, rawMappings, arguments []string, dash int) (opti
 	}
 
 	return opts, nil
+}
+
+// grantReason is the reason of the Grant Requests a command files: the flag's
+// value, else BAO_REASON, so an agent can set one reason for a whole task.
+func grantReason(flag string) string {
+	if reason := strings.TrimSpace(flag); reason != "" {
+		return reason
+	}
+
+	return strings.TrimSpace(os.Getenv("BAO_REASON"))
 }
 
 func validateOptions(options options) error {
