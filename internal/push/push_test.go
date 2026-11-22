@@ -36,8 +36,10 @@ func TestNotificationIsGenericAndRemovesGoneSubscription(t *testing.T) {
 
 	storage := &fakeStore{subscriptions: []store.Subscription{{EntityID: "entity-1", Endpoint: "https://push.example/sub", P256DH: "key", Auth: "auth"}}}
 	var payload string
-	sender := func(_ context.Context, message []byte, _ *webpush.Subscription, _ *webpush.Options) (*http.Response, error) {
+	var urgency webpush.Urgency
+	sender := func(_ context.Context, message []byte, _ *webpush.Subscription, options *webpush.Options) (*http.Response, error) {
 		payload = string(message)
+		urgency = options.Urgency
 		return &http.Response{StatusCode: http.StatusGone, Body: io.NopCloser(strings.NewReader(""))}, nil
 	}
 	service, err := New(storage, Config{
@@ -58,6 +60,10 @@ func TestNotificationIsGenericAndRemovesGoneSubscription(t *testing.T) {
 
 	if !strings.Contains(payload, `"url":"/?request=opaque-request-id"`) {
 		t.Fatalf("push payload URL = %s", payload)
+	}
+
+	if urgency != webpush.UrgencyHigh {
+		t.Fatalf("push urgency = %q", urgency)
 	}
 
 	if len(storage.deleted) != 1 || storage.deleted[0] != "https://push.example/sub" {

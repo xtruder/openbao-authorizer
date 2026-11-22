@@ -245,6 +245,9 @@ func (s *Service) NewRequest(ctx context.Context, id string) error {
 			VAPIDPublicKey:  s.config.PublicKey,
 			VAPIDPrivateKey: s.config.PrivateKey,
 			TTL:             300,
+			// Normal urgency lets push services hold the message while an idle
+			// Android device dozes, past the TTL, so it never shows.
+			Urgency: webpush.UrgencyHigh,
 		})
 		if sendErr != nil {
 			sendErrors = append(sendErrors, fmt.Errorf("send push: %w", sendErr))
